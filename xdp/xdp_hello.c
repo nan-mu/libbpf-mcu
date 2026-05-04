@@ -1,5 +1,5 @@
-// 定义段属性，告诉编译器把这个函数放在专门的 section 里
-#define SEC(NAME) __attribute__((section(NAME), used))
+#include <bpf_helpers.h>
+#include <bpf_endian.h>
 
 // 核心约定：定义我们的 Helper 函数！
 // 假设我们在刚才的跳转表里，把 bpf_helper_log 安排在索引 1 的位置 (ID = 1)
