@@ -1,0 +1,279 @@
+[config]
+default_to_workspace = false
+skip_core_tasks = true
+
+[env]
+# 默认使用homebrew clang，可通过环境变量覆盖
+CLANG = { value = "/opt/homebrew/opt/llvm/bin/clang", condition = { env_not_set = ["CLANG"] } }
+# 编译目标
+TARGET = "riscv32-unknown-none-elf"
+ARCH = "rv32imc"
+ABI = "ilp32"
+# 目录配置
+XDP_EXAMPLES_DIR = "xdp"
+INCLUDE_DIR = "inclued"
+OUTPUT_DIR = "target"
+# 编译选项
+CFLAGS = "-nostdlib -ffreestanding -O2 -fno-builtin -ffunction-sections -fdata-sections -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables"
+
+[tasks.default]
+alias = "help"
+
+[tasks.help]
+script = '''
+echo "Available tasks:"
+echo "  cargo make build          - 编译所有 XDP 示例到 RV32IMC"
+echo "  cargo make tests          - 完整测试（语法检查 + 编译）"
+echo "  cargo make clean          - 清理编译产物"
+echo ""
+echo "环境变量:"
+echo "  CLANG=/path/to/llvm/bin/clang  - 指定支持 RISC-V 的 clang"
+'''
+
+[tasks.build]
+script = '''
+#!/bin/bash
+set -e
+
+echo "=========================================="
+echo "阶段 2: 编译到 RV32IMC (ESP32-C3)"
+echo "=========================================="
+echo "目标: ${TARGET}"
+echo "架构: ${ARCH}"
+echo "ABI:  ${ABI}"
+echo "编译器: ${CLANG}"
+echo ""
+
+# 检查 clang 是否支持 RISC-V
+if ! ${CLANG} --version | grep -q "clang"; then
+    echo "错误: ${CLANG} 不是有效的 clang 编译器"
+    exit 1
+fi
+
+FAILED=0
+TOTAL=0
+SUCCESS=0
+
+for c_file in ${XDP_EXAMPLES_DIR}/*.c; do
+    if [ -f "$c_file" ]; then
+        TOTAL=$((TOTAL + 1))
+        filename=$(basename "$c_file" .c)
+        
+        # 跳过头文件
+        if [[ "$filename" == *"_def"* ]] || [[ "$filename" == "common" ]]; then
+            echo "跳过: $filename (头文件)"
+            echo ""
+            continue
+        fi
+        
+        output_dir="${OUTPUT_DIR}/${filename}"
+        output_file="${output_dir}/${filename}.o"
+        
+        echo "编译: ${filename}.c"
+        echo "  → ${output_file}"
+        
+        # 创建输出目录
+        mkdir -p "$output_dir"
+        
+        # 编译到 RV32IMC
+        if ${CLANG} \
+            -target ${TARGET} \
+            -march=${ARCH} \
+            -mabi=${ABI} \
+            -I ${INCLUDE_DIR} \
+            -I ${INCLUDE_DIR}/bpf \
+            -include ${INCLUDE_DIR}/core.h \
+            ${CFLAGS} \
+            -c "$c_file" \
+            -o "$output_file" 2>&1; then
+            
+            # 显示目标文件信息
+            if command -v file &> /dev/null; then
+                file "$output_file" | sed 's/^/  /'
+            fi
+            
+            if command -v size &> /dev/null; then
+                size "$output_file" | sed 's/^/  /'
+            fi
+            
+            echo "  ✓ 编译成功"
+            SUCCESS=$((SUCCESS + 1))
+        else
+            echo "  ✗ 编译失败"
+            FAILED=$((FAILED + 1))
+        fi
+        echo ""
+    fi
+done
+
+echo "=========================================="
+echo "编译完成: ${SUCCESS}/$((TOTAL)) 成功"
+echo "=========================================="
+
+if [ $FAILED -gt 0 ]; then
+    echo "警告: $FAILED 个文件编译失败"
+    exit 1
+fi
+
+if [ $SUCCESS -eq 0 ]; then
+    echo "错误: 没有成功编译任何文件"
+    echo ""
+    echo "提示: 如果 clang 不支持 RISC-V 后端，请安装 LLVM 并设置:"
+    echo "  CLANG=/path/to/llvm/bin/clang cargo make build"
+    exit 1
+fi
+'''
+
+[tasks.tests]
+script = '''
+#!/bin/bash
+set -e
+
+echo "=========================================="
+echo "阶段 1: 语法检查"
+echo "=========================================="
+echo "使用宿主机 clang 进行语法检查..."
+echo ""
+
+FAILED=0
+TOTAL=0
+
+for c_file in ${XDP_EXAMPLES_DIR}/*.c; do
+    if [ -f "$c_file" ]; then
+        TOTAL=$((TOTAL + 1))
+        filename=$(basename "$c_file")
+        echo "检查: $filename"
+        
+        if ${CLANG} -fsyntax-only \
+            -I ${INCLUDE_DIR} \
+            -I ${INCLUDE_DIR}/bpf \
+            -include ${INCLUDE_DIR}/core.h \
+            -Wno-unused-value \
+            -Wno-pointer-sign \
+            -Wno-compare-distinct-pointer-types \
+            "$c_file" 2>&1; then
+            echo "  ✓ 语法检查通过"
+        else
+            echo "  ✗ 语法检查失败"
+            FAILED=$((FAILED + 1))
+        fi
+        echo ""
+    fi
+done
+
+echo "=========================================="
+echo "语法检查完成: $((TOTAL - FAILED))/$TOTAL 通过"
+echo "=========================================="
+
+if [ $FAILED -gt 0 ]; then
+    exit 1
+fi
+
+echo ""
+echo "=========================================="
+echo "阶段 2: 编译到 RV32IMC (ESP32-C3)"
+echo "=========================================="
+echo "目标: ${TARGET}"
+echo "架构: ${ARCH}"
+echo "ABI:  ${ABI}"
+echo "编译器: ${CLANG}"
+echo ""
+
+# 检查 clang 是否支持 RISC-V
+if ! ${CLANG} --version | grep -q "clang"; then
+    echo "错误: ${CLANG} 不是有效的 clang 编译器"
+    exit 1
+fi
+
+FAILED=0
+TOTAL=0
+SUCCESS=0
+
+for c_file in ${XDP_EXAMPLES_DIR}/*.c; do
+    if [ -f "$c_file" ]; then
+        TOTAL=$((TOTAL + 1))
+        filename=$(basename "$c_file" .c)
+        
+        # 跳过头文件
+        if [[ "$filename" == *"_def"* ]] || [[ "$filename" == "common" ]]; then
+            echo "跳过: $filename (头文件)"
+            echo ""
+            continue
+        fi
+        
+        output_dir="${OUTPUT_DIR}/${filename}"
+        output_file="${output_dir}/${filename}.o"
+        
+        echo "编译: ${filename}.c"
+        echo "  → ${output_file}"
+        
+        # 创建输出目录
+        mkdir -p "$output_dir"
+        
+        # 编译到 RV32IMC
+        if ${CLANG} \
+            -target ${TARGET} \
+            -march=${ARCH} \
+            -mabi=${ABI} \
+            -I ${INCLUDE_DIR} \
+            -I ${INCLUDE_DIR}/bpf \
+            -include ${INCLUDE_DIR}/core.h \
+            ${CFLAGS} \
+            -c "$c_file" \
+            -o "$output_file" 2>&1; then
+            
+            # 显示目标文件信息
+            if command -v file &> /dev/null; then
+                file "$output_file" | sed 's/^/  /'
+            fi
+            
+            if command -v size &> /dev/null; then
+                size "$output_file" | sed 's/^/  /'
+            fi
+            
+            echo "  ✓ 编译成功"
+            SUCCESS=$((SUCCESS + 1))
+        else
+            echo "  ✗ 编译失败"
+            FAILED=$((FAILED + 1))
+        fi
+        echo ""
+    fi
+done
+
+echo "=========================================="
+echo "编译完成: ${SUCCESS}/$((TOTAL)) 成功"
+echo "=========================================="
+
+if [ $FAILED -gt 0 ]; then
+    echo "警告: $FAILED 个文件编译失败"
+    exit 1
+fi
+
+if [ $SUCCESS -eq 0 ]; then
+    echo "错误: 没有成功编译任何文件"
+    echo ""
+    echo "提示: 如果 clang 不支持 RISC-V 后端，请安装 LLVM 并设置:"
+    echo "  CLANG=/path/to/llvm/bin/clang cargo make tests"
+    exit 1
+fi
+
+echo ""
+echo "=========================================="
+echo "✓ 所有测试通过"
+echo "=========================================="
+echo ""
+echo "编译产物位于: ${OUTPUT_DIR}/"
+echo ""
+echo "下一步:"
+echo "  - 使用 readelf/objdump 检查符号和重定位信息"
+echo "  - 开发 Rust patcher 工具进行地址重写"
+echo "  - 将 patch 对象加载到 ESP32-C3 固件"
+'''
+
+[tasks.clean]
+script = '''
+echo "清理编译产物..."
+rm -rf ${OUTPUT_DIR}
+echo "✓ 已删除 ${OUTPUT_DIR}/"
+'''
