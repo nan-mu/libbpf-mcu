@@ -1,6 +1,6 @@
-# xdp4rv32
+# xdp4
 
-`xdp4rv32` 的目标是提供一个 C 语言兼容层/库，使 LLVM 可以把一部分常见的 XDP C 程序编译成适合热加载到 RV32 单片机固件中的 patch 对象。
+`xdp4` 的目标是提供一个 C 语言兼容层/库，使 LLVM 可以把一部分常见的 XDP C 程序编译成适合热加载到 RV32 单片机固件中的 patch 对象。
 
 这些 patch 对象的重点不是直接在 Linux/BPF 语义下运行，而是要尽量保留 `ctx`、map、helper 调用点和重定位信息，供后续 Rust patcher 把它们重写成单片机固件中的真实地址布局。
 
