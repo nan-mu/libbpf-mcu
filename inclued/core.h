@@ -189,8 +189,21 @@ static __always_inline __u32 bpf_ntohl(__u32 value)
 #endif
 }
 
-extern void *bpf_map_lookup_elem(const void *map, const void *key);
-extern int bpf_redirect_map(const void *map, __u32 key, __u64 flags);
-extern int bpf_redirect(__u32 ifindex, __u64 flags);
-extern int bpf_l4_csum_replace(struct xdp_md *ctx, __u64 offset,
-                               __u64 from, __u64 to, __u64 flags);
+// extern void *bpf_map_lookup_elem(const void *map, const void *key);
+// extern int bpf_redirect_map(const void *map, __u32 key, __u64 flags);
+// extern int bpf_redirect(__u32 ifindex, __u64 flags);
+// extern int bpf_l4_csum_replace(struct xdp_md *ctx, __u64 offset,
+//                                __u64 from, __u64 to, __u64 flags);
+
+                               /* 手动定义符合 RV32 架构的类型 */
+typedef unsigned char      uint8_t;
+typedef unsigned short     uint16_t;
+typedef unsigned int       uint32_t;
+typedef unsigned long long uint64_t;
+
+typedef signed char        int8_t;
+typedef signed short       int16_t;
+typedef signed int         int32_t;
+
+/* 既然你要做 syscall 转发，定义 void* 也很常用 */
+typedef void*              c_void;
