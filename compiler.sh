@@ -19,6 +19,7 @@ $CLANG --target=riscv32 -march=rv32imc -O2 \
       -I inclued \
       -I inclued/bpf \
       -I inclued/linux \
+      -O2 \
       -nostdlib -ffreestanding -fno-builtin \
       -c $INPUT_FILE -o $TARGET/payload.o
 
@@ -52,7 +53,7 @@ if [ -z "$RISCV_LD" ]; then
     exit 1
 fi
 
-$RISCV_LD -T esp32c3.ld $TARGET/payload.o -o $TARGET/payload.elf
+$RISCV_LD -T esp32c3.ld --no-warn-rwx-segments $TARGET/payload.o -o $TARGET/payload.elf
 
 # 2. 从 ELF 中提取出纯净的裸二进制数据 (.text + .rodata + .data)
 echo "[4/5] payload.elf -> payload.bin..."

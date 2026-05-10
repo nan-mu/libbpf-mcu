@@ -1,6 +1,6 @@
 /* payload.ld - ESP32-C3 AOT 热加载专属链接器脚本 */
 
-syscall_dispatcher = 0x403A0000;
+helper_dispatcher = 0x403A0000;
 
 /* 
  * 【警告】这里的 ORIGIN 必须与你 ESP-IDF 主固件中分配的 aot_payload_buffer 地址严格一致！
@@ -8,6 +8,7 @@ syscall_dispatcher = 0x403A0000;
  */
 MEMORY
 {
+    /* 统一的热加载区域 */
     HOT_REGION (rwx) : ORIGIN = 0x403A1000, LENGTH = 4K - 512
 }
 
@@ -31,6 +32,7 @@ SECTIONS
         *(.rodata.*)
         *(.srodata)
         *(.srodata.*)
+        *(license)  /* license 字符串也是只读的 */
     } > HOT_REGION
 
     /* 4. 已初始化数据段 (.data) - 带有初始值的全局/静态变量 */
