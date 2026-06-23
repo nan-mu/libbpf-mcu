@@ -38,6 +38,16 @@ alwaysApply: true
 - bounds checks 在 packet parsing 中很重要，因为它们支撑从 verifier 继承安全约束的论证。
 - 构建系统可能从 fish 脚本/clang wrapper 演进到 cargo-make、ninja 或纯 Rust 构建脚本。
 
+## Commit Message Workflow
+
+- 当用户说“写commit”或要求生成 commit message 时，不要读取工作区文件内容。
+- 不要使用 git 读取暂存区、diff、status 或 staged changes。
+- 不要自行执行 `git commit`，也不要自动提交；只生成 commit message 或提交建议，除非用户明确要求执行具体 git 命令。
+- commit message 标题必须以 icon 开头。
+- commit message 主体优先使用英文；如包含正文说明，应附上一句简短中文说明。
+- 唯一参考来源是：过往 commit message 的样式，以及当前对话上下文中用户已经明确提供的信息。
+- 如果当前对话上下文不足以判断变更内容，应直接说明信息不足，并让用户补充变更摘要。
+
 ## docs 话题记录工作流
 
 - 当用户说“现在记录一个话题，xxxxx”时，不写文件，先客观讨论事实准确性、同类工作、上位替代、创新点、逻辑漏洞和边界条件。
