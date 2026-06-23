@@ -1,8 +1,10 @@
-# xdp4
+# libbpf-mcu
 
-`xdp4` 的目标是提供一个 C 语言兼容层/库，使 LLVM 可以把一部分常见的 XDP C 程序编译成适合热加载到 ESP32-C3 (RV32IMC) 固件中的 patch 对象。
+`libbpf-mcu` 是一个面向 MCU 编译目标的 freestanding C 兼容层/中间层。它的目标不是把用户态 `libbpf` 或 Linux XDP runtime 移植到 MCU，而是让使用 libbpf 风格头文件、helper 名称、map/section 宏和 XDP return code 的 BPF/XDP C 程序，可以被 LLVM 编译为适合 MCU 固件 AOT/热加载执行的 native patch 对象。
 
-这些 patch 对象的重点不是直接在 Linux/BPF 语义下运行，而是要尽量保留 `ctx`、map、helper 调用点和重定位信息，供后续 Rust patcher 把它们重写成单片机固件中的真实地址布局。
+第一阶段 concrete target 是 ESP32-C3/RV32IMC；该目录应被理解为 architecture-agnostic 双目标编译路线中的 C 侧兼容层，而不是 ESP32-C3-only 或 RISC-V-only 组件。
+
+这些 patch 对象的重点不是直接在完整 Linux/BPF 语义下运行。当前加载/链接方向是通过 linker script 将 helper call、map region、HOT_REGION 等绑定到固件 memory map 中的绝对地址，并生成 stripped/minimal binary 或 memory image，避免在固件端保留完整符号表、relocation sections 或实现复杂 ELF parser。
 
 ## 目标平台
 
@@ -14,17 +16,17 @@
 
 ## 设计目标
 
-- 为常见 XDP 程序提供最小可编译的 C 侧接口
+- 为 libbpf 风格 BPF/XDP C 程序提供最小可编译的 C 侧接口
 - 将 Linux/XDP 语义中与目标 MCU 无关的部分抽象出来
 - 把示例编译成适合热加载的 RV32 patch 对象，而不是把 helper 逻辑提前内联折叠掉
-- 保留 helper 调用点、map 符号和必要 relocation，供后续 patcher 重写到固件函数/数据地址
+- 通过 linker script 把 helper、map region 和 hot-load region 绑定到固件定义的绝对地址，减少 MCU 侧元数据和解析逻辑
 - 尽量兼容现有 XDP 代码习惯，使现有 XDP 程序可以保持原有 include、helper 名称和 map/section 宏写法
-- 为 LLVM 到 RV32IMC 的编译流程预留稳定的头文件和源文件组织方式
+- 为 LLVM 到 MCU native target 的编译流程预留稳定的头文件和源文件组织方式
 
 ## 目录结构
 
 ```
-xdp4/
+libbpf-mcu/
 ├── inclued/              # 兼容层头文件
 │   ├── linux/           # Linux 内核头文件兼容
 │   │   ├── bpf.h

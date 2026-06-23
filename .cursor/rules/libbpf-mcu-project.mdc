@@ -1,0 +1,46 @@
+---
+description: BS libbpf-mcu 子项目的 libbpf 风格 C 兼容层与 MCU AOT 编译规则
+alwaysApply: true
+---
+
+# BS libbpf-mcu Context
+
+当前工作区是 BS 项目的 `libbpf-mcu/` 子目录。它提供面向 MCU 编译目标的 freestanding C 兼容层/中间层，使 LLVM 可以把一部分 libbpf 风格的 BPF/XDP C 程序编译为适合 MCU 固件热加载的 patch object。第一阶段目标是 ESP32-C3/RV32IMC，但项目研究目标是 architecture-agnostic，后续大概率加入 ARM Cortex-M 等非 RISC-V MCU。
+
+## 当前具体事实
+
+- 当前硬件：ESP32-C3，RISC-V 32 位单核芯片。
+- 当前 ISA：RV32IMC。
+- 当前 ABI：`ilp32`。
+- 当前内存约束：400KB SRAM。
+- 无 FPU。
+- `inclued/` 是现有兼容层头文件目录，保持该拼写，除非用户明确要求迁移。
+- `xdp/` 示例覆盖 packet parsing、XDP action、map、helper、简单统计和包改写。
+
+## 接口生态对齐
+
+- C 兼容层尽可能对齐 libbpf 接口习惯：helper 名称、map/section 宏、XDP return code、Linux/BPF 风格头文件。
+- libbpf 对齐只是接口生态对齐，不代表 MCU 上存在 Linux kernel runtime。
+- 未来 Rust 固件侧接口可考虑 aya-rs 概念，但不能说已实现。
+
+## 加载与链接模型
+
+- 旧模型“保留 external symbols/relocation，由 Rust patcher 或固件端解析 ELF 并重写地址”已废除。
+- 当前方向是 linker script absolute-address linking，以极限压缩 MCU 侧体积并避免复杂 ELF parser。
+- helper call、map region、HOT_REGION 等应通过 linker script 静态硬编码地址；具体地址必须来自实际 linker script 或 memory map。
+- 固件端直接强转函数指针跳转到 HOT_REGION 头部或 `.xdp` 段入口。
+- host-side 仍可检查 sections、symbols、relocations、disassembly，但最终 MCU load path 不应依赖这些元数据。
+
+## 编译规则
+
+- 当前 RV32IMC 阶段使用 freestanding/bare-metal 编译：`-target riscv32-unknown-none-elf`、`-march=rv32imc`、`-mabi=ilp32`、`-nostdlib`、`-ffreestanding`。
+- 避免 libc、OS、动态分配、线程、本机网络 API 或 Linux runtime 依赖。
+- bounds checks 在 packet parsing 中很重要，因为它们支撑从 verifier 继承安全约束的论证。
+- 构建系统可能从 fish 脚本/clang wrapper 演进到 cargo-make、ninja 或纯 Rust 构建脚本。
+
+## docs 话题记录工作流
+
+- 当用户说“现在记录一个话题，xxxxx”时，不写文件，先客观讨论事实准确性、同类工作、上位替代、创新点、逻辑漏洞和边界条件。
+- 只有用户说“开始写入吧”时，才在顶层 `docs/` 创建新 Markdown 文件。
+- 不阅读 `docs/` 全目录，只检查目标文件名是否重名。
+- 写作采用研究札记/小论文风格，少用 Markdown 结构，不阿谀奉承，不写无关内容。
