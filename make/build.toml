@@ -1,0 +1,159 @@
+[config]
+default_to_workspace = false
+
+# ---------------------------------------------------------------------------
+# Toolchain defaults (override via env or CLI: -e CLANG=clang-18)
+# ---------------------------------------------------------------------------
+[env]
+CLANG = "clang"
+RISCV32_LD = "riscv32-unknown-elf-ld"
+NINJA_BPF_TEMPLATE = "${CARGO_MAKE_WORKING_DIRECTORY}/ninja/bpf.ninja"
+NINJA_ESP32C3_TEMPLATE = "${CARGO_MAKE_WORKING_DIRECTORY}/ninja/esp32c3.ninja"
+TESTS_DIR = "${CARGO_MAKE_WORKING_DIRECTORY}/../tests"
+BUILD_ROOT = "${CARGO_MAKE_WORKING_DIRECTORY}/../../build"
+INCLUDE_FLAGS = "-I${CARGO_MAKE_WORKING_DIRECTORY}/../inclued -I${CARGO_MAKE_WORKING_DIRECTORY}/../include"
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+# Render a ninja template for one source file and invoke ninja.
+# Placeholders substituted: @CLANG@, @RISCV32-ESP-ELF-LD@, @INCLUDE@, @IN@, @OUT@
+# Args (passed via env, set by callers):
+#   _SRC   absolute path to .c file
+#   _TMPL  path to ninja template
+#   _OUTDIR absolute path to per-file build dir
+[tasks.internal-ninja-run]
+private = true
+script_runner = "@duckscript"
+script = '''
+src = get_env _SRC
+tmpl = get_env _TMPL
+outdir = get_env _OUTDIR
+clang = get_env CLANG
+ld = get_env RISCV32_LD
+include = get_env INCLUDE_FLAGS
+
+mkdir ${outdir}
+
+ninja_file = concat ${outdir} "/build.ninja"
+tpl_content = readfile ${tmpl}
+
+stem = basename ${src}
+out = concat ${outdir} "/" ${stem} ".o"
+
+s1 = replace ${tpl_content} "@CLANG@" "${clang}"
+s2 = replace ${s1} "@RISCV32-ESP-ELF-LD@" "${ld}"
+s3 = replace ${s2} "@INCLUDE@" "${include}"
+s4 = replace ${s3} "@IN@" "${src}"
+s5 = replace ${s4} "@OUT@" "${out}"
+
+writefile ${ninja_file} ${s5}
+
+exec ninja -f ${ninja_file} -C ${outdir}
+'''
+
+# ---------------------------------------------------------------------------
+# Public: compile a single file as BPF
+#   makers build-bpf --env FILE=path/to/foo.c
+# ---------------------------------------------------------------------------
+[tasks.build-bpf]
+script_runner = "@duckscript"
+script = '''
+src = get_env FILE
+stem = basename ${src}
+h = digest ${src}
+short = substring ${h} 0 8
+build_root = get_env BUILD_ROOT
+outdir = concat ${build_root} "/bpf-" ${stem} "-" ${short}
+tmpl = get_env NINJA_BPF_TEMPLATE
+
+set_env _SRC ${src}
+set_env _TMPL ${tmpl}
+set_env _OUTDIR ${outdir}
+
+cm_run_task internal-ninja-run
+'''
+
+# ---------------------------------------------------------------------------
+# Public: compile a single file as ESP32-C3 MCU
+#   makers build-esp32c3 --env FILE=path/to/foo.c
+# ---------------------------------------------------------------------------
+[tasks.build-esp32c3]
+script_runner = "@duckscript"
+script = '''
+src = get_env FILE
+stem = basename ${src}
+h = digest ${src}
+short = substring ${h} 0 8
+build_root = get_env BUILD_ROOT
+outdir = concat ${build_root} "/esp32c3-" ${stem} "-" ${short}
+tmpl = get_env NINJA_ESP32C3_TEMPLATE
+
+set_env _SRC ${src}
+set_env _TMPL ${tmpl}
+set_env _OUTDIR ${outdir}
+
+cm_run_task internal-ninja-run
+'''
+
+# ---------------------------------------------------------------------------
+# Public: compile ALL files under tests/ as BPF
+#   makers test-bpf
+# ---------------------------------------------------------------------------
+[tasks.test-bpf]
+script_runner = "@duckscript"
+script = '''
+tests_dir = get_env TESTS_DIR
+build_root = get_env BUILD_ROOT
+tmpl = get_env NINJA_BPF_TEMPLATE
+
+files = glob_array ${tests_dir}/**/*.c
+
+for src in ${files}
+    stem = basename ${src}
+    h = digest ${src}
+    short = substring ${h} 0 8
+    outdir = concat ${build_root} "/bpf-" ${stem} "-" ${short}
+
+    set_env _SRC ${src}
+    set_env _TMPL ${tmpl}
+    set_env _OUTDIR ${outdir}
+
+    cm_run_task internal-ninja-run
+end
+'''
+
+# ---------------------------------------------------------------------------
+# Public: compile ALL files under tests/ as ESP32-C3 MCU
+#   makers test-esp32c3
+# ---------------------------------------------------------------------------
+[tasks.test-esp32c3]
+script_runner = "@duckscript"
+script = '''
+tests_dir = get_env TESTS_DIR
+build_root = get_env BUILD_ROOT
+tmpl = get_env NINJA_ESP32C3_TEMPLATE
+
+files = glob_array ${tests_dir}/**/*.c
+
+for src in ${files}
+    stem = basename ${src}
+    h = digest ${src}
+    short = substring ${h} 0 8
+    outdir = concat ${build_root} "/esp32c3-" ${stem} "-" ${short}
+
+    set_env _SRC ${src}
+    set_env _TMPL ${tmpl}
+    set_env _OUTDIR ${outdir}
+
+    cm_run_task internal-ninja-run
+end
+'''
+
+# ---------------------------------------------------------------------------
+# Public: compile ALL tests for both targets
+#   makers test-all
+# ---------------------------------------------------------------------------
+[tasks.test-all]
+dependencies = ["test-bpf", "test-esp32c3"]

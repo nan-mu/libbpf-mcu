@@ -1,0 +1,15 @@
+# Purpose: Compile .c source code for BPF architecture. This file serves as a template, assembled and triggered by make/build.toml to execute Ninja, ensuring correct incremental/repeatable builds. The @...@ entries are placeholders.
+#
+# 目的：编译 .c 源码至 BPF 架构。本文件作为模板由 make/build.toml 组装并触发 Ninja 执行，用以确保正确的增量/重复构建。其中 @...@ 作为模式占位符
+
+cflags = -O2 --target=bpf -Wall -Wno-missing-declarations
+include = @INCLUDE@
+
+rule cc
+    command = @CLANG@ -MD -MF $out.d $cflags $include $in -o $out
+    depfile = $out.d
+    deps = gcc
+
+build @OUT@: cc @IN@
+
+default @OUT@
