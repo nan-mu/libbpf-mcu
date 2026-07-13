@@ -1,10 +1,8 @@
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/in.h>
-#include <linux/ip.h>
-#include <linux/udp.h>
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
+#include "vmlinux.h"
+#define ETH_P_IP 0x0800
+#define IPPROTO_UDP 17
 
 struct rewrite_key {
     __u32 src_ip;
@@ -91,8 +89,17 @@ int rewrite_and_pass(struct xdp_md *ctx)
     if (old_dest == new_dest)
         return XDP_PASS;
 
-    bpf_l4_csum_replace(ctx, (__u64)&udph->check - (__u64)data,
-                        old_dest, new_dest, sizeof(new_dest));
+    /* bpf_l4_csum_replace is skb-only; do incremental update for XDP. */
+    if (udph->check) {
+        __u32 sum = (~(__u32)udph->check & 0xffff) +
+                    (~(__u32)old_dest & 0xffff) +
+                    (__u32)new_dest;
+        sum = (sum & 0xffff) + (sum >> 16);
+        sum = (sum & 0xffff) + (sum >> 16);
+        udph->check = (__sum16)~sum;
+        if (!udph->check)
+            udph->check = 0xffff;
+    }
     udph->dest = new_dest;
 
     return XDP_PASS;

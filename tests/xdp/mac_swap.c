@@ -1,8 +1,11 @@
-#include <bpf_helpers.h>
-#include <bpf_endian.h>
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
+
+#define ETH_ALEN 6
 
 SEC("xdp")
-int xdp_mac_swap_tx(struct xdp_md *ctx) {
+int mac_swap(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
 

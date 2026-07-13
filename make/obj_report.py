@@ -169,8 +169,12 @@ def _asm_block(
     obj: Path,
     sec: dict | None,
     with_content: bool,
+    *,
+    omit_if_empty: bool = False,
 ) -> None:
     size = int(sec["size"]) if sec else 0
+    if omit_if_empty and size == 0:
+        return
     lines.append(f"[{table}]")
     lines.append(f"size = {size}")
     if with_content and sec and size > 0:
@@ -188,7 +192,7 @@ def write_bpf_report(
     with_content: bool,
     btf_toml_lines: list[str],
 ) -> None:
-    """bpf.toml: [xdp] → [text] → [maps.*] → [CORE]."""
+    """bpf.toml: [xdp] → [text?] → [maps.*] → [CORE]."""
     sections = parse_sections(objdump, obj, keep_empty=True)
     xdp = find_section(sections, "xdp")
     text = find_section(sections, "text", ".text")
@@ -199,7 +203,9 @@ def write_bpf_report(
         "",
     ]
     _asm_block(lines, "xdp", objdump, obj, xdp, with_content)
-    _asm_block(lines, "text", objdump, obj, text, with_content)
+    _asm_block(
+        lines, "text", objdump, obj, text, with_content, omit_if_empty=True
+    )
 
     lines.extend(btf_toml_lines)
     out.write_text("\n".join(lines).rstrip() + "\n")

@@ -38,38 +38,31 @@ libbpf-mcu/
 │   │   ├── bpf_helpers.h
 │   │   └── bpf_endian.h
 │   └── core.h           # 核心定义和 ABI
-├── xdp/                 # XDP 示例程序
-│   ├── firewall_ipv4.c
-│   ├── forward_redirect.c
-│   ├── rewrite_and_pass.c
-│   ├── rewrite_and_redirect.c
-│   ├── xdp_drop_icmp.c
-│   ├── xdp_drop_port80.c
-│   ├── xdp_hello.c
-│   └── xdp_mac_swap.c
-└── target/              # 编译输出（每个示例独立目录）
-    ├── firewall_ipv4/
-    │   └── firewall_ipv4.o
-    ├── forward_redirect/
-    │   └── forward_redirect.o
-    └── ...
+├── tests/               # 测试与参考用例（见 tests/README.md）
+│   ├── basic/           # 最小 XDP（printk / 解析）
+│   ├── xdp/             # maps / redirect / 改写等参考实现
+│   └── failed/          # 负例（默认构建跳过）
+└── make/                # Python CLI + ninja 模板
 ```
 
-## XDP 示例
+## XDP / 测试用例
 
-`xdp/` 目录包含多个基础样例，覆盖常见 XDP 写法：
+源码在 `tests/`（不再使用顶层 `xdp/`）。分类约定见 `tests/README.md`。
 
-### 基础示例
-- **`xdp_hello.c`**: 最简单的 XDP 程序，直接返回 `XDP_PASS`
-- **`xdp_drop_icmp.c`**: 丢弃所有 ICMP 包
-- **`xdp_drop_port80.c`**: 丢弃目标端口为 80 的 TCP 包
-- **`xdp_mac_swap.c`**: 交换以太网帧的源和目标 MAC 地址
+### basic/
+- **`print_ctx.c`**: 打印 XDP 上下文长度后 `XDP_PASS`
+- **`print_udp.c`**: 解析 UDP 并 `bpf_printk`
 
-### 高级示例
-- **`firewall_ipv4.c`**: 基于 `HASH map` 的简单防火墙，按 `src_ip + dst_port` 决定 `XDP_DROP` 或 `XDP_PASS`
-- **`forward_redirect.c`**: 基于 `DEVMAP` 的简单转发，使用 `bpf_redirect_map`
-- **`rewrite_and_pass.c`**: 根据规则表重写 UDP 目标端口后 `XDP_PASS`
-- **`rewrite_and_redirect.c`**: 改写二层 MAC 地址后 `redirect`
+### xdp/
+- **`drop_icmp.c`**: 丢弃 ICMP
+- **`mac_swap.c`**: 交换以太网源/目的 MAC 后 `XDP_TX`
+- **`firewall_ipv4.c`**: `HASH` 按 `src_ip + dst_port` 决定 `DROP`/`PASS`
+- **`forward_redirect.c`**: `DEVMAP` + `bpf_redirect_map`
+- **`rewrite_and_pass.c`**: 按规则重写 UDP 目的端口后 `PASS`
+- **`rewrite_and_redirect.c`**: 改写二层 MAC 后 `bpf_redirect`
+
+### failed/
+- **`print_ctx_bad.c`**: 负例（默认构建排除）
 
 ### 覆盖能力
 
@@ -77,8 +70,8 @@ libbpf-mcu/
 
 - **包解析**: 以太网头、IPv4 头、UDP 头、TCP 头、ICMP 头的边界检查与访问
 - **map 访问**: `BPF_MAP_TYPE_HASH`、`BPF_MAP_TYPE_ARRAY`、`BPF_MAP_TYPE_DEVMAP`
-- **helper 调用**: `bpf_map_lookup_elem`、`bpf_redirect_map`、`bpf_ntohs`、`bpf_csum_diff`
-- **常见动作**: `XDP_PASS`、`XDP_DROP`、`XDP_ABORTED`、redirect
+- **helper 调用**: `bpf_map_lookup_elem`、`bpf_redirect_map`、`bpf_ntohs`、增量 checksum
+- **常见动作**: `XDP_PASS`、`XDP_DROP`、`XDP_TX`、redirect
 - **数据改写**: UDP 目标端口重写、二层 MAC 地址改写
 - **简单统计**: 通过数组 map 做计数
 

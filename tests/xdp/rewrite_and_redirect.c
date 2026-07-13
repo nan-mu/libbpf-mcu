@@ -1,7 +1,7 @@
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
+#include "vmlinux.h"
+#define ETH_ALEN 6
 
 struct mac_rule {
     __u8 dst[ETH_ALEN];

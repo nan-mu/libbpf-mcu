@@ -1,8 +1,12 @@
-#include <bpf_helpers.h>
-#include <bpf_endian.h>
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
+
+#define ETH_P_IP 0x0800
+#define IPPROTO_ICMP 1
 
 SEC("xdp")
-int xdp_drop_icmp(struct xdp_md *ctx) {
+int drop_icmp(struct xdp_md *ctx) {
     // 获取数据包的起始和结束指针
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;

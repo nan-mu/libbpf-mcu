@@ -1,13 +1,13 @@
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
-#include <linux/udp.h>
-#include <linux/in.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/string.h>
+#include "vmlinux.h"
+
+#define ETH_P_IP 0x0800
+#define __constant_ntohs(x) __builtin_bswap16(x)
+#define __constant_htons(x) __builtin_bswap16(x)
 
 SEC("xdp")
-int xdp_print_udp_func(struct xdp_md *ctx) {
+int print_udp(struct xdp_md *ctx) {
     // 必须在任何函数调用前提取 ctx 的值
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
