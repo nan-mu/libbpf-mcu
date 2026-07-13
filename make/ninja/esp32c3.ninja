@@ -4,16 +4,16 @@
 
 cflags = -O2 --target=riscv32-unknown-none-elf -march=rv32imc -mabi=ilp32 -nostdlib -ffreestanding -fno-builtin -fno-exceptions -fno-rtti -fno-jump-tables -fno-tree-switch-conversion -fstrict-volatile-bitfields -fno-omit-frame-pointer -Wall -Wno-unused-function
 
-include = @INCLUDE@
+includes = -I @ROOT@/inclued -I @ROOT@/inclued/linux -I @ROOT@/inclued/bpf
 
 rule cc
-    command = @CLANG@ -MD -MF $out.d $cflags $include $in -o $out
-    depfile = $out.d
-    deps = gcc
+    command = @CLANG@ -c -MD -MF $depfile $cflags $includes $in -o $out
+    depfile = $depfile
 
 rule ld
     command = @RISCV32-ESP-ELF-LD@
 
 build @OUT@: cc @IN@
+  depfile = @DEPFILE@
 
 default @OUT@
