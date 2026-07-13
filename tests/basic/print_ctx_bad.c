@@ -1,4 +1,5 @@
 #include <bpf/bpf_helpers.h>
+#include "vmlinux.h"
 
 SEC("xdp")
 int print_ctx(struct xdp_md *ctx) {

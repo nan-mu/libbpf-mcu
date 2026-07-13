@@ -11,7 +11,11 @@ from pathlib import Path
 SECTION_LINE = re.compile(
     r"^\s*(\d+)\s+(\S+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s*(.*?)\s*$"
 )
-HEX_CHUNK = re.compile(r"^\s*[0-9a-fA-F]+\s+((?:[0-9a-fA-F]{2,8}\s*)+)")
+# llvm-objdump -s: addr + ≤4 groups of 2–8 even hex digits, then ASCII.
+# Even-length only so the ASCII column (e.g. "addr...") is not consumed.
+HEX_CHUNK = re.compile(
+    r"^\s*[0-9a-fA-F]+\s+((?:[0-9a-fA-F]{2}){1,4}(?:\s+(?:[0-9a-fA-F]{2}){1,4}){0,3})"
+)
 
 
 def run_objdump(objdump: str, args: list[str]) -> str:
@@ -24,7 +28,15 @@ def run_objdump(objdump: str, args: list[str]) -> str:
     return result.stdout
 
 
-def parse_sections(objdump: str, obj: Path) -> list[dict]:
+def skip_section(name: str) -> bool:
+    return name.startswith((".debug_", ".rel.debug_"))
+
+
+def section_key(name: str) -> str:
+    return name.lstrip(".")
+
+
+def parse_sections(objdump: str, obj: Path, *, keep_empty: bool = False) -> list[dict]:
     text = run_objdump(objdump, ["-h", str(obj)])
     sections = []
     for line in text.splitlines():
@@ -35,21 +47,27 @@ def parse_sections(objdump: str, obj: Path) -> list[dict]:
         size = int(match.group(3), 16)
         vma = int(match.group(4), 16)
         typ = match.group(5).strip()
-        if size == 0:
+        if skip_section(name):
+            continue
+        if size == 0 and not keep_empty:
             continue
         sections.append({"name": name, "size": size, "vma": vma, "type": typ})
     return sections
 
 
-def section_key(name: str) -> str:
-    return name.lstrip(".")
+def find_section(sections: list[dict], *names: str) -> dict | None:
+    want = set(names)
+    for sec in sections:
+        if sec["name"] in want or section_key(sec["name"]) in want:
+            return sec
+    return None
 
 
 def content_kind(name: str) -> str:
     key = section_key(name)
     if key == "strtab":
         return "ascii"
-    if key == "xdp" or key.startswith("xdp/"):
+    if key == "xdp" or key.startswith("xdp/") or key == "text":
         return "disasm"
     return "hex"
 
@@ -85,7 +103,13 @@ def format_ascii(data: bytes) -> list[str]:
     return [part.decode("utf-8", errors="replace") for part in data.split(b"\0") if part]
 
 
+INSN_LINE = re.compile(
+    r"^(\s*)(\d+):\t(?:[0-9a-fA-F]{2}(?:\s+[0-9a-fA-F]{2})*)\t(.*)$"
+)
+
+
 def format_disasm(objdump: str, obj: Path, name: str) -> str:
+    """Disassembly with insn index + mnemonic; opcode hex bytes stripped."""
     text = run_objdump(objdump, ["-d", "-j", name, str(obj)])
     lines = []
     started = False
@@ -93,9 +117,14 @@ def format_disasm(objdump: str, obj: Path, name: str) -> str:
         if line.startswith("Disassembly of section"):
             started = True
             continue
-        if not started:
+        if not started or not line.strip():
             continue
-        if line.strip():
+        match = INSN_LINE.match(line)
+        if match:
+            indent, idx, mnemonic = match.groups()
+            lines.append(f"{indent}{idx}:\t{mnemonic.rstrip()}")
+        else:
+            # Label / other non-insn lines (e.g. `0000... <sym>:`).
             lines.append(line.rstrip())
     return "\n".join(lines)
 
@@ -118,6 +147,10 @@ def toml_string(value: str) -> str:
     return f'"{escaped}"'
 
 
+def append_multiline(lines: list[str], field: str, payload: str) -> None:
+    lines.append(f'{field} = """\n{toml_escape(payload)}\n"""')
+
+
 def append_content(lines: list[str], kind: str, payload: str | list[str]) -> None:
     if kind == "ascii":
         lines.append("ascii = [")
@@ -125,31 +158,70 @@ def append_content(lines: list[str], kind: str, payload: str | list[str]) -> Non
             lines.append(f"  {toml_string(item)},")
         lines.append("]")
         return
-
     field = "disasm" if kind == "disasm" else "hex"
-    lines.append(f'{field} = """\n{toml_escape(payload)}\n"""')
+    append_multiline(lines, field, payload if isinstance(payload, str) else "")
 
 
-def write_report(
+def _asm_block(
+    lines: list[str],
+    table: str,
+    objdump: str,
+    obj: Path,
+    sec: dict | None,
+    with_content: bool,
+) -> None:
+    size = int(sec["size"]) if sec else 0
+    lines.append(f"[{table}]")
+    lines.append(f"size = {size}")
+    if with_content and sec and size > 0:
+        append_multiline(lines, "asm", format_disasm(objdump, obj, sec["name"]))
+    else:
+        lines.append('asm = ""')
+    lines.append("")
+
+
+def write_bpf_report(
+    obj: Path,
+    source: Path,
+    out: Path,
+    objdump: str,
+    with_content: bool,
+    btf_toml_lines: list[str],
+) -> None:
+    """bpf.toml: [xdp] → [text] → [maps.*] → [CORE]."""
+    sections = parse_sections(objdump, obj, keep_empty=True)
+    xdp = find_section(sections, "xdp")
+    text = find_section(sections, "text", ".text")
+
+    lines = [
+        f'source = "{source}"',
+        f"size = {obj.stat().st_size}",
+        "",
+    ]
+    _asm_block(lines, "xdp", objdump, obj, xdp, with_content)
+    _asm_block(lines, "text", objdump, obj, text, with_content)
+
+    lines.extend(btf_toml_lines)
+    out.write_text("\n".join(lines).rstrip() + "\n")
+
+
+def write_section_report(
     obj: Path,
     source: Path,
     out: Path,
     objdump: str,
     with_content: bool,
 ) -> None:
-    sections = parse_sections(objdump, obj)
-    size = obj.stat().st_size
-
+    """Legacy / non-bpf object dump (all non-debug sections)."""
+    sections = parse_sections(objdump, obj, keep_empty=False)
     lines = [
         f'source = "{source}"',
-        f"size = {size}",
+        f"size = {obj.stat().st_size}",
         "",
     ]
-
     for sec in sections:
         key = section_key(sec["name"])
         lines.append(f"[section.{key}]")
-        lines.append(f'name = "{sec["name"]}"')
         lines.append(f"size = {sec['size']}")
         lines.append(f"vma = {sec['vma']}")
         lines.append(f'type = "{sec["type"]}"')
@@ -163,8 +235,34 @@ def write_report(
                 payload = format_hex(parse_section_bytes(objdump, obj, sec["name"]))
             append_content(lines, kind, payload)
         lines.append("")
-
     out.write_text("\n".join(lines).rstrip() + "\n")
+
+
+def write_report(
+    obj: Path,
+    source: Path,
+    out: Path,
+    objdump: str,
+    with_content: bool,
+    btf_toml_lines: list[str] | None = None,
+) -> None:
+    if btf_toml_lines is not None:
+        write_bpf_report(
+            obj=obj,
+            source=source,
+            out=out,
+            objdump=objdump,
+            with_content=with_content,
+            btf_toml_lines=btf_toml_lines,
+        )
+        return
+    write_section_report(
+        obj=obj,
+        source=source,
+        out=out,
+        objdump=objdump,
+        with_content=with_content,
+    )
 
 
 def main() -> None:

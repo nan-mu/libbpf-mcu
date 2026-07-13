@@ -1,9 +1,9 @@
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/in.h>
-#include <linux/ip.h>
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
+#include "vmlinux.h"
+
+#define ETH_P_IP 0x0800
+#define ETH_P_IPV6 0x86DD
 
 struct fw_key {
     __u32 src_ip;
