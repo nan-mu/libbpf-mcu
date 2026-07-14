@@ -1,10 +1,9 @@
-#include "unimplemented.h"
+#pragma once
 #include "../vmlinux.h"
 
 extern uint32_t helper_dispatcher(uint32_t idx, const void* arg1, const void* arg2, const void* arg3, const void* arg4, const void* arg5);
 
-// 安全的 helper_dispatcher 调用包装
-// 明确告诉编译器所有调用者保存的寄存器都会被破坏
+// safe helper_dispatcher call
 static inline __attribute__((always_inline)) 
 uint32_t safe_helper_call(uint32_t idx, uint32_t arg1, uint32_t arg2, 
                           uint32_t arg3, uint32_t arg4, uint32_t arg5) {
@@ -19,7 +18,7 @@ uint32_t safe_helper_call(uint32_t idx, uint32_t arg1, uint32_t arg2,
 		"call helper_dispatcher"
 		: "+r"(__a0), "+r"(__a1), "+r"(__a2), "+r"(__a3), "+r"(__a4), "+r"(__a5)
 		:
-		// 明确列出所有会被破坏的调用者保存寄存器
+		// list all caller-saved registers that will be clobbered
 		: "ra", "a6", "a7",
 		  "t0", "t1", "t2", "t3", "t4", "t5", "t6", "memory"
 	);
@@ -27,19 +26,15 @@ uint32_t safe_helper_call(uint32_t idx, uint32_t arg1, uint32_t arg2,
 	return __a0;
 }
 
-#define ___bpf_trace_printk_call(idx, fmt, fmt_size, arg1, arg2, arg3) \
-	safe_helper_call(idx, (uint32_t)(fmt), (uint32_t)(fmt_size), \
+/* bpf_trace_printk: ID 6; a2 = (nargs<<24)|(fmt_size&0xffffff); 禁 %s */
+#define BPF_FUNC_trace_printk  6
+#define BPF_PRINTK_NARGS_SHIFT 24
+#define BPF_PRINTK_SIZE_MASK   0x00ffffffu
+#define BPF_PRINTK_PACK(size, n) \
+	((((uint32_t)(n)) << BPF_PRINTK_NARGS_SHIFT) | \
+	 (((uint32_t)(size)) & BPF_PRINTK_SIZE_MASK))
+
+#define ___bpf_trace_printk_call(nargs, fmt, fmt_size, arg1, arg2, arg3) \
+	safe_helper_call(BPF_FUNC_trace_printk, (uint32_t)(fmt), \
+	                 BPF_PRINTK_PACK(fmt_size, nargs), \
 	                 (uint32_t)(arg1), (uint32_t)(arg2), (uint32_t)(arg3))
-
-#define ___bpf_trace_printk0(fmt, fmt_size) \
-	___bpf_trace_printk_call(0, fmt, fmt_size, 0, 0, 0)
-#define ___bpf_trace_printk1(fmt, fmt_size, arg1) \
-	___bpf_trace_printk_call(1, fmt, fmt_size, arg1, 0, 0)
-#define ___bpf_trace_printk2(fmt, fmt_size, arg1, arg2) \
-	___bpf_trace_printk_call(2, fmt, fmt_size, arg1, arg2, 0)
-#define ___bpf_trace_printk3(fmt, fmt_size, arg1, arg2, arg3) \
-	___bpf_trace_printk_call(3, fmt, fmt_size, arg1, arg2, arg3)
-
-#define bpf_trace_printk(fmt, fmt_size, ...) \
-	___bpf_apply(___bpf_trace_printk, ___bpf_narg(__VA_ARGS__))(fmt, fmt_size, ##__VA_ARGS__)
-

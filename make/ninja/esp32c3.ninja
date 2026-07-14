@@ -2,9 +2,8 @@
 # 
 # 目的：编译 .c 源码至单片机架构。本文件作为模板由 make/build.toml 组装并触发 Ninja 执行，用以确保正确的增量/重复构建。其中 @...@ 作为模式占位符
 
-cflags = -O2 --target=riscv32-unknown-none-elf -march=rv32imc -mabi=ilp32 -nostdlib -ffreestanding -fno-builtin -fno-exceptions -fno-rtti -fno-jump-tables -fno-tree-switch-conversion -fstrict-volatile-bitfields -fno-omit-frame-pointer -Wall -Wno-unused-function
-
-includes = -I @ROOT@/inclued -I @ROOT@/inclued/linux -I @ROOT@/inclued/bpf
+cflags = -O2 --target=riscv32-unknown-none-elf -march=rv32imc -mabi=ilp32 -nostdlib -ffreestanding -fno-builtin -fno-exceptions -fno-rtti -fno-jump-tables -fno-omit-frame-pointer -Wall -Wno-unused-function
+includes = -I @ROOT@/include -include vmlinux.h
 
 rule cc
     command = @CLANG@ -c -MD -MF $depfile $cflags $includes $in -o $out
