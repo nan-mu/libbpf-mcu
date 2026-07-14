@@ -37,21 +37,14 @@
 #define NULL ((void *)0)
 #endif
 
-#ifdef BPF_NO_GLOBAL_DATA
-#define BPF_PRINTK_FMT_MOD
-#else
-#define BPF_PRINTK_FMT_MOD static const
-#endif
+#define bpf_map_lookup_elem(map, key) \
+	((void *)___bpf_map_lookup_elem_call(map, key))
 
-/* ≤3 fmt args; matches bpf_trace_printk0..3 in bpf_helper_defs.h */
-#define bpf_printk(fmt, ...)				\
-({							\
-	BPF_PRINTK_FMT_MOD char ____fmt[] = fmt;	\
-	bpf_trace_printk(____fmt, sizeof(____fmt),	\
-			 ##__VA_ARGS__);		\
-})
+#define bpf_redirect(ifindex, flags) \
+	((long)___bpf_redirect_call(ifindex, flags))
 
-#endif /* __BPF_HELPERS__ */
+#define bpf_redirect_map(map, key, flags) \
+	((long)___bpf_redirect_map_call(map, key, flags))
 
 #define ___bpf_trace_printk0(fmt, fmt_size) \
 	___bpf_trace_printk_call(0, fmt, fmt_size, 0, 0, 0)
@@ -61,5 +54,22 @@
 	___bpf_trace_printk_call(2, fmt, fmt_size, arg1, arg2, 0)
 #define ___bpf_trace_printk3(fmt, fmt_size, arg1, arg2, arg3) \
 	___bpf_trace_printk_call(3, fmt, fmt_size, arg1, arg2, arg3)
+
 #define bpf_trace_printk(fmt, fmt_size, ...) \
 	___bpf_apply(___bpf_trace_printk, ___bpf_narg(__VA_ARGS__))(fmt, fmt_size, ##__VA_ARGS__)
+
+#ifdef BPF_NO_GLOBAL_DATA
+#define BPF_PRINTK_FMT_MOD
+#else
+#define BPF_PRINTK_FMT_MOD static const
+#endif
+
+/* ≤3 fmt args; matches ___bpf_trace_printk0..3 */
+#define bpf_printk(fmt, ...)				\
+({							\
+	BPF_PRINTK_FMT_MOD char ____fmt[] = fmt;	\
+	bpf_trace_printk(____fmt, sizeof(____fmt),	\
+			 ##__VA_ARGS__);		\
+})
+
+#endif /* __BPF_HELPERS__ */
