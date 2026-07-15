@@ -650,25 +650,13 @@ def analyze(obj_path: Path) -> dict[str, Any]:
     return {"maps": maps, "core": core}
 
 
-def _toml_str(value: str) -> str:
-    escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\t", "\\t")
-    )
-    return f'"{escaped}"'
-
-
-def _toml_multiline(value: str) -> str:
-    body = value.replace("\r\n", "\n").replace('"""', '\\"""')
-    return f'"""\n{body}\n"""'
+from obj_report import append_multiline, toml_string
 
 
 def _maps_table_name(name: str) -> str:
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) and not keyword.iskeyword(name):
         return f"maps.{name}"
-    return f"maps.{_toml_str(name)}"
+    return f"maps.{toml_string(name)}"
 
 
 def format_core_csv(core: list[dict[str, Any]]) -> str:
@@ -696,15 +684,15 @@ def format_btf_toml(report: dict[str, Any]) -> list[str]:
 
     for item in items:
         lines.append(f"[{_maps_table_name(str(item.get('name', '')))}]")
-        lines.append(f"map_type = {_toml_str(str(item.get('map_type_name', '')))}")
+        lines.append(f"map_type = {toml_string(str(item.get('map_type_name', '')))}")
         lines.append(f"max_entries = {int(item.get('max_entries', 0))}")
         lines.append(f"estimated_bytes = {int(item.get('estimated_bytes', 0))}")
-        lines.append(f"key = {_toml_multiline(str(item.get('key', '')))}")
-        lines.append(f"value = {_toml_multiline(str(item.get('value', '')))}")
+        append_multiline(lines, "key", str(item.get("key", "")))
+        append_multiline(lines, "value", str(item.get("value", "")))
         lines.append("")
 
     lines.append("[CORE]")
-    lines.append(f"records = {_toml_multiline(format_core_csv(core))}")
+    append_multiline(lines, "records", format_core_csv(core))
     lines.append("")
     return lines
 

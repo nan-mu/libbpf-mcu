@@ -1,4 +1,8 @@
-"""Generate object section reports (.toml) via llvm-objdump."""
+"""Generate object reports (.toml) via llvm-objdump.
+
+Shared skeleton for all targets:
+  source / size → [xdp] → [text?] → optional BTF maps/CORE (bpf only).
+"""
 
 from __future__ import annotations
 
@@ -11,10 +15,22 @@ from pathlib import Path
 SECTION_LINE = re.compile(
     r"^\s*(\d+)\s+(\S+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s*(.*?)\s*$"
 )
-# llvm-objdump -s: addr + ≤4 groups of 2–8 even hex digits, then ASCII.
-# Even-length only so the ASCII column (e.g. "addr...") is not consumed.
-HEX_CHUNK = re.compile(
-    r"^\s*[0-9a-fA-F]+\s+((?:[0-9a-fA-F]{2}){1,4}(?:\s+(?:[0-9a-fA-F]{2}){1,4}){0,3})"
+
+# Sections with no value in the architecture report (tooling / ELF / reloc / dump noise).
+_SKIP_EXACT = frozenset(
+    {
+        ".strtab",
+        ".symtab",
+        ".llvm_addrsig",
+        ".comment",
+        ".eh_frame",
+        ".relaxdp",
+        ".note.GNU-stack",
+        ".maps",
+        "license",
+        ".BTF",
+        ".BTF.ext",
+    }
 )
 
 
@@ -29,7 +45,13 @@ def run_objdump(objdump: str, args: list[str]) -> str:
 
 
 def skip_section(name: str) -> bool:
-    return name.startswith((".debug_", ".rel.debug_"))
+    if name in _SKIP_EXACT:
+        return True
+    if name.startswith((".debug_", ".rel", ".rela", ".note")):
+        return True
+    if name.endswith(".attributes") or name.endswith("_attributes"):
+        return True
+    return False
 
 
 def section_key(name: str) -> str:
@@ -63,53 +85,13 @@ def find_section(sections: list[dict], *names: str) -> dict | None:
     return None
 
 
-def content_kind(name: str) -> str:
-    key = section_key(name)
-    if key == "strtab":
-        return "ascii"
-    if key == "xdp" or key.startswith("xdp/") or key == "text":
-        return "disasm"
-    return "hex"
-
-
-def parse_section_bytes(objdump: str, obj: Path, name: str) -> bytes:
-    text = run_objdump(objdump, ["-s", "-j", name, str(obj)])
-    raw = bytearray()
-    for line in text.splitlines():
-        match = HEX_CHUNK.match(line)
-        if not match:
-            continue
-        for token in match.group(1).split():
-            raw.extend(bytes.fromhex(token))
-    return bytes(raw)
-
-
-def _ascii_side(chunk: bytes) -> str:
-    return "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
-
-
-def format_hex(data: bytes) -> str:
-    lines = []
-    for offset in range(0, len(data), 16):
-        chunk = data[offset : offset + 16]
-        left = " ".join(f"{b:02x}" for b in chunk[:8])
-        right = " ".join(f"{b:02x}" for b in chunk[8:])
-        hex_part = f"{left:<23}  {right:<23}"
-        lines.append(f"{offset:04x}  {hex_part}  |{_ascii_side(chunk)}|")
-    return "\n".join(lines)
-
-
-def format_ascii(data: bytes) -> list[str]:
-    return [part.decode("utf-8", errors="replace") for part in data.split(b"\0") if part]
-
-
 INSN_LINE = re.compile(
     r"^(\s*)(\d+):\t(?:[0-9a-fA-F]{2}(?:\s+[0-9a-fA-F]{2})*)\t(.*)$"
 )
 
 
 def format_disasm(objdump: str, obj: Path, name: str) -> str:
-    """Disassembly with insn index + mnemonic; opcode hex bytes stripped."""
+    """Disassembly with insn index + mnemonic; opcode hex bytes stripped when present."""
     text = run_objdump(objdump, ["-d", "-j", name, str(obj)])
     lines = []
     started = False
@@ -151,15 +133,10 @@ def append_multiline(lines: list[str], field: str, payload: str) -> None:
     lines.append(f'{field} = """\n{toml_escape(payload)}\n"""')
 
 
-def append_content(lines: list[str], kind: str, payload: str | list[str]) -> None:
-    if kind == "ascii":
-        lines.append("ascii = [")
-        for item in payload:
-            lines.append(f"  {toml_string(item)},")
-        lines.append("]")
-        return
-    field = "disasm" if kind == "disasm" else "hex"
-    append_multiline(lines, field, payload if isinstance(payload, str) else "")
+def append_header(lines: list[str], source: Path, size: int) -> None:
+    lines.append(f'source = "{source}"')
+    lines.append(f"size = {size}")
+    lines.append("")
 
 
 def _asm_block(
@@ -184,66 +161,6 @@ def _asm_block(
     lines.append("")
 
 
-def write_bpf_report(
-    obj: Path,
-    source: Path,
-    out: Path,
-    objdump: str,
-    with_content: bool,
-    btf_toml_lines: list[str],
-) -> None:
-    """bpf.toml: [xdp] → [text?] → [maps.*] → [CORE]."""
-    sections = parse_sections(objdump, obj, keep_empty=True)
-    xdp = find_section(sections, "xdp")
-    text = find_section(sections, "text", ".text")
-
-    lines = [
-        f'source = "{source}"',
-        f"size = {obj.stat().st_size}",
-        "",
-    ]
-    _asm_block(lines, "xdp", objdump, obj, xdp, with_content)
-    _asm_block(
-        lines, "text", objdump, obj, text, with_content, omit_if_empty=True
-    )
-
-    lines.extend(btf_toml_lines)
-    out.write_text("\n".join(lines).rstrip() + "\n")
-
-
-def write_section_report(
-    obj: Path,
-    source: Path,
-    out: Path,
-    objdump: str,
-    with_content: bool,
-) -> None:
-    """Legacy / non-bpf object dump (all non-debug sections)."""
-    sections = parse_sections(objdump, obj, keep_empty=False)
-    lines = [
-        f'source = "{source}"',
-        f"size = {obj.stat().st_size}",
-        "",
-    ]
-    for sec in sections:
-        key = section_key(sec["name"])
-        lines.append(f"[section.{key}]")
-        lines.append(f"size = {sec['size']}")
-        lines.append(f"vma = {sec['vma']}")
-        lines.append(f'type = "{sec["type"]}"')
-        if with_content:
-            kind = content_kind(sec["name"])
-            if kind == "disasm":
-                payload = format_disasm(objdump, obj, sec["name"])
-            elif kind == "ascii":
-                payload = format_ascii(parse_section_bytes(objdump, obj, sec["name"]))
-            else:
-                payload = format_hex(parse_section_bytes(objdump, obj, sec["name"]))
-            append_content(lines, kind, payload)
-        lines.append("")
-    out.write_text("\n".join(lines).rstrip() + "\n")
-
-
 def write_report(
     obj: Path,
     source: Path,
@@ -252,23 +169,20 @@ def write_report(
     with_content: bool,
     btf_toml_lines: list[str] | None = None,
 ) -> None:
-    if btf_toml_lines is not None:
-        write_bpf_report(
-            obj=obj,
-            source=source,
-            out=out,
-            objdump=objdump,
-            with_content=with_content,
-            btf_toml_lines=btf_toml_lines,
-        )
-        return
-    write_section_report(
-        obj=obj,
-        source=source,
-        out=out,
-        objdump=objdump,
-        with_content=with_content,
+    """All targets: header → [xdp] → [text?] → optional BTF tail."""
+    sections = parse_sections(objdump, obj, keep_empty=True)
+    xdp = find_section(sections, "xdp")
+    text = find_section(sections, "text", ".text")
+
+    lines: list[str] = []
+    append_header(lines, source, obj.stat().st_size)
+    _asm_block(lines, "xdp", objdump, obj, xdp, with_content)
+    _asm_block(
+        lines, "text", objdump, obj, text, with_content, omit_if_empty=True
     )
+    if btf_toml_lines is not None:
+        lines.extend(btf_toml_lines)
+    out.write_text("\n".join(lines).rstrip() + "\n")
 
 
 def main() -> None:
@@ -278,14 +192,31 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--objdump", default="llvm-objdump-mp-22")
     parser.add_argument("--no-content", action="store_true")
+    parser.add_argument(
+        "--btf",
+        action="store_true",
+        help="Analyze .BTF/.BTF.ext and append [maps.*]/[CORE]",
+    )
     args = parser.parse_args()
 
+    obj = args.obj.resolve()
+    btf_toml_lines = None
+    if args.btf:
+        from btf import analyze, format_btf_toml
+
+        try:
+            btf_toml_lines = format_btf_toml(analyze(obj))
+        except Exception as exc:
+            sys.stderr.write(f"obj_report: BTF 分析失败 ({obj}): {exc}\n")
+            sys.exit(1)
+
     write_report(
-        obj=args.obj.resolve(),
+        obj=obj,
         source=args.src.resolve(),
         out=args.out.resolve(),
         objdump=args.objdump,
         with_content=not args.no_content,
+        btf_toml_lines=btf_toml_lines,
     )
 
 

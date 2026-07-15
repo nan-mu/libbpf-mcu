@@ -1,4 +1,4 @@
-"""Build orchestration for libbpf-mcu (ninja + object reports)."""
+"""Build orchestration for libbpf-mcu (ninja: compile + object reports)."""
 
 from __future__ import annotations
 
@@ -10,17 +10,17 @@ from pathlib import Path
 
 from tiny_log import error, info, warning
 
-from btf import analyze, format_btf_toml
-from obj_report import write_report
-
 MAKE_DIR = Path(__file__).resolve().parent
 ROOT = MAKE_DIR.parent
 WORKSPACE_ROOT = ROOT.parent
 DEFAULT_BUILD_DIR = WORKSPACE_ROOT / "build"
 TESTS_DIR = ROOT / "tests"
 NINJA_DIR = MAKE_DIR / "ninja"
+LINKER_DIR = MAKE_DIR / "linker"
 CLANG = "clang"
 DEFAULT_OBJDUMP = "llvm-objdump-mp-22"
+DEFAULT_OBJCOPY = "llvm-objcopy-mp-22"
+REPORT_SCRIPTS = (MAKE_DIR / "obj_report.py", MAKE_DIR / "btf.py")
 
 
 @dataclass(frozen=True)
@@ -167,62 +167,85 @@ def check_build_fs(paths):
     return BuildPaths(checked_inputs, checked_outputs)
 
 
-def build_target(build, force=False, release=False, objdump=DEFAULT_OBJDUMP):
+def _report_flags(target: str, release: bool) -> str:
+    flags: list[str] = []
+    if target == "bpf":
+        flags.append("--btf")
+    if release:
+        flags.append("--no-content")
+    return " ".join(flags)
+
+
+def _linker_script(target: str) -> Path | None:
+    path = LINKER_DIR / f"{target}.ld"
+    return path if path.is_file() else None
+
+
+def build_target(
+    build,
+    force=False,
+    release=False,
+    objdump=DEFAULT_OBJDUMP,
+    objcopy=DEFAULT_OBJCOPY,
+):
     template = NINJA_DIR / f"{build.target}.ninja"
     if not template.is_file():
         error(f"ninja 模板不可用: {template}")
         sys.exit(1)
 
+    linker = _linker_script(build.target)
     ninja_dir = DEFAULT_BUILD_DIR / ".ninja"
     ninja_dir.mkdir(parents=True, exist_ok=True)
     ninja_file = ninja_dir / "build.ninja"
 
-    build_edges = []
+    implicit = " ".join(str(path) for path in REPORT_SCRIPTS)
+    edges: list[str] = []
+    defaults: list[Path] = []
     for input_path, output_path in zip(build.inputs, build.outputs):
         depfile = output_path.with_suffix(".d")
-        build_edges.append(
+        edges.append(
             f"build {output_path}: cc {input_path}\n"
             f"  depfile = {depfile}"
         )
-    build_edges_text = "\n".join(build_edges)
-    outputs = " ".join(str(path) for path in build.outputs)
+
+        if linker is not None:
+            elf_path = output_path.with_suffix(".elf")
+            bin_path = output_path.with_suffix(".bin")
+            report_path = output_path.with_suffix(".toml")
+            report_obj = elf_path
+            edges.append(
+                f"build {elf_path}: link {output_path} | {linker}"
+            )
+            edges.append(f"build {bin_path}: bin {elf_path}")
+            defaults.append(bin_path)
+            defaults.append(report_path)
+        else:
+            report_path = output_path.with_suffix(".toml")
+            report_obj = output_path
+            defaults.append(report_path)
+
+        edges.append(
+            f"build {report_path}: report {report_obj} | {implicit}\n"
+            f"  src = {input_path}"
+        )
 
     content = template.read_text()
     content = content.replace("@ROOT@", str(ROOT))
     content = content.replace("@CLANG@", CLANG)
+    content = content.replace("@PYTHON@", sys.executable)
+    content = content.replace("@MAKE@", str(MAKE_DIR))
+    content = content.replace("@OBJDUMP@", objdump)
+    content = content.replace("@OBJCOPY@", objcopy)
     content = content.replace(
-        "build @OUT@: cc @IN@\n  depfile = @DEPFILE@", build_edges_text
+        "@LINKER@", str(linker) if linker is not None else ""
     )
-    content = content.replace("build @OUT@: cc @IN@", build_edges_text)
-    content = content.replace("@OUT@", outputs)
+    content = content.replace("@REPORT_FLAGS@", _report_flags(build.target, release))
+    content = content.replace("@EDGES@", "\n".join(edges))
+    content = content.replace("@DEFAULT@", " ".join(str(path) for path in defaults))
     ninja_file.write_text(content)
 
     info(f"已生成 ninja: {ninja_file}")
     run_ninja(ninja_file, force=force)
-    write_object_reports(build, release=release, objdump=objdump)
-
-
-def write_object_reports(build, release=False, objdump=DEFAULT_OBJDUMP):
-    with_content = not release
-    want_btf = build.target == "bpf"
-    for input_path, output_path in zip(build.inputs, build.outputs):
-        report_path = output_path.with_suffix(".toml")
-        btf_toml_lines = None
-        if want_btf:
-            try:
-                btf_toml_lines = format_btf_toml(analyze(output_path))
-            except Exception as exc:
-                error(f"BTF 分析失败 ({output_path}): {exc}")
-                sys.exit(1)
-        write_report(
-            obj=output_path,
-            source=input_path,
-            out=report_path,
-            objdump=objdump,
-            with_content=with_content,
-            btf_toml_lines=btf_toml_lines,
-        )
-        info(f"已生成报告: {report_path}")
 
 
 def run_ninja(ninja_file, force=False):

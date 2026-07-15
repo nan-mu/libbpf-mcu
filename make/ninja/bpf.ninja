@@ -9,7 +9,10 @@ rule cc
     command = @CLANG@ -c -MD -MF $depfile $cflags $includes $in -o $out
     depfile = $depfile
 
-build @OUT@: cc @IN@
-  depfile = @DEPFILE@
+rule report
+    command = @PYTHON@ @MAKE@/obj_report.py --obj $in --src $src --out $out --objdump @OBJDUMP@ @REPORT_FLAGS@
+    description = report $out
 
-default @OUT@
+@EDGES@
+
+default @DEFAULT@

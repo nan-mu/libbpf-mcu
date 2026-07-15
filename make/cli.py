@@ -5,6 +5,7 @@ import sys
 from tiny_log import debug, info, set_scope
 
 from build import (
+    DEFAULT_OBJCOPY,
     DEFAULT_OBJDUMP,
     BuildPaths,
     BuildTarget,
@@ -45,6 +46,11 @@ def main():
         default=os.environ.get("LIBBPF_MCU_OBJDUMP", DEFAULT_OBJDUMP),
         help=f"objdump 可执行文件（默认 {DEFAULT_OBJDUMP}）",
     )
+    build_parser.add_argument(
+        "--objcopy",
+        default=os.environ.get("LIBBPF_MCU_OBJCOPY", DEFAULT_OBJCOPY),
+        help=f"objcopy 可执行文件（默认 {DEFAULT_OBJCOPY}）",
+    )
 
     subparsers.add_parser("clean")
     subparsers.add_parser("test")
@@ -63,6 +69,7 @@ def main():
                 force=args.force,
                 release=args.release,
                 objdump=args.objdump,
+                objcopy=args.objcopy,
             )
     elif args.command == "clean":
         clean_build()
