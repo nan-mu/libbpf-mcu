@@ -1,20 +1,28 @@
-/* payload.ld - ESP32-C3 AOT 热加载专属链接器脚本 */
+/* Auto-generated from firmware/mem_map.toml — do not edit by hand.
+ * helper_dispatcher @ 0x40380000, HOT_REGION @ 0x40381000 len 0x1000
+ */
 
-helper_dispatcher = 0x403A0000;
+helper_dispatcher = 0x40380000;
 
 /*
- * 【警告】这里的 ORIGIN 必须与主固件中分配的 aot_payload_buffer 地址严格一致！
- * 当前：HOT_REGION @ 0x403A1000，长度 4K-512。
+ * ORIGIN/LENGTH must match firmware HOT_REGION placeholder
+ * (`mem_map.toml` / `.iram1.hotload_area`).
  */
 MEMORY
 {
-    HOT_REGION (rwx) : ORIGIN = 0x403A1000, LENGTH = 4K - 512
+    HOT_REGION (rwx) : ORIGIN = 0x40381000, LENGTH = 0x1000
 }
+
+/*
+ * Firmware jalr's HOT_REGION base — not a CRT. Define `_start` at `.xdp`
+ * so LLD has an entry symbol and e_entry matches the load address.
+ */
+ENTRY(_start)
 
 SECTIONS
 {
-    /* SEC("xdp") → 节名 "xdp"（无点号）；兼容 .xdp / .xdp.* */
     .xdp : ALIGN(4) {
+        _start = .;
         *(xdp)
         *(.xdp)
         *(.xdp.*)
@@ -33,7 +41,6 @@ SECTIONS
         *(license)
     } > HOT_REGION
 
-    /* SEC(".maps") map 描述符占位；固件侧另有绝对地址语义 */
     .maps : ALIGN(4) {
         *(.maps)
     } > HOT_REGION

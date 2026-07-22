@@ -2,6 +2,9 @@
 
 Shared skeleton for all targets:
   source / size → [xdp] → [text?] → optional BTF maps/CORE (bpf only).
+
+MCU linked ELFs may also stamp `aot_addr` into the sibling `bpf.toml`
+(`[maps.*]` from BTF) using `.maps` symbol VMAs.
 """
 
 from __future__ import annotations
@@ -14,6 +17,11 @@ from pathlib import Path
 
 SECTION_LINE = re.compile(
     r"^\s*(\d+)\s+(\S+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s*(.*?)\s*$"
+)
+
+# llvm-objdump -t: `403818cc g     O .maps	00000010 arr_map`
+MAPS_SYM_LINE = re.compile(
+    r"^([0-9a-fA-F]+)\s+\S+\s+\S+\s+\.maps\s+[0-9a-fA-F]+\s+(\S+)\s*$"
 )
 
 # Sections with no value in the architecture report (tooling / ELF / reloc / dump noise).
@@ -185,6 +193,85 @@ def write_report(
     out.write_text("\n".join(lines).rstrip() + "\n")
 
 
+def parse_maps_aot_addrs(objdump: str, obj: Path) -> dict[str, int]:
+    """Map symbol name → absolute VMA for objects linked into `.maps`."""
+    text = run_objdump(objdump, ["-t", str(obj)])
+    out: dict[str, int] = {}
+    for line in text.splitlines():
+        match = MAPS_SYM_LINE.match(line)
+        if not match:
+            continue
+        name = match.group(2)
+        if name.startswith("$"):
+            continue
+        addr = int(match.group(1), 16)
+        if addr == 0:
+            continue
+        out[name] = addr
+    return out
+
+
+def merge_aot_addrs_into_toml(path: Path, addrs: dict[str, int]) -> int:
+    """Insert/update `aot_addr = 0x…` under matching `[maps.*]` tables.
+
+    Returns the number of map tables touched.
+    """
+    if not addrs:
+        return 0
+
+    text = path.read_text()
+    parts = re.split(r"(?=^\[)", text, flags=re.M)
+    updated = 0
+    new_parts: list[str] = []
+
+    for part in parts:
+        header = re.match(r"^\[maps\.([^\]]+)\]\s*\n", part)
+        if not header:
+            new_parts.append(part)
+            continue
+
+        name = header.group(1)
+        if name not in addrs:
+            new_parts.append(part)
+            continue
+
+        addr_line = f"aot_addr = {addrs[name]:#x}"
+        if re.search(r"^aot_addr\s*=", part, flags=re.M):
+            part = re.sub(
+                r"^aot_addr\s*=\s*.*$",
+                addr_line,
+                part,
+                count=1,
+                flags=re.M,
+            )
+        elif re.search(r"^estimated_bytes\s*=", part, flags=re.M):
+            part = re.sub(
+                r"(^estimated_bytes\s*=\s*.*$)",
+                rf"\1\n{addr_line}",
+                part,
+                count=1,
+                flags=re.M,
+            )
+        elif re.search(r"^max_entries\s*=", part, flags=re.M):
+            part = re.sub(
+                r"(^max_entries\s*=\s*.*$)",
+                rf"\1\n{addr_line}",
+                part,
+                count=1,
+                flags=re.M,
+            )
+        else:
+            lines = part.splitlines(keepends=True)
+            lines.insert(1, addr_line + "\n")
+            part = "".join(lines)
+
+        updated += 1
+        new_parts.append(part)
+
+    path.write_text("".join(new_parts))
+    return updated
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="obj_report")
     parser.add_argument("--obj", required=True, type=Path)
@@ -197,9 +284,15 @@ def main() -> None:
         action="store_true",
         help="Analyze .BTF/.BTF.ext and append [maps.*]/[CORE]",
     )
+    parser.add_argument(
+        "--merge-aot-addrs",
+        action="store_true",
+        help="Stamp .maps VMAs as aot_addr into sibling bpf.toml [maps.*]",
+    )
     args = parser.parse_args()
 
     obj = args.obj.resolve()
+    out = args.out.resolve()
     btf_toml_lines = None
     if args.btf:
         from btf import analyze, format_btf_toml
@@ -213,11 +306,29 @@ def main() -> None:
     write_report(
         obj=obj,
         source=args.src.resolve(),
-        out=args.out.resolve(),
+        out=out,
         objdump=args.objdump,
         with_content=not args.no_content,
         btf_toml_lines=btf_toml_lines,
     )
+
+    if args.merge_aot_addrs:
+        addrs = parse_maps_aot_addrs(args.objdump, obj)
+        bpf_toml = out.parent / "bpf.toml"
+        if not addrs:
+            sys.stderr.write(
+                f"obj_report: --merge-aot-addrs: no .maps symbols in {obj}\n"
+            )
+        elif not bpf_toml.is_file():
+            sys.stderr.write(
+                f"obj_report: --merge-aot-addrs: missing {bpf_toml}\n"
+            )
+        else:
+            n = merge_aot_addrs_into_toml(bpf_toml, addrs)
+            sys.stderr.write(
+                f"obj_report: merged aot_addr for {n}/{len(addrs)} maps "
+                f"into {bpf_toml}\n"
+            )
 
 
 if __name__ == "__main__":

@@ -14,7 +14,8 @@ Test and validation source for libbpf-mcu.
 tests/
 ├── basic/
 │   ├── print_ctx.c
-│   └── print_udp.c
+│   ├── print_udp.c
+│   └── maps_helpers.c
 ├── xdp/
 │   ├── drop_icmp.c
 │   ├── mac_swap.c

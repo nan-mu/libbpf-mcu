@@ -171,6 +171,9 @@ def _report_flags(target: str, release: bool) -> str:
     flags: list[str] = []
     if target == "bpf":
         flags.append("--btf")
+    elif _linker_script(target) is not None:
+        # Linked MCU payload: write HOT_REGION map VMAs into sibling bpf.toml.
+        flags.append("--merge-aot-addrs")
     if release:
         flags.append("--no-content")
     return " ".join(flags)
@@ -213,21 +216,26 @@ def build_target(
             bin_path = output_path.with_suffix(".bin")
             report_path = output_path.with_suffix(".toml")
             report_obj = elf_path
+            # Re-merge aot_addr whenever BTF bpf.toml is regenerated.
+            bpf_toml = output_path.parent / "bpf.toml"
             edges.append(
                 f"build {elf_path}: link {output_path} | {linker}"
             )
             edges.append(f"build {bin_path}: bin {elf_path}")
             defaults.append(bin_path)
             defaults.append(report_path)
+            edges.append(
+                f"build {report_path}: report {report_obj} | {implicit} {bpf_toml}\n"
+                f"  src = {input_path}"
+            )
         else:
             report_path = output_path.with_suffix(".toml")
             report_obj = output_path
             defaults.append(report_path)
-
-        edges.append(
-            f"build {report_path}: report {report_obj} | {implicit}\n"
-            f"  src = {input_path}"
-        )
+            edges.append(
+                f"build {report_path}: report {report_obj} | {implicit}\n"
+                f"  src = {input_path}"
+            )
 
     content = template.read_text()
     content = content.replace("@ROOT@", str(ROOT))

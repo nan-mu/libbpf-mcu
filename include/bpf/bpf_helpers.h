@@ -37,14 +37,120 @@
 #define NULL ((void *)0)
 #endif
 
+/* MCU vmlinux.h comments out some types/enums used by helpers; provide fallbacks. */
+#ifndef __s32
+typedef int __s32;
+#endif
+#ifndef __s64
+typedef long long int __s64;
+#endif
+
+#ifndef BPF_ANY
+#define BPF_ANY 0
+#endif
+#ifndef BPF_NOEXIST
+#define BPF_NOEXIST 1
+#endif
+#ifndef BPF_EXIST
+#define BPF_EXIST 2
+#endif
+
+#ifndef BPF_RB_AVAIL_DATA
+#define BPF_RB_AVAIL_DATA 0
+#endif
+#ifndef BPF_RB_RING_SIZE
+#define BPF_RB_RING_SIZE 1
+#endif
+#ifndef BPF_RB_CONS_POS
+#define BPF_RB_CONS_POS 2
+#endif
+#ifndef BPF_RB_PROD_POS
+#define BPF_RB_PROD_POS 3
+#endif
+
+struct bpf_map;
+
+#ifndef __BPF_DYNPTR_DEFINED
+#define __BPF_DYNPTR_DEFINED
+struct bpf_dynptr {
+	__u64 __opaque[2];
+};
+#endif
+
 #define bpf_map_lookup_elem(map, key) \
 	((void *)___bpf_map_lookup_elem_call(map, key))
+
+#define bpf_map_update_elem(map, key, value, flags) \
+	((long)___bpf_map_update_elem_call(map, key, value, flags))
+
+#define bpf_map_delete_elem(map, key) \
+	((long)___bpf_map_delete_elem_call(map, key))
+
+#define bpf_ktime_get_ns() \
+	((__u64)___bpf_ktime_get_ns_call())
+
+#define bpf_tail_call(ctx, map, index) \
+	((long)___bpf_tail_call_call(ctx, map, index))
 
 #define bpf_redirect(ifindex, flags) \
 	((long)___bpf_redirect_call(ifindex, flags))
 
+#define bpf_csum_diff(from, from_size, to, to_size, seed) \
+	((__s64)___bpf_csum_diff_call(from, from_size, to, to_size, seed))
+
+#define bpf_xdp_adjust_head(xdp_md, delta) \
+	((long)___bpf_xdp_adjust_head_call(xdp_md, delta))
+
 #define bpf_redirect_map(map, key, flags) \
 	((long)___bpf_redirect_map_call(map, key, flags))
+
+#define bpf_xdp_adjust_tail(xdp_md, delta) \
+	((long)___bpf_xdp_adjust_tail_call(xdp_md, delta))
+
+#define bpf_ringbuf_output(ringbuf, data, size, flags) \
+	((long)___bpf_ringbuf_output_call(ringbuf, data, size, flags))
+
+#define bpf_ringbuf_reserve(ringbuf, size, flags) \
+	((void *)___bpf_ringbuf_reserve_call(ringbuf, size, flags))
+
+#define bpf_ringbuf_submit(data, flags) \
+	((void)___bpf_ringbuf_submit_call(data, flags))
+
+#define bpf_ringbuf_discard(data, flags) \
+	((void)___bpf_ringbuf_discard_call(data, flags))
+
+#define bpf_ringbuf_query(ringbuf, flags) \
+	((__u64)___bpf_ringbuf_query_call(ringbuf, flags))
+
+#define bpf_for_each_map_elem(map, callback_fn, callback_ctx, flags) \
+	((long)___bpf_for_each_map_elem_call(map, callback_fn, callback_ctx, flags))
+
+#define bpf_xdp_load_bytes(xdp_md, offset, buf, len) \
+	((long)___bpf_xdp_load_bytes_call(xdp_md, offset, buf, len))
+
+#define bpf_xdp_store_bytes(xdp_md, offset, buf, len) \
+	((long)___bpf_xdp_store_bytes_call(xdp_md, offset, buf, len))
+
+#define bpf_dynptr_from_mem(data, size, flags, ptr) \
+	((long)___bpf_dynptr_from_mem_call(data, size, flags, ptr))
+
+#define bpf_ringbuf_reserve_dynptr(ringbuf, size, flags, ptr) \
+	((long)___bpf_ringbuf_reserve_dynptr_call(ringbuf, size, flags, ptr))
+
+#define bpf_ringbuf_submit_dynptr(ptr, flags) \
+	((void)___bpf_ringbuf_submit_dynptr_call(ptr, flags))
+
+#define bpf_ringbuf_discard_dynptr(ptr, flags) \
+	((void)___bpf_ringbuf_discard_dynptr_call(ptr, flags))
+
+#define bpf_dynptr_read(dst, len, src, offset, flags) \
+	((long)___bpf_dynptr_read_call(dst, len, src, offset, flags))
+
+#define bpf_dynptr_write(dst, offset, src, len, flags) \
+	((long)___bpf_dynptr_write_call(dst, offset, src, len, flags))
+
+#define bpf_dynptr_data(ptr, offset, len) \
+	((void *)___bpf_dynptr_data_call(ptr, offset, len))
 
 #define ___bpf_trace_printk0(fmt, fmt_size) \
 	___bpf_trace_printk_call(0, fmt, fmt_size, 0, 0, 0)
