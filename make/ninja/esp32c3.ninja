@@ -1,0 +1,29 @@
+# Purpose: Compile + link .c for MCU architecture (ESP32-C3 / RV32IMC AOT payload).
+# Template assembled by make/build.py. Placeholders: @...@
+#
+# 目的：将 .c 编译并经 linker script 链接为可热加载的 MCU payload。
+# 本文件作为模板由 make/build.py 组装。@...@ 为占位符。
+
+cflags = -O2 --target=riscv32-unknown-none-elf -march=rv32imc -mabi=ilp32 -nostdlib -ffreestanding -fno-builtin -fno-exceptions -fno-rtti -fno-jump-tables -fno-omit-frame-pointer -Wall -Wno-unused-function -g
+includes = -I @ROOT@/include -include vmlinux.h
+ldflags = -target riscv32-unknown-none-elf -nostdlib -fuse-ld=lld -Wl,-T,@LINKER@ -Wl,--build-id=none -Wl
+
+rule cc
+    command = @CLANG@ -c -MD -MF $depfile $cflags $includes $in -o $out
+    depfile = $depfile
+
+rule link
+    command = @CLANG@ $ldflags $in -o $out
+    description = link $out
+
+rule bin
+    command = @OBJCOPY@ -O binary $in $out
+    description = bin $out
+
+rule report
+    command = @PYTHON@ @MAKE@/obj_report.py --obj $in --src $src --out $out --objdump @OBJDUMP@ @REPORT_FLAGS@
+    description = report $out
+
+@EDGES@
+
+default @DEFAULT@
