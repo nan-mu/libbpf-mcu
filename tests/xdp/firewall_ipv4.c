@@ -13,7 +13,7 @@ struct fw_key {
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, 64);
     __type(key, struct fw_key);
     __type(value, __u8);
 } firewall_rules SEC(".maps");
