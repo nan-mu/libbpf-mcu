@@ -60,6 +60,7 @@ libbpf-mcu/
 - **`forward_redirect.c`**: `DEVMAP` + `bpf_redirect_map`
 - **`rewrite_and_pass.c`**: 按规则重写 UDP 目的端口后 `PASS`
 - **`rewrite_and_redirect.c`**: 改写二层 MAC 后 `bpf_redirect`
+- **`vip_l2_redirect.c`**: dst VIP 命中则 MAC swap + `XDP_TX`，否则 `PASS`
 
 ### failed/
 - **`print_ctx_bad.c`**: 负例（默认构建排除）

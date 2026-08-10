@@ -22,7 +22,8 @@ tests/
 │   ├── firewall_ipv4.c
 │   ├── forward_redirect.c
 │   ├── rewrite_and_pass.c
-│   └── rewrite_and_redirect.c
+│   ├── rewrite_and_redirect.c
+│   └── vip_l2_redirect.c
 └── failed/
     └── print_ctx_bad.c
 ```
