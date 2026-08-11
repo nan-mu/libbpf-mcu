@@ -179,8 +179,18 @@ def _report_flags(target: str, release: bool) -> str:
     return " ".join(flags)
 
 
-def _linker_script(target: str) -> Path | None:
-    path = LINKER_DIR / f"{target}.ld"
+def _linker_script(target: str, slot: str | None = None) -> Path | None:
+    if target != "esp32c3":
+        path = LINKER_DIR / f"{target}.ld"
+        return path if path.is_file() else None
+    # Default / slot=a → esp32c3.ld (HOT_A). slot=b → esp32c3-slot-b.ld.
+    if slot in (None, "a", "A"):
+        path = LINKER_DIR / "esp32c3.ld"
+    elif slot in ("b", "B"):
+        path = LINKER_DIR / "esp32c3-slot-b.ld"
+    else:
+        error(f"unknown --slot={slot} (expected a|b)")
+        sys.exit(1)
     return path if path.is_file() else None
 
 
@@ -190,13 +200,14 @@ def build_target(
     release=False,
     objdump=DEFAULT_OBJDUMP,
     objcopy=DEFAULT_OBJCOPY,
+    slot=None,
 ):
     template = NINJA_DIR / f"{build.target}.ninja"
     if not template.is_file():
         error(f"ninja 模板不可用: {template}")
         sys.exit(1)
 
-    linker = _linker_script(build.target)
+    linker = _linker_script(build.target, slot=slot)
     ninja_dir = DEFAULT_BUILD_DIR / ".ninja"
     ninja_dir.mkdir(parents=True, exist_ok=True)
     ninja_file = ninja_dir / "build.ninja"
@@ -205,6 +216,11 @@ def build_target(
     edges: list[str] = []
     defaults: list[Path] = []
     for input_path, output_path in zip(build.inputs, build.outputs):
+        # Optional per-slot output directory: build/<stem>/slot-b/esp32c3.o
+        if slot in ("b", "B") and build.target == "esp32c3":
+            output_path = output_path.parent / "slot-b" / output_path.name
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
         depfile = output_path.with_suffix(".d")
         edges.append(
             f"build {output_path}: cc {input_path}\n"
@@ -218,6 +234,9 @@ def build_target(
             report_obj = elf_path
             # Re-merge aot_addr whenever BTF bpf.toml is regenerated.
             bpf_toml = output_path.parent / "bpf.toml"
+            # Prefer sibling bpf.toml; fall back to parent stem bpf.toml for slot-b.
+            if not bpf_toml.is_file() and output_path.parent.name.startswith("slot-"):
+                bpf_toml = output_path.parent.parent / "bpf.toml"
             edges.append(
                 f"build {elf_path}: link {output_path} | {linker}"
             )
@@ -253,6 +272,8 @@ def build_target(
     ninja_file.write_text(content)
 
     info(f"已生成 ninja: {ninja_file}")
+    if linker is not None:
+        info(f"linker: {linker} (slot={slot or 'a'})")
     run_ninja(ninja_file, force=force)
 
 

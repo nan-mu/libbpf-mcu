@@ -1,20 +1,17 @@
-/* Auto-generated from firmware/mem_map.toml — do not edit by hand.
- * helper_dispatcher @ 0x40380000, HOT_REGION @ 0x40381000 len 0x1000
+/* Slot A linker — sync with firmware/mem_map.toml
+ * helper_dispatcher @ 0x40380000 len 0x200
+ * HOT_A @ 0x40380200 len 0xE00
  */
 
 helper_dispatcher = 0x40380000;
 
-/*
- * ORIGIN/LENGTH must match firmware HOT_REGION placeholder
- * (`mem_map.toml` / `.iram1.hotload_area`).
- */
 MEMORY
 {
-    HOT_REGION (rwx) : ORIGIN = 0x40381000, LENGTH = 0x1000
+    HOT_REGION (rwx) : ORIGIN = 0x40380200, LENGTH = 0xE00
 }
 
 /*
- * Firmware jalr's HOT_REGION base — not a CRT. Define `_start` at `.xdp`
+ * Firmware jalr's HOT_A base — not a CRT. Define `_start` at `.xdp`
  * so LLD has an entry symbol and e_entry matches the load address.
  */
 ENTRY(_start)

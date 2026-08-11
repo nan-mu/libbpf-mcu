@@ -51,6 +51,12 @@ def main():
         default=os.environ.get("LIBBPF_MCU_OBJCOPY", DEFAULT_OBJCOPY),
         help=f"objcopy 可执行文件（默认 {DEFAULT_OBJCOPY}）",
     )
+    build_parser.add_argument(
+        "--slot",
+        choices=("a", "b", "A", "B"),
+        default="a",
+        help="MCU hot-slot link: a=HOT_A (default), b=HOT_B",
+    )
 
     subparsers.add_parser("clean")
     subparsers.add_parser("test")
@@ -70,6 +76,7 @@ def main():
                 release=args.release,
                 objdump=args.objdump,
                 objcopy=args.objcopy,
+                slot=args.slot.lower() if build.target == "esp32c3" else None,
             )
     elif args.command == "clean":
         clean_build()

@@ -249,7 +249,7 @@ llvm-objdump -d target/xdp_hello/xdp_hello.o
    - LPM trie (最长前缀匹配)
    - 防火墙规则链
    - 事件上报机制
-   - Tail call 支持
+   - Tail call 支持（固件 `bpf_tail_call` helper + `--slot=a|b` 绝对地址链接；见 `make/linker/esp32c3*.ld`）
    - 更复杂的包改写场景
 
 4. **测试和验证**
