@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -10,6 +12,11 @@ from pathlib import Path
 
 from tiny_log import error, info, warning
 
+try:
+    import tomllib
+except ImportError:  # pragma: no cover
+    tomllib = None
+
 MAKE_DIR = Path(__file__).resolve().parent
 ROOT = MAKE_DIR.parent
 WORKSPACE_ROOT = ROOT.parent
@@ -17,10 +24,17 @@ DEFAULT_BUILD_DIR = WORKSPACE_ROOT / "build"
 TESTS_DIR = ROOT / "tests"
 NINJA_DIR = MAKE_DIR / "ninja"
 LINKER_DIR = MAKE_DIR / "linker"
+FIRMWARE_MEM_MAP = Path(
+    os.environ.get(
+        "BS_FIRMWARE_MEM_MAP",
+        str(WORKSPACE_ROOT / "firmware" / "mem.toml"),
+    )
+)
 CLANG = "clang"
 DEFAULT_OBJDUMP = "llvm-objdump-mp-22"
 DEFAULT_OBJCOPY = "llvm-objcopy-mp-22"
 REPORT_SCRIPTS = (MAKE_DIR / "obj_report.py", MAKE_DIR / "btf.py")
+SLOT_LD_TMPL = LINKER_DIR / "esp32c3-slot.ld.tmpl"
 
 
 @dataclass(frozen=True)
@@ -167,11 +181,11 @@ def check_build_fs(paths):
     return BuildPaths(checked_inputs, checked_outputs)
 
 
-def _report_flags(target: str, release: bool) -> str:
+def _report_flags(target: str, release: bool, has_linker: bool = False) -> str:
     flags: list[str] = []
     if target == "bpf":
         flags.append("--btf")
-    elif _linker_script(target) is not None:
+    elif has_linker:
         # Linked MCU payload: write HOT_REGION map VMAs into sibling bpf.toml.
         flags.append("--merge-aot-addrs")
     if release:
@@ -179,19 +193,120 @@ def _report_flags(target: str, release: bool) -> str:
     return " ".join(flags)
 
 
+def _parse_hex_or_int(value) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if s.lower().startswith("0x"):
+            return int(s, 16)
+        return int(s, 10)
+    raise TypeError(f"expected int or hex str, got {type(value)}")
+
+
+def _load_mem_map(path: Path) -> tuple[int, list[tuple[int, int]]]:
+    """Return (helper_base, [(hot_base, hot_len), ...])."""
+    if not path.is_file():
+        error(f"firmware mem.toml 不可用: {path}")
+        sys.exit(1)
+    text = path.read_text()
+    if tomllib is not None:
+        data = tomllib.loads(text)
+        helper = data.get("helper") or {}
+        helper_base = _parse_hex_or_int(helper.get("base", 0x40380000))
+        regions = data.get("hot_regions")
+        if isinstance(regions, list) and regions:
+            hot = []
+            for i, r in enumerate(regions):
+                hot.append(
+                    (
+                        _parse_hex_or_int(r["base"]),
+                        _parse_hex_or_int(r["length"]),
+                    )
+                )
+            return helper_base, hot
+        # Legacy keys
+        hot = []
+        for key in ("hot_region_a", "hot_region_b"):
+            if key in data:
+                t = data[key]
+                hot.append(
+                    (_parse_hex_or_int(t["base"]), _parse_hex_or_int(t["length"]))
+                )
+        if hot:
+            return helper_base, hot
+        error(f"{path}: missing [[hot_regions]] (or legacy hot_region_a/b)")
+        sys.exit(1)
+
+    # Minimal fallback without tomllib: regex scan.
+    hb = re.search(r"\[helper\][^\[]*?base\s*=\s*(0x[0-9a-fA-F]+|\d+)", text, re.S)
+    helper_base = int(hb.group(1), 0) if hb else 0x40380000
+    hot = []
+    for m in re.finditer(
+        r"\[\[hot_regions\]\][^\[]*?base\s*=\s*(0x[0-9a-fA-F]+|\d+)[^\[]*?"
+        r"length\s*=\s*(0x[0-9a-fA-F]+|\d+)",
+        text,
+        re.S,
+    ):
+        hot.append((int(m.group(1), 0), int(m.group(2), 0)))
+    if not hot:
+        error(f"{path}: could not parse hot_regions (install Python 3.11+ for tomllib)")
+        sys.exit(1)
+    return helper_base, hot
+
+
+def _normalize_slot_index(slot: str | int | None, slot_count: int) -> int:
+    if slot is None:
+        return 0
+    if isinstance(slot, int):
+        idx = slot
+    else:
+        s = str(slot).strip().lower()
+        aliases = {"a": 0, "b": 1}
+        if s in aliases:
+            idx = aliases[s]
+        else:
+            try:
+                idx = int(s, 0)
+            except ValueError:
+                error(f"unknown --slot={slot} (expected 0..{slot_count - 1} or a|b)")
+                sys.exit(1)
+    if not (0 <= idx < slot_count):
+        error(f"--slot={slot} out of range for {slot_count} hot_regions in mem_map")
+        sys.exit(1)
+    return idx
+
+
+def _generate_esp32c3_slot_ld(slot_index: int, out_dir: Path) -> Path:
+    helper_base, hot = _load_mem_map(FIRMWARE_MEM_MAP)
+    if slot_index >= len(hot):
+        error(f"slot {slot_index} >= hot_regions count {len(hot)}")
+        sys.exit(1)
+    origin, length = hot[slot_index]
+    if not SLOT_LD_TMPL.is_file():
+        error(f"linker template missing: {SLOT_LD_TMPL}")
+        sys.exit(1)
+    tmpl = SLOT_LD_TMPL.read_text()
+    body = tmpl.format(
+        slot_index=slot_index,
+        origin=origin,
+        length=length,
+        helper_base=helper_base,
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"esp32c3-slot-{slot_index}.ld"
+    out_path.write_text(body)
+    return out_path
+
+
 def _linker_script(target: str, slot: str | None = None) -> Path | None:
     if target != "esp32c3":
         path = LINKER_DIR / f"{target}.ld"
         return path if path.is_file() else None
-    # Default / slot=a → esp32c3.ld (HOT_A). slot=b → esp32c3-slot-b.ld.
-    if slot in (None, "a", "A"):
-        path = LINKER_DIR / "esp32c3.ld"
-    elif slot in ("b", "B"):
-        path = LINKER_DIR / "esp32c3-slot-b.ld"
-    else:
-        error(f"unknown --slot={slot} (expected a|b)")
-        sys.exit(1)
-    return path if path.is_file() else None
+    _helper, hot = _load_mem_map(FIRMWARE_MEM_MAP)
+    idx = _normalize_slot_index(slot, len(hot))
+    ninja_dir = DEFAULT_BUILD_DIR / ".ninja"
+    return _generate_esp32c3_slot_ld(idx, ninja_dir)
 
 
 def build_target(
@@ -207,6 +322,12 @@ def build_target(
         error(f"ninja 模板不可用: {template}")
         sys.exit(1)
 
+    slot_index = None
+    if build.target == "esp32c3":
+        _helper, hot = _load_mem_map(FIRMWARE_MEM_MAP)
+        slot_index = _normalize_slot_index(slot, len(hot))
+        slot = str(slot_index)
+
     linker = _linker_script(build.target, slot=slot)
     ninja_dir = DEFAULT_BUILD_DIR / ".ninja"
     ninja_dir.mkdir(parents=True, exist_ok=True)
@@ -216,9 +337,13 @@ def build_target(
     edges: list[str] = []
     defaults: list[Path] = []
     for input_path, output_path in zip(build.inputs, build.outputs):
-        # Optional per-slot output directory: build/<stem>/slot-b/esp32c3.o
-        if slot in ("b", "B") and build.target == "esp32c3":
-            output_path = output_path.parent / "slot-b" / output_path.name
+        # Per-slot output directory for non-zero slots: build/<stem>/slot-N/
+        if (
+            build.target == "esp32c3"
+            and slot_index is not None
+            and slot_index != 0
+        ):
+            output_path = output_path.parent / f"slot-{slot_index}" / output_path.name
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
         depfile = output_path.with_suffix(".d")
@@ -234,7 +359,7 @@ def build_target(
             report_obj = elf_path
             # Re-merge aot_addr whenever BTF bpf.toml is regenerated.
             bpf_toml = output_path.parent / "bpf.toml"
-            # Prefer sibling bpf.toml; fall back to parent stem bpf.toml for slot-b.
+            # Prefer sibling bpf.toml; fall back to parent stem bpf.toml for slot-N.
             if not bpf_toml.is_file() and output_path.parent.name.startswith("slot-"):
                 bpf_toml = output_path.parent.parent / "bpf.toml"
             edges.append(
@@ -266,14 +391,17 @@ def build_target(
     content = content.replace(
         "@LINKER@", str(linker) if linker is not None else ""
     )
-    content = content.replace("@REPORT_FLAGS@", _report_flags(build.target, release))
+    content = content.replace(
+        "@REPORT_FLAGS@",
+        _report_flags(build.target, release, has_linker=linker is not None),
+    )
     content = content.replace("@EDGES@", "\n".join(edges))
     content = content.replace("@DEFAULT@", " ".join(str(path) for path in defaults))
     ninja_file.write_text(content)
 
     info(f"已生成 ninja: {ninja_file}")
     if linker is not None:
-        info(f"linker: {linker} (slot={slot or 'a'})")
+        info(f"linker: {linker} (slot={slot_index if slot_index is not None else slot})")
     run_ninja(ninja_file, force=force)
 
 

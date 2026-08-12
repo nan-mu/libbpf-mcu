@@ -53,9 +53,9 @@ def main():
     )
     build_parser.add_argument(
         "--slot",
-        choices=("a", "b", "A", "B"),
-        default="a",
-        help="MCU hot-slot link: a=HOT_A (default), b=HOT_B",
+        default="0",
+        help="MCU hot-slot index: 0..N-1 from firmware/mem.toml "
+        "(aliases: a=0, b=1)",
     )
 
     subparsers.add_parser("clean")
@@ -76,7 +76,7 @@ def main():
                 release=args.release,
                 objdump=args.objdump,
                 objcopy=args.objcopy,
-                slot=args.slot.lower() if build.target == "esp32c3" else None,
+                slot=args.slot if build.target == "esp32c3" else None,
             )
     elif args.command == "clean":
         clean_build()
