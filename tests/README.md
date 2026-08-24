@@ -17,6 +17,8 @@ tests/
 │   ├── print_udp.c
 │   └── maps_helpers.c
 ├── xdp/
+│   ├── ddos_wl.c
+│   ├── ddos_rate_bl.c
 │   ├── drop_icmp.c
 │   ├── mac_swap.c
 │   ├── firewall_ipv4.c

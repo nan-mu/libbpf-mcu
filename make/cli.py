@@ -54,7 +54,7 @@ def main():
     build_parser.add_argument(
         "--slot",
         default="0",
-        help="MCU hot-slot index: 0..N-1 from firmware/mem.toml "
+        help="MCU hot-slot index: 0..N-1 from firmware/xdp-mcu/mem.toml "
         "(aliases: a=0, b=1)",
     )
 
