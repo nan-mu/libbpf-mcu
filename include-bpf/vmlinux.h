@@ -108614,4 +108614,6 @@ extern void bpf_xdp_xfrm_state_release(struct xfrm_state *x) __weak __ksym;
 #pragma clang attribute pop
 #endif
 
+#include "bs_listing1_shims.h"
+
 #endif /* __VMLINUX_H__ */

@@ -21,6 +21,7 @@ SECTIONS
     .xdp : ALIGN(4) {{
         _start = .;
         *(xdp)
+        *(xdp1)
         *(.xdp)
         *(.xdp.*)
     }} > HOT_REGION
@@ -40,6 +41,7 @@ SECTIONS
 
     .maps : ALIGN(4) {{
         *(.maps)
+        *(maps)
     }} > HOT_REGION
 
     .data : ALIGN(4) {{

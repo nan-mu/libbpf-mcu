@@ -522,10 +522,12 @@ def estimate_bytes(
     return max_entries * (key_size + value_size)
 
 
-def extract_maps(types: list[dict[str, Any]]) -> dict[str, Any]:
+def extract_maps(
+    types: list[dict[str, Any]], maps_blob: bytes | None = None
+) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for t in types[1:]:
-        if t["kind"] != BTF_KIND_DATASEC or t.get("name") != ".maps":
+        if t["kind"] != BTF_KIND_DATASEC or t.get("name") not in (".maps", "maps"):
             continue
         for var_info in t.get("vars", []):
             var_id = var_info["type"]
@@ -565,6 +567,14 @@ def extract_maps(types: list[dict[str, Any]]) -> dict[str, Any]:
                 elif mname == "value":
                     value_type_id = map_field_type(types, m["type"])
                     value_size = type_size(types, value_type_id)
+
+            # Classic `struct bpf_map_def` — field values live in the maps blob.
+            if map_type is None and maps_blob is not None:
+                off = int(var_info.get("offset", 0))
+                if off + 16 <= len(maps_blob):
+                    map_type, key_size, value_size, max_entries = struct.unpack_from(
+                        "<IIII", maps_blob, off
+                    )
 
             if map_type is None:
                 continue
@@ -640,7 +650,8 @@ def analyze(obj_path: Path) -> dict[str, Any]:
         raise ValueError(f".BTF section not found in {obj_path} (compile with -g)")
 
     types, strtab = parse_btf(btf_data)
-    maps = extract_maps(types)
+    maps_blob = elf_section(data, "maps") or elf_section(data, ".maps")
+    maps = extract_maps(types, maps_blob)
 
     core: list[dict[str, Any]] = []
     ext = elf_section(data, ".BTF.ext")

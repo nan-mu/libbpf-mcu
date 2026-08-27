@@ -21,7 +21,7 @@ SECTION_LINE = re.compile(
 
 # llvm-objdump -t: `403818cc g     O .maps	00000010 arr_map`
 MAPS_SYM_LINE = re.compile(
-    r"^([0-9a-fA-F]+)\s+\S+\s+\S+\s+\.maps\s+[0-9a-fA-F]+\s+(\S+)\s*$"
+    r"^([0-9a-fA-F]+)\s+\S+\s+\S+\s+\.?maps\s+[0-9a-fA-F]+\s+(\S+)\s*$"
 )
 
 # Sections with no value in the architecture report (tooling / ELF / reloc / dump noise).
@@ -179,7 +179,7 @@ def write_report(
 ) -> None:
     """All targets: header → [xdp] → [text?] → optional BTF tail."""
     sections = parse_sections(objdump, obj, keep_empty=True)
-    xdp = find_section(sections, "xdp")
+    xdp = find_section(sections, "xdp", "xdp1", ".xdp")
     text = find_section(sections, "text", ".text")
 
     lines: list[str] = []
