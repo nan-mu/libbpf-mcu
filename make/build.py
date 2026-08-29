@@ -27,7 +27,7 @@ LINKER_DIR = MAKE_DIR / "linker"
 FIRMWARE_MEM_MAP = Path(
     os.environ.get(
         "BS_FIRMWARE_MEM_MAP",
-        str(WORKSPACE_ROOT / "firmware" / "xdp-mcu" / "mem.toml"),
+        str(WORKSPACE_ROOT / "xpost" / "examples" / "firmware" / "mem.toml"),
     )
 )
 CLANG = "clang"

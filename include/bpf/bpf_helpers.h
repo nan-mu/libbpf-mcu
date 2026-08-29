@@ -89,6 +89,12 @@ struct bpf_dynptr {
 #define bpf_ktime_get_ns() \
 	((__u64)___bpf_ktime_get_ns_call())
 
+#define bpf_xpost_wdt_feed(handle) \
+	((void)___bpf_xpost_wdt_feed_call(handle))
+
+#define bpf_xpost_evt_wake() \
+	((void)___bpf_xpost_evt_wake_call())
+
 #define bpf_tail_call(ctx, map, index) \
 	((long)___bpf_tail_call_call(ctx, map, index))
 

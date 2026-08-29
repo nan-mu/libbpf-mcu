@@ -57,6 +57,8 @@ uint32_t safe_helper_call(uint32_t idx, uint32_t arg1, uint32_t arg2,
 #define BPF_FUNC_dynptr_read               201
 #define BPF_FUNC_dynptr_write              202
 #define BPF_FUNC_dynptr_data               203
+#define BPF_FUNC_xpost_wdt_feed            224
+#define BPF_FUNC_xpost_evt_wake            225
 
 #define ___bpf_map_lookup_elem_call(map, key) \
 	safe_helper_call(BPF_FUNC_map_lookup_elem, (uint32_t)(map), (uint32_t)(key), \
@@ -169,3 +171,9 @@ uint32_t safe_helper_call(uint32_t idx, uint32_t arg1, uint32_t arg2,
 	safe_helper_call(BPF_FUNC_trace_printk, (uint32_t)(fmt), \
 	                 BPF_PRINTK_PACK(fmt_size, nargs), \
 	                 (uint32_t)(arg1), (uint32_t)(arg2), (uint32_t)(arg3))
+
+#define ___bpf_xpost_wdt_feed_call(handle) \
+	safe_helper_call(BPF_FUNC_xpost_wdt_feed, (uint32_t)(handle), 0, 0, 0, 0)
+
+#define ___bpf_xpost_evt_wake_call() \
+	safe_helper_call(BPF_FUNC_xpost_evt_wake, 0, 0, 0, 0, 0)
