@@ -120,7 +120,6 @@ static void emit_bench_done(__u64 count, __u64 t_first, __u64 t_last)
 	};
 
 	bpf_ringbuf_output(&dut_evt, &rec, sizeof(rec), 0);
-	bpf_xpost_evt_wake();
 }
 
 SEC("xdp1")
