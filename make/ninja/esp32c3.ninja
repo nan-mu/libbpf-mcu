@@ -24,6 +24,15 @@ rule report
     command = @PYTHON@ @MAKE@/obj_report.py --obj $in --src $src --out $out --objdump @OBJDUMP@ @REPORT_FLAGS@
     description = report $out
 
+rule tool
+    command = CARGO_TARGET_DIR=@TOOLS_TARGET@ cargo build --manifest-path @TOOLS_MANIFEST@ --release --target @HOST_TRIPLE@ --bin xpost-mcu-elf
+    description = TOOL xpost-mcu-elf
+    restat = 1
+
+rule pack
+    command = @TOOL_BIN@ pack --image $image --bpf-toml $bpf_toml --name $name --slot-address $slot --helper-address $helper --machine $machine -o $out && @PYTHON@ @MAKE@/stamp_elf_size.py --report $report --elf $out
+    description = pack $out
+
 @EDGES@
 
 default @DEFAULT@

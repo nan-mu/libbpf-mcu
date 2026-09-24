@@ -441,68 +441,119 @@ def primitive_name(types: list[dict[str, Any]], type_id: int) -> str:
     return "u8"
 
 
-def _align_pad_lines(gap: int, indent: str) -> list[str]:
-    """Emit padding as `uN align` covering `gap` bytes (largest chunks first)."""
-    lines = []
-    for width in (8, 4, 2, 1):
-        while gap >= width:
-            lines.append(f"{indent}u{width * 8} align")
-            gap -= width
-    return lines
-
-
 def layout_lines(types: list[dict[str, Any]], type_id: int, indent: int = 4) -> list[str]:
-    """Field lines for key/value layout strings (no struct wrapper)."""
+    """Flatten compiler bit offsets, retaining each field/gap as one interval.
+
+    This is layout notation, not C source. For example `u3 flag` records a
+    three-bit field and `u29 align` the following padding interval.
+    """
     pad = " " * indent
-    display_id = skip_mods(types, type_id, typedefs=False)
-    if display_id <= 0 or display_id >= len(types):
-        return [f"{pad}u8 v"]
-
-    resolved_id = skip_mods(types, display_id)
-    resolved = types[resolved_id]
-    kind = resolved["kind"]
-
-    if kind in (BTF_KIND_STRUCT, BTF_KIND_UNION):
-        lines: list[str] = []
+    tid = skip_mods(types, type_id)
+    if not 0 < tid < len(types):
+        raise ValueError("invalid layout type")
+    t = types[tid]
+    kind = t["kind"]
+    if kind == BTF_KIND_UNION:
+        raise ValueError("overlapping union layout is unsupported")
+    if kind == BTF_KIND_PTR:
+        raise ValueError("pointer-bearing map layout is target-dependent and unsupported")
+    if kind == BTF_KIND_STRUCT:
+        lines = []
         cursor = 0
-        struct_size = int(resolved.get("size", 0))
-        for m in resolved.get("members", []):
-            bit_off = int(m["offset"])
-            if resolved.get("kind_flag"):
-                bit_off = bit_off & 0xFFFFFF
-            byte_off = bit_off // 8
-            mid = skip_mods(types, m["type"], typedefs=False)
-            m_resolved = skip_mods(types, mid)
-            m_size = type_size(types, mid)
-            name = m["name"] or "_"
-
-            if byte_off > cursor:
-                lines.extend(_align_pad_lines(byte_off - cursor, pad))
-                cursor = byte_off
-
-            if 0 < m_resolved < len(types) and types[m_resolved]["kind"] in (
-                BTF_KIND_STRUCT,
-                BTF_KIND_UNION,
-            ):
-                nested = types[m_resolved].get("name") or name
-                lines.append(f"{pad}{nested} {{")
-                for sub in layout_lines(types, mid, indent + 4):
-                    lines.append(sub)
-                lines.append(f"{pad}}}")
+        total = int(t["size"]) * 8
+        for member in t.get("members", []):
+            raw = int(member["offset"])
+            offset = raw & 0xFFFFFF if t.get("kind_flag") else raw
+            width = raw >> 24 if t.get("kind_flag") else 0
+            mid = skip_mods(types, member["type"])
+            if not 0 < mid < len(types):
+                raise ValueError("invalid member type")
+            # Older BTF encodes bitfields in BTF_INT_BITS/OFFSET.
+            mt = types[mid]
+            if not t.get("kind_flag") and mt["kind"] == BTF_KIND_INT:
+                int_data = int(mt.get("int_data", 0))
+                bits = int_data & 0xFF
+                offset += (int_data >> 16) & 0xFF
+                if bits and bits != int(mt["size"]) * 8:
+                    width = bits
+            if offset < cursor:
+                raise ValueError("overlapping map layout is unsupported")
+            if offset > cursor:
+                lines.append(f"{pad}u{offset - cursor} align")
+            if width:
+                if mt["kind"] not in (BTF_KIND_INT, BTF_KIND_ENUM, BTF_KIND_ENUM64):
+                    raise ValueError("invalid bitfield base type")
+                lines.append(f"{pad}u{width} {member['name'] or '_'}")
             else:
-                lines.append(f"{pad}{primitive_name(types, mid)} {name}")
-            cursor = max(cursor, byte_off + m_size)
-
-        if struct_size > cursor:
-            lines.extend(_align_pad_lines(struct_size - cursor, pad))
+                nested = layout_lines(types, mid, indent)
+                if mt["kind"] != BTF_KIND_STRUCT:
+                    nested = [re.sub(r"\bv$", member["name"] or "_", line) for line in nested]
+                lines.extend(nested)
+                width = sum(layout_bit_intervals("\n".join(nested)))
+            cursor = offset + width
+            if cursor > total:
+                raise ValueError("member exceeds structure size")
+        if cursor < total:
+            lines.append(f"{pad}u{total - cursor} align")
         return lines
-
-    # Scalar / typedef-to-scalar / array treated as one field.
-    return [f"{pad}{primitive_name(types, display_id)} v"]
+    if kind == BTF_KIND_ARRAY:
+        # Validate elements recursively (reject pointers/unions), but an array
+        # field is a single interval, never split to evade the 255-bit limit.
+        element = layout_lines(types, t["elem_type"], indent)
+        bits = sum(layout_bit_intervals("\n".join(element))) * int(t["nelems"])
+        if bits <= 0:
+            raise ValueError("empty/flexible array layout is unsupported")
+        return [f"{pad}u{bits} v"]
+    if kind not in (BTF_KIND_INT, BTF_KIND_ENUM, BTF_KIND_ENUM64, BTF_KIND_FLOAT):
+        raise ValueError("unsupported map layout type")
+    return [f"{pad}{primitive_name(types, tid)} v"]
 
 
 def format_layout(types: list[dict[str, Any]], type_id: int) -> str:
     return "\n".join(layout_lines(types, type_id))
+
+
+def layout_from_size(size: int) -> str:
+    """Synthesize a single-field layout when only byte size is known.
+
+    Classic `struct bpf_map_def` carries `key_size`/`value_size` in the maps
+    blob but no BTF key/value type ids. Prefer ABI-natural unsigned widths.
+    """
+    if size <= 0:
+        raise ValueError(f"invalid map field size {size}")
+    if size in (1, 2, 4, 8):
+        return f"    u{size * 8} v"
+    # Opaque blob: expose as a byte array of the declared width.
+    return f"    u8 v[{size}]"
+
+
+def layout_bit_intervals(layout: str) -> list[int]:
+    """One interval per field/array/padding line, measured in bits."""
+    if not isinstance(layout, str):
+        raise ValueError("layout must be a string")
+    intervals = []
+    for line in layout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.endswith("{") or line == "}":
+            raise ValueError(f"nested layout notation is unsupported: {line}")
+        match = re.fullmatch(r"[uif](\d+)\s+\w+(?:\[(\d+)\])?", line)
+        if not match:
+            raise ValueError(f"unsupported layout line `{line}`")
+        bits = int(match.group(1)) * (int(match.group(2)) if match.group(2) else 1)
+        if bits <= 0:
+            raise ValueError("layout interval must be positive")
+        intervals.append(bits)
+    return intervals
+
+
+def layout_byte_size(layout: str) -> int:
+    """Sum final storage bits, including padding, before converting to bytes."""
+    total = sum(layout_bit_intervals(layout))
+    if total % 8:
+        raise ValueError("layout total is not byte aligned")
+    return total // 8
 
 
 def estimate_bytes(
@@ -579,6 +630,56 @@ def extract_maps(
             if map_type is None:
                 continue
 
+            # RINGBUF / USER_RINGBUF: max_entries is buffer size; no key/value types.
+            kind = STORAGE_KIND.get(map_type, "other")
+            if kind == "ringbuf":
+                est = estimate_bytes(map_type, max_entries, 0, 0)
+                items.append(
+                    {
+                        "name": map_name,
+                        "map_type": map_type,
+                        "map_type_name": MAP_TYPE_NAME.get(
+                            map_type, f"BPF_MAP_TYPE_{map_type}"
+                        ),
+                        "max_entries": max_entries,
+                        "key_size": 0,
+                        "value_size": 0,
+                        "estimated_bytes": est,
+                        "key": "",
+                        "value": "",
+                    }
+                )
+                continue
+
+            if key_size <= 0 or value_size <= 0:
+                raise ValueError(
+                    f"map `{map_name}` missing positive key_size/value_size "
+                    f"(got key_size={key_size}, value_size={value_size})"
+                )
+
+            if key_type_id:
+                key_layout = format_layout(types, key_type_id)
+            else:
+                key_layout = layout_from_size(key_size)
+            if value_type_id:
+                value_layout = format_layout(types, value_type_id)
+            else:
+                value_layout = layout_from_size(value_size)
+
+            # Fail closed when BTF-derived layout disagrees with declared sizes.
+            key_layout_size = layout_byte_size(key_layout)
+            value_layout_size = layout_byte_size(value_layout)
+            if key_layout_size != key_size:
+                raise ValueError(
+                    f"map `{map_name}` key layout size {key_layout_size} "
+                    f"!= key_size {key_size}"
+                )
+            if value_layout_size != value_size:
+                raise ValueError(
+                    f"map `{map_name}` value layout size {value_layout_size} "
+                    f"!= value_size {value_size}"
+                )
+
             est = estimate_bytes(map_type, max_entries, key_size, value_size)
             item: dict[str, Any] = {
                 "name": map_name,
@@ -588,8 +689,8 @@ def extract_maps(
                 "key_size": key_size,
                 "value_size": value_size,
                 "estimated_bytes": est,
-                "key": format_layout(types, key_type_id) if key_type_id else "    u8 v",
-                "value": format_layout(types, value_type_id) if value_type_id else "    u8 v",
+                "key": key_layout,
+                "value": value_layout,
             }
             items.append(item)
 
@@ -697,6 +798,8 @@ def format_btf_toml(report: dict[str, Any]) -> list[str]:
         lines.append(f"[{_maps_table_name(str(item.get('name', '')))}]")
         lines.append(f"map_type = {toml_string(str(item.get('map_type_name', '')))}")
         lines.append(f"max_entries = {int(item.get('max_entries', 0))}")
+        lines.append(f"key_size = {int(item.get('key_size', 0))}")
+        lines.append(f"value_size = {int(item.get('value_size', 0))}")
         lines.append(f"estimated_bytes = {int(item.get('estimated_bytes', 0))}")
         append_multiline(lines, "key", str(item.get("key", "")))
         append_multiline(lines, "value", str(item.get("value", "")))

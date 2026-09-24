@@ -277,7 +277,7 @@ def main() -> None:
     parser.add_argument("--obj", required=True, type=Path)
     parser.add_argument("--src", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
-    parser.add_argument("--objdump", default="llvm-objdump-mp-22")
+    parser.add_argument("--objdump", default=None)
     parser.add_argument("--no-content", action="store_true")
     parser.add_argument(
         "--btf",
@@ -291,14 +291,36 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    from llvm_tools import resolve_llvm_tool
+
+    objdump = args.objdump or resolve_llvm_tool("llvm-objdump")
+
     obj = args.obj.resolve()
     out = args.out.resolve()
     btf_toml_lines = None
     if args.btf:
-        from btf import analyze, format_btf_toml
+        from btf import analyze, format_btf_toml, layout_byte_size
 
         try:
-            btf_toml_lines = format_btf_toml(analyze(obj))
+            report = analyze(obj)
+            # Fail closed: every map layout must match declared sizes.
+            for item in (report.get("maps") or {}).get("items") or []:
+                name = item.get("name", "")
+                key_sz = int(item.get("key_size", 0))
+                val_sz = int(item.get("value_size", 0))
+                key_layout = str(item.get("key", ""))
+                val_layout = str(item.get("value", ""))
+                if layout_byte_size(key_layout) != key_sz:
+                    raise ValueError(
+                        f"map `{name}` key layout size mismatch "
+                        f"({layout_byte_size(key_layout)} != {key_sz})"
+                    )
+                if layout_byte_size(val_layout) != val_sz:
+                    raise ValueError(
+                        f"map `{name}` value layout size mismatch "
+                        f"({layout_byte_size(val_layout)} != {val_sz})"
+                    )
+            btf_toml_lines = format_btf_toml(report)
         except Exception as exc:
             sys.stderr.write(f"obj_report: BTF 分析失败 ({obj}): {exc}\n")
             sys.exit(1)
@@ -307,28 +329,40 @@ def main() -> None:
         obj=obj,
         source=args.src.resolve(),
         out=out,
-        objdump=args.objdump,
+        objdump=objdump,
         with_content=not args.no_content,
         btf_toml_lines=btf_toml_lines,
     )
 
     if args.merge_aot_addrs:
-        addrs = parse_maps_aot_addrs(args.objdump, obj)
+        addrs = parse_maps_aot_addrs(objdump, obj)
         bpf_toml = out.parent / "bpf.toml"
+        tty = sys.stderr.isatty()
+
+        def progress(msg: str) -> None:
+            # Ephemeral only on a TTY (erased on success). Non-TTY: stay quiet.
+            if tty:
+                sys.stderr.write(f"\r\033[K{msg}")
+                sys.stderr.flush()
+
+        def clear_progress() -> None:
+            if tty:
+                sys.stderr.write("\r\033[K")
+                sys.stderr.flush()
+
         if not addrs:
-            sys.stderr.write(
-                f"obj_report: --merge-aot-addrs: no .maps symbols in {obj}\n"
-            )
+            progress(f"obj_report: --merge-aot-addrs: no .maps symbols in {obj}")
+            clear_progress()
         elif not bpf_toml.is_file():
-            sys.stderr.write(
-                f"obj_report: --merge-aot-addrs: missing {bpf_toml}\n"
-            )
+            progress(f"obj_report: --merge-aot-addrs: missing {bpf_toml}")
+            clear_progress()
         else:
             n = merge_aot_addrs_into_toml(bpf_toml, addrs)
-            sys.stderr.write(
+            progress(
                 f"obj_report: merged aot_addr for {n}/{len(addrs)} maps "
-                f"into {bpf_toml}\n"
+                f"into {bpf_toml}"
             )
+            clear_progress()
 
 
 if __name__ == "__main__":

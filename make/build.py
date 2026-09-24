@@ -1,9 +1,9 @@
-"""Build orchestration for libbpf-mcu (ninja: compile + object reports)."""
+"""Build orchestration for libbpf-mcu (ninja: compile + object reports + pack)."""
 
 from __future__ import annotations
 
-import os
-import re
+import json
+import platform
 import shutil
 import subprocess
 import sys
@@ -11,11 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tiny_log import error, info, warning
-
-try:
-    import tomllib
-except ImportError:  # pragma: no cover
-    tomllib = None
+from llvm_tools import resolve_llvm_tool
 
 MAKE_DIR = Path(__file__).resolve().parent
 ROOT = MAKE_DIR.parent
@@ -24,17 +20,26 @@ DEFAULT_BUILD_DIR = WORKSPACE_ROOT / "build"
 TESTS_DIR = ROOT / "tests"
 NINJA_DIR = MAKE_DIR / "ninja"
 LINKER_DIR = MAKE_DIR / "linker"
-FIRMWARE_MEM_MAP = Path(
-    os.environ.get(
-        "BS_FIRMWARE_MEM_MAP",
-        str(WORKSPACE_ROOT / "xpost" / "examples" / "firmware" / "mem.toml"),
-    )
-)
-CLANG = "clang"
-DEFAULT_OBJDUMP = "llvm-objdump-mp-22"
-DEFAULT_OBJCOPY = "llvm-objcopy-mp-22"
+TOOLS_DIR = ROOT / "tools"
+TOOLS_MANIFEST = TOOLS_DIR / "Cargo.toml"
+TOOLS_SRC = TOOLS_DIR / "src" / "main.rs"
+TOOLS_TARGET = TOOLS_DIR / "target"
+XPOST_ELF_MANIFEST = WORKSPACE_ROOT / "xpost" / "xpost-elf" / "Cargo.toml"
+CLANG = resolve_llvm_tool("clang", prefer_homebrew=True)
+DEFAULT_OBJDUMP = resolve_llvm_tool("llvm-objdump")
+DEFAULT_OBJCOPY = resolve_llvm_tool("llvm-objcopy")
 REPORT_SCRIPTS = (MAKE_DIR / "obj_report.py", MAKE_DIR / "btf.py")
 SLOT_LD_TMPL = LINKER_DIR / "esp32c3-slot.ld.tmpl"
+XPOST_ESP32_C3_ARCH = 1
+
+
+@dataclass(frozen=True)
+class MemMapV0:
+    helper_addr: int
+    slot_addr: int
+    slot_len: int
+    table_addr: int
+    table_len: int
 
 
 @dataclass(frozen=True)
@@ -86,12 +91,21 @@ def _split_paths(value):
     return [item for item in value.split() if item]
 
 
-def _default_inputs():
+def _default_inputs(crate: str | None = None):
     inputs = sorted(
         path
         for path in TESTS_DIR.rglob("*.c")
         if "failed" not in path.relative_to(TESTS_DIR).parts
     )
+    if crate is not None:
+        matched = [path for path in inputs if path.stem == crate]
+        if not matched:
+            error(f"未找到 stem={crate!r} 的测试源（tests/**/{crate}.c）")
+            sys.exit(1)
+        if len(matched) > 1:
+            error(f"stem={crate!r} 匹配多个文件: {matched}")
+            sys.exit(1)
+        inputs = matched
     if not inputs:
         error(f"默认测试输入为空: {TESTS_DIR}")
         sys.exit(1)
@@ -114,7 +128,7 @@ def _derive_default_outputs(inputs, target):
     return outputs
 
 
-def check_build_args(target, inputs, outputs):
+def check_build_args(target, inputs, outputs, crate: str | None = None):
     if target is None:
         targets = build_registry.get()
         if not targets:
@@ -130,15 +144,25 @@ def check_build_args(target, inputs, outputs):
     input_items = _split_paths(inputs)
     output_items = _split_paths(outputs)
 
+    if crate is not None and input_items is not None:
+        error("不能同时指定 -c 与 --inputs/-i")
+        sys.exit(1)
+
     if input_items is None and output_items is not None:
-        warning("不能只指定 --output/-o；默认输入会包含多个测试文件，请同时指定 --inputs/-i")
+        warning(
+            "不能只指定 --output/-o；默认输入会包含多个测试文件，请同时指定 --inputs/-i"
+        )
         sys.exit(1)
 
     if output_items is not None and len(targets) > 1:
         error("构建多个 target 时不能指定 --output/-o")
         sys.exit(1)
 
-    raw_inputs = _default_inputs() if input_items is None else [Path(item) for item in input_items]
+    raw_inputs = (
+        _default_inputs(crate)
+        if input_items is None
+        else [Path(item) for item in input_items]
+    )
 
     builds = []
     for item in targets:
@@ -186,127 +210,120 @@ def _report_flags(target: str, release: bool, has_linker: bool = False) -> str:
     if target == "bpf":
         flags.append("--btf")
     elif has_linker:
-        # Linked MCU payload: write HOT_REGION map VMAs into sibling bpf.toml.
         flags.append("--merge-aot-addrs")
     if release:
         flags.append("--no-content")
     return " ".join(flags)
 
 
-def _parse_hex_or_int(value) -> int:
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        s = value.strip()
-        if s.lower().startswith("0x"):
-            return int(s, 16)
-        return int(s, 10)
-    raise TypeError(f"expected int or hex str, got {type(value)}")
+def _host_triple() -> str:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == "darwin" and machine in ("arm64", "aarch64"):
+        return "aarch64-apple-darwin"
+    if system == "darwin" and machine in ("x86_64", "amd64"):
+        return "x86_64-apple-darwin"
+    if system == "linux" and machine in ("x86_64", "amd64"):
+        return "x86_64-unknown-linux-gnu"
+    if system == "linux" and machine in ("arm64", "aarch64"):
+        return "aarch64-unknown-linux-gnu"
+    return "aarch64-apple-darwin"
 
 
-def _load_mem_map(path: Path) -> tuple[int, list[tuple[int, int]]]:
-    """Return (helper_base, [(hot_base, hot_len), ...])."""
-    if not path.is_file():
-        error(f"firmware mem.toml 不可用: {path}")
-        sys.exit(1)
-    text = path.read_text()
-    if tomllib is not None:
-        data = tomllib.loads(text)
-        helper = data.get("helper") or {}
-        helper_base = _parse_hex_or_int(helper.get("base", 0x40380000))
-        regions = data.get("hot_regions")
-        if isinstance(regions, list) and regions:
-            hot = []
-            for i, r in enumerate(regions):
-                hot.append(
-                    (
-                        _parse_hex_or_int(r["base"]),
-                        _parse_hex_or_int(r["length"]),
-                    )
-                )
-            return helper_base, hot
-        # Legacy keys
-        hot = []
-        for key in ("hot_region_a", "hot_region_b"):
-            if key in data:
-                t = data[key]
-                hot.append(
-                    (_parse_hex_or_int(t["base"]), _parse_hex_or_int(t["length"]))
-                )
-        if hot:
-            return helper_base, hot
-        error(f"{path}: missing [[hot_regions]] (or legacy hot_region_a/b)")
-        sys.exit(1)
-
-    # Minimal fallback without tomllib: regex scan.
-    hb = re.search(r"\[helper\][^\[]*?base\s*=\s*(0x[0-9a-fA-F]+|\d+)", text, re.S)
-    helper_base = int(hb.group(1), 0) if hb else 0x40380000
-    hot = []
-    for m in re.finditer(
-        r"\[\[hot_regions\]\][^\[]*?base\s*=\s*(0x[0-9a-fA-F]+|\d+)[^\[]*?"
-        r"length\s*=\s*(0x[0-9a-fA-F]+|\d+)",
-        text,
-        re.S,
-    ):
-        hot.append((int(m.group(1), 0), int(m.group(2), 0)))
-    if not hot:
-        error(f"{path}: could not parse hot_regions (install Python 3.11+ for tomllib)")
-        sys.exit(1)
-    return helper_base, hot
+def tool_bin_path() -> Path:
+    return TOOLS_TARGET / _host_triple() / "release" / "xpost-mcu-elf"
 
 
-def _normalize_slot_index(slot: str | int | None, slot_count: int) -> int:
-    if slot is None:
-        return 0
-    if isinstance(slot, int):
-        idx = slot
-    else:
-        s = str(slot).strip().lower()
-        aliases = {"a": 0, "b": 1}
-        if s in aliases:
-            idx = aliases[s]
-        else:
-            try:
-                idx = int(s, 0)
-            except ValueError:
-                error(f"unknown --slot={slot} (expected 0..{slot_count - 1} or a|b)")
-                sys.exit(1)
-    if not (0 <= idx < slot_count):
-        error(f"--slot={slot} out of range for {slot_count} hot_regions in mem_map")
-        sys.exit(1)
-    return idx
-
-
-def _generate_esp32c3_slot_ld(slot_index: int, out_dir: Path) -> Path:
-    helper_base, hot = _load_mem_map(FIRMWARE_MEM_MAP)
-    if slot_index >= len(hot):
-        error(f"slot {slot_index} >= hot_regions count {len(hot)}")
-        sys.exit(1)
-    origin, length = hot[slot_index]
+def _generate_esp32c3_slot_ld(mem: MemMapV0, out_dir: Path) -> Path:
     if not SLOT_LD_TMPL.is_file():
         error(f"linker template missing: {SLOT_LD_TMPL}")
         sys.exit(1)
     tmpl = SLOT_LD_TMPL.read_text()
     body = tmpl.format(
-        slot_index=slot_index,
-        origin=origin,
-        length=length,
-        helper_base=helper_base,
+        slot_index=0,
+        origin=mem.slot_addr,
+        length=mem.slot_len,
+        helper_base=mem.helper_addr,
     )
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"esp32c3-slot-{slot_index}.ld"
+    out_path = out_dir / "esp32c3-slot-0.ld"
     out_path.write_text(body)
     return out_path
 
 
-def _linker_script(target: str, slot: str | None = None) -> Path | None:
+def _linker_script(target: str, mem: MemMapV0 | None) -> Path | None:
     if target != "esp32c3":
         path = LINKER_DIR / f"{target}.ld"
         return path if path.is_file() else None
-    _helper, hot = _load_mem_map(FIRMWARE_MEM_MAP)
-    idx = _normalize_slot_index(slot, len(hot))
+    assert mem is not None
     ninja_dir = DEFAULT_BUILD_DIR / ".ninja"
-    return _generate_esp32c3_slot_ld(idx, ninja_dir)
+    return _generate_esp32c3_slot_ld(mem, ninja_dir)
+
+
+def ensure_tool(force: bool = False) -> Path:
+    """Return xpost-mcu-elf path; cargo-build only if missing or force."""
+    import os
+
+    if not TOOLS_MANIFEST.is_file():
+        error(f"tools manifest missing: {TOOLS_MANIFEST}")
+        sys.exit(1)
+    out = tool_bin_path()
+    if out.is_file() and not force:
+        return out
+    cmd = [
+        "cargo",
+        "build",
+        "--manifest-path",
+        str(TOOLS_MANIFEST),
+        "--release",
+        "--target",
+        _host_triple(),
+        "--bin",
+        "xpost-mcu-elf",
+    ]
+    run_env = os.environ.copy()
+    run_env["CARGO_TARGET_DIR"] = str(TOOLS_TARGET)
+    proc = subprocess.run(cmd, env=run_env)
+    if proc.returncode != 0:
+        error(f"cargo build xpost-mcu-elf failed: exit={proc.returncode}")
+        sys.exit(proc.returncode)
+    if not out.is_file():
+        error(f"tool binary missing after build: {out}")
+        sys.exit(1)
+    return out
+
+
+def load_mem_map_from_firmware(firmware_elf: Path, tool: Path) -> MemMapV0:
+    """Read `.xpost.mem` via prebuilt `xpost-mcu-elf mem-map`."""
+    if not firmware_elf.is_file():
+        error(f"firmware ELF not found: {firmware_elf}")
+        sys.exit(1)
+    proc = subprocess.run(
+        [str(tool), "mem-map", str(firmware_elf)],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        error(f"xpost-mcu-elf mem-map failed: exit={proc.returncode}: {err}")
+        sys.exit(proc.returncode)
+    lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        error("xpost-mcu-elf mem-map produced no stdout")
+        sys.exit(1)
+    line = lines[-1]
+    try:
+        data = json.loads(line)
+        return MemMapV0(
+            helper_addr=int(data["helper_addr"]),
+            slot_addr=int(data["slot_addr"]),
+            slot_len=int(data["slot_len"]),
+            table_addr=int(data["table_addr"]),
+            table_len=int(data["table_len"]),
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        error(f"xpost-mcu-elf mem-map bad stdout: {line!r} ({exc})")
+        sys.exit(1)
 
 
 def build_target(
@@ -315,37 +332,54 @@ def build_target(
     release=False,
     objdump=DEFAULT_OBJDUMP,
     objcopy=DEFAULT_OBJCOPY,
-    slot=None,
+    firmware: Path | None = None,
+    compact_elf=True,
 ):
+    del objcopy
     template = NINJA_DIR / f"{build.target}.ninja"
     if not template.is_file():
         error(f"ninja 模板不可用: {template}")
         sys.exit(1)
 
-    slot_index = None
+    mem: MemMapV0 | None = None
+    tool: Path | None = None
     if build.target == "esp32c3":
-        _helper, hot = _load_mem_map(FIRMWARE_MEM_MAP)
-        slot_index = _normalize_slot_index(slot, len(hot))
-        slot = str(slot_index)
+        if firmware is None:
+            error("esp32c3 需要 --firmware <firmware.elf>（含 .xpost.mem / XPM1）")
+            sys.exit(1)
+        tool = ensure_tool(force=force)
+        mem = load_mem_map_from_firmware(Path(firmware), tool)
+        info(
+            f"XPM1 helper={mem.helper_addr:#x} slot={mem.slot_addr:#x}+{mem.slot_len:#x} "
+            f"table={mem.table_addr:#x}+{mem.table_len:#x}"
+        )
 
-    linker = _linker_script(build.target, slot=slot)
+    linker = _linker_script(build.target, mem)
     ninja_dir = DEFAULT_BUILD_DIR / ".ninja"
     ninja_dir.mkdir(parents=True, exist_ok=True)
     ninja_file = ninja_dir / "build.ninja"
 
+    host = _host_triple()
+    tool_bin = tool_bin_path()
     implicit = " ".join(str(path) for path in REPORT_SCRIPTS)
     edges: list[str] = []
     defaults: list[Path] = []
-    for input_path, output_path in zip(build.inputs, build.outputs):
-        # Per-slot output directory for non-zero slots: build/<stem>/slot-N/
-        if (
-            build.target == "esp32c3"
-            and slot_index is not None
-            and slot_index != 0
-        ):
-            output_path = output_path.parent / f"slot-{slot_index}" / output_path.name
-            output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if build.target == "esp32c3" and compact_elf:
+        tool_deps = " ".join(
+            str(p)
+            for p in (
+                TOOLS_MANIFEST,
+                TOOLS_SRC,
+                TOOLS_DIR / "src" / "bpf_meta.rs",
+                XPOST_ELF_MANIFEST,
+            )
+            if p.is_file()
+        )
+        edges.append(f"build {tool_bin}: tool | {tool_deps}")
+
+    for input_path, output_path in zip(build.inputs, build.outputs):
+        stem = Path(input_path).stem
         depfile = output_path.with_suffix(".d")
         edges.append(
             f"build {output_path}: cc {input_path}\n"
@@ -353,31 +387,37 @@ def build_target(
         )
 
         if linker is not None:
-            elf_path = output_path.with_suffix(".elf")
+            linked_elf = output_path.with_suffix(".elf")
             bin_path = output_path.with_suffix(".bin")
             report_path = output_path.with_suffix(".toml")
-            report_obj = elf_path
-            # Re-merge aot_addr whenever BTF bpf.toml is regenerated.
             bpf_toml = output_path.parent / "bpf.toml"
-            # Prefer sibling bpf.toml; fall back to parent stem bpf.toml for slot-N.
-            if not bpf_toml.is_file() and output_path.parent.name.startswith("slot-"):
-                bpf_toml = output_path.parent.parent / "bpf.toml"
+            edges.append(f"build {linked_elf}: link {output_path} | {linker}")
+            edges.append(f"build {bin_path}: bin {linked_elf}")
             edges.append(
-                f"build {elf_path}: link {output_path} | {linker}"
-            )
-            edges.append(f"build {bin_path}: bin {elf_path}")
-            defaults.append(bin_path)
-            defaults.append(report_path)
-            edges.append(
-                f"build {report_path}: report {report_obj} | {implicit} {bpf_toml}\n"
+                f"build {report_path}: report {linked_elf} | {implicit} {bpf_toml}\n"
                 f"  src = {input_path}"
             )
+            defaults.append(bin_path)
+            defaults.append(report_path)
+            if build.target == "esp32c3" and compact_elf:
+                assert mem is not None
+                compact = output_path.parent / f"{stem}.elf"
+                edges.append(
+                    f"build {compact}: pack {bin_path} | {tool_bin} {bpf_toml} {report_path}\n"
+                    f"  image = {bin_path}\n"
+                    f"  bpf_toml = {bpf_toml}\n"
+                    f"  name = {stem}\n"
+                    f"  slot = {mem.slot_addr:#x}\n"
+                    f"  helper = {mem.helper_addr:#x}\n"
+                    f"  machine = {XPOST_ESP32_C3_ARCH}\n"
+                    f"  report = {report_path}"
+                )
+                defaults.append(compact)
         else:
             report_path = output_path.with_suffix(".toml")
-            report_obj = output_path
             defaults.append(report_path)
             edges.append(
-                f"build {report_path}: report {report_obj} | {implicit}\n"
+                f"build {report_path}: report {output_path} | {implicit}\n"
                 f"  src = {input_path}"
             )
 
@@ -387,7 +427,7 @@ def build_target(
     content = content.replace("@PYTHON@", sys.executable)
     content = content.replace("@MAKE@", str(MAKE_DIR))
     content = content.replace("@OBJDUMP@", objdump)
-    content = content.replace("@OBJCOPY@", objcopy)
+    content = content.replace("@OBJCOPY@", DEFAULT_OBJCOPY)
     content = content.replace(
         "@LINKER@", str(linker) if linker is not None else ""
     )
@@ -395,19 +435,23 @@ def build_target(
         "@REPORT_FLAGS@",
         _report_flags(build.target, release, has_linker=linker is not None),
     )
+    content = content.replace("@TOOLS_MANIFEST@", str(TOOLS_MANIFEST))
+    content = content.replace("@TOOLS_TARGET@", str(TOOLS_TARGET))
+    content = content.replace("@HOST_TRIPLE@", host)
+    content = content.replace("@TOOL_BIN@", str(tool_bin))
     content = content.replace("@EDGES@", "\n".join(edges))
     content = content.replace("@DEFAULT@", " ".join(str(path) for path in defaults))
     ninja_file.write_text(content)
 
     info(f"已生成 ninja: {ninja_file}")
     if linker is not None:
-        info(f"linker: {linker} (slot={slot_index if slot_index is not None else slot})")
+        info(f"linker: {linker}")
     run_ninja(ninja_file, force=force)
 
 
 def run_ninja(ninja_file, force=False):
     if force:
-        info(f"强制重建: ninja -t clean")
+        info("强制重建: ninja -t clean")
         clean = subprocess.run(
             ["ninja", "-f", str(ninja_file), "-t", "clean"],
             cwd=DEFAULT_BUILD_DIR,
