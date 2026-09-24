@@ -12,7 +12,7 @@ pixi run clean
 ```
 
 - `--firmware` is a linked firmware ELF that carries `.xpost.mem` (XPM1). Addresses
-  are read as-is and used for slot linking and Compact ELF metadata. libbpf-mcu
+  are read as-is and used for slot linking and XDP ELF metadata. libbpf-mcu
   does not choose what to flash.
 - Omit target → build `bpf` then `esp32c3` for every `tests/**/*.c` except
   `tests/failed/`.
@@ -24,11 +24,12 @@ Artifacts land in `../build/<stem>/`:
 |------|------|
 | `bpf.o` | Host BPF object |
 | `bpf.toml` | BPF report / map metadata (`aot_addr` merged after MCU link) |
-| `<stem>.elf` | Compact ELF V0 (flash separately from firmware) |
-| `esp32c3.toml` | MCU report; includes `elf_size_kb` (Compact ELF bytes / 1024) |
+| `<stem>.elf` | **XDP ELF** V0 (aka `xdp.elf`; cold-region image, flash separately from firmware) |
+| `esp32c3.toml` | MCU report; includes `elf_size_kb` (XDP ELF bytes / 1024) |
 
 Intermediate: `esp32c3.o`, `esp32c3.elf`, `esp32c3.bin`. Do not embed `.bin` into
-firmware. `layout.toml` is not a compile input.
+firmware. `layout.toml` is not a compile input. Do not confuse `esp32c3.elf`
+(AOT debug ELF) with XDP ELF (`<stem>.elf` / `xdp.elf`).
 
 ## Pipeline
 
@@ -40,7 +41,7 @@ the host tool, read XPM1, write the ninja graph. Ninja executes:
 2. clang cc / link / bin / report
 3. `xpost-mcu-elf pack` (direct binary call, never `cargo run`) + stamp `elf_size_kb`
 
-ELF encode/decode uses `xpost-elf` only. Maps that cannot enter Compact ELF V0 are
+Encode/decode uses `xpost-elf` only. Maps that cannot enter XDP ELF V0 are
 omitted silently from metadata.
 
 ## Headers
