@@ -1,5 +1,6 @@
-/* Høiland-Jørgensen et al., "The eXpress Data Path", Listing 1 (Ch.4).
- * Listing body kept as in the paper; includes + parse_ipv6 complete the build. */
+/* Derived from Høiland-Jørgensen et al., "The eXpress Data Path", Listing 1 (Ch.4).
+ * UDP path returns XDP_DROP; the unmodified listing is just_tx.c.
+ * Includes + parse_ipv6 complete the build. */
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 #include "vmlinux.h"
@@ -116,7 +117,7 @@ int xdp_prog1(struct xdp_md *ctx)
 	/* swap MAC addrs for UDP packets, transmit out this interface */
 	if (ipproto == IPPROTO_UDP) {
 		swap_src_dst_mac(data);
-		rc = XDP_TX;
+		rc = XDP_DROP;
 	}
 	return rc;
 }
