@@ -30,11 +30,18 @@ Artifacts land in `../build/<stem>/`:
 Intermediate: `esp32c3.o`, `esp32c3.elf`, `esp32c3.bin`. Do not embed `.bin` into
 firmware. `layout.toml` is not a compile input.
 
-## ELF path
+## Pipeline
 
-All ELF section encode/decode goes through Rust `tools/` (`xpost-mcu-elf`), which
-depends on `../xpost/xpost-elf` (and `xpost-build` only for `bpf.toml` → metadata).
-Python orchestrates ninja; it does not implement Compact ELF / XPM1 codecs.
+Python (`make/cli.py` / `make/build.py`) only plans the route: resolve inputs, ensure
+the host tool, read XPM1, write the ninja graph. Ninja executes:
+
+1. `cargo build` → `tools/target/<host>/release/xpost-mcu-elf` (restat; rebuild when
+   `tools/` or `xpost-elf` inputs change)
+2. clang cc / link / bin / report
+3. `xpost-mcu-elf pack` (direct binary call, never `cargo run`) + stamp `elf_size_kb`
+
+ELF encode/decode uses `xpost-elf` only. Maps that cannot enter Compact ELF V0 are
+omitted silently from metadata.
 
 ## Headers
 
