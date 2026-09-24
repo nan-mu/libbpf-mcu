@@ -42,8 +42,14 @@
 typedef int __s32;
 #endif
 #ifndef __s64
+#pragma push_macro("long")
+#undef long
 typedef long long int __s64;
+#pragma pop_macro("long")
 #endif
+
+/* Helper results are the low 32 bits. Sign-extend into BPF `long`. */
+#define __bpf_long(v) ((long)(__s32)(v))
 
 #ifndef BPF_ANY
 #define BPF_ANY 0
@@ -81,10 +87,10 @@ struct bpf_dynptr {
 	((void *)___bpf_map_lookup_elem_call(map, key))
 
 #define bpf_map_update_elem(map, key, value, flags) \
-	((long)___bpf_map_update_elem_call(map, key, value, flags))
+	__bpf_long(___bpf_map_update_elem_call(map, key, value, flags))
 
 #define bpf_map_delete_elem(map, key) \
-	((long)___bpf_map_delete_elem_call(map, key))
+	__bpf_long(___bpf_map_delete_elem_call(map, key))
 
 #define bpf_ktime_get_ns() \
 	((__u64)___bpf_ktime_get_ns_call())
@@ -96,25 +102,25 @@ struct bpf_dynptr {
 	((void)___bpf_xpost_evt_wake_call())
 
 #define bpf_tail_call(ctx, map, index) \
-	((long)___bpf_tail_call_call(ctx, map, index))
+	__bpf_long(___bpf_tail_call_call(ctx, map, index))
 
 #define bpf_redirect(ifindex, flags) \
-	((long)___bpf_redirect_call(ifindex, flags))
+	__bpf_long(___bpf_redirect_call(ifindex, flags))
 
 #define bpf_csum_diff(from, from_size, to, to_size, seed) \
 	((__s64)___bpf_csum_diff_call(from, from_size, to, to_size, seed))
 
 #define bpf_xdp_adjust_head(xdp_md, delta) \
-	((long)___bpf_xdp_adjust_head_call(xdp_md, delta))
+	__bpf_long(___bpf_xdp_adjust_head_call(xdp_md, delta))
 
 #define bpf_redirect_map(map, key, flags) \
-	((long)___bpf_redirect_map_call(map, key, flags))
+	__bpf_long(___bpf_redirect_map_call(map, key, flags))
 
 #define bpf_xdp_adjust_tail(xdp_md, delta) \
-	((long)___bpf_xdp_adjust_tail_call(xdp_md, delta))
+	__bpf_long(___bpf_xdp_adjust_tail_call(xdp_md, delta))
 
 #define bpf_ringbuf_output(ringbuf, data, size, flags) \
-	((long)___bpf_ringbuf_output_call(ringbuf, data, size, flags))
+	__bpf_long(___bpf_ringbuf_output_call(ringbuf, data, size, flags))
 
 #define bpf_ringbuf_reserve(ringbuf, size, flags) \
 	((void *)___bpf_ringbuf_reserve_call(ringbuf, size, flags))
@@ -129,19 +135,19 @@ struct bpf_dynptr {
 	((__u64)___bpf_ringbuf_query_call(ringbuf, flags))
 
 #define bpf_for_each_map_elem(map, callback_fn, callback_ctx, flags) \
-	((long)___bpf_for_each_map_elem_call(map, callback_fn, callback_ctx, flags))
+	__bpf_long(___bpf_for_each_map_elem_call(map, callback_fn, callback_ctx, flags))
 
 #define bpf_xdp_load_bytes(xdp_md, offset, buf, len) \
-	((long)___bpf_xdp_load_bytes_call(xdp_md, offset, buf, len))
+	__bpf_long(___bpf_xdp_load_bytes_call(xdp_md, offset, buf, len))
 
 #define bpf_xdp_store_bytes(xdp_md, offset, buf, len) \
-	((long)___bpf_xdp_store_bytes_call(xdp_md, offset, buf, len))
+	__bpf_long(___bpf_xdp_store_bytes_call(xdp_md, offset, buf, len))
 
 #define bpf_dynptr_from_mem(data, size, flags, ptr) \
-	((long)___bpf_dynptr_from_mem_call(data, size, flags, ptr))
+	__bpf_long(___bpf_dynptr_from_mem_call(data, size, flags, ptr))
 
 #define bpf_ringbuf_reserve_dynptr(ringbuf, size, flags, ptr) \
-	((long)___bpf_ringbuf_reserve_dynptr_call(ringbuf, size, flags, ptr))
+	__bpf_long(___bpf_ringbuf_reserve_dynptr_call(ringbuf, size, flags, ptr))
 
 #define bpf_ringbuf_submit_dynptr(ptr, flags) \
 	((void)___bpf_ringbuf_submit_dynptr_call(ptr, flags))
@@ -150,10 +156,10 @@ struct bpf_dynptr {
 	((void)___bpf_ringbuf_discard_dynptr_call(ptr, flags))
 
 #define bpf_dynptr_read(dst, len, src, offset, flags) \
-	((long)___bpf_dynptr_read_call(dst, len, src, offset, flags))
+	__bpf_long(___bpf_dynptr_read_call(dst, len, src, offset, flags))
 
 #define bpf_dynptr_write(dst, offset, src, len, flags) \
-	((long)___bpf_dynptr_write_call(dst, offset, src, len, flags))
+	__bpf_long(___bpf_dynptr_write_call(dst, offset, src, len, flags))
 
 #define bpf_dynptr_data(ptr, offset, len) \
 	((void *)___bpf_dynptr_data_call(ptr, offset, len))

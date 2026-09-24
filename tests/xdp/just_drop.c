@@ -4,9 +4,33 @@
 #include <bpf/bpf_helpers.h>
 #include "vmlinux.h"
 
-/* map used to count packets; key is IP protocol, value is pkt count */
+#define ETH_P_IP 0x0800
+#define ETH_P_IPV6 0x86DD
+#define ETH_P_8021Q 0x8100
+#define ETH_P_8021AD 0x88A8
+
+/* BPF vmlinux.h already has these. MCU vmlinux.h comments them out. */
+#ifndef __bpf__
+typedef __u64 u64;
+struct vlan_hdr {
+	__be16 h_vlan_TCI;
+	__be16 h_vlan_encapsulated_proto;
+};
+#endif
+
+struct bpf_map_def {
+	unsigned int type;
+	unsigned int key_size;
+	unsigned int value_size;
+	unsigned int max_entries;
+	unsigned int map_flags;
+};
+
+/* map used to count packets; key is IP protocol, value is pkt count.
+ * First-case ESP32-C3 deployment uses ARRAY (single core). PERCPU_ARRAY
+ * remains a multicore extension and is not part of the first H′ instance. */
 struct bpf_map_def SEC("maps") rxcnt = {
-	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(u32),
 	.value_size = sizeof(long),
 	.max_entries = 256,
@@ -33,7 +57,7 @@ static int parse_ipv4(void *data, u64 nh_off, void *data_end)
 {
 	struct iphdr *iph = data + nh_off;
 
-	if (iph + 1 > data_end)
+	if ((void *)(iph + 1) > data_end)
 		return 0;
 	return iph->protocol;
 }
@@ -43,7 +67,7 @@ static int parse_ipv6(void *data, u64 nh_off, void *data_end)
 {
 	__u8 *ip6h = data + nh_off;
 
-	if (ip6h + 40 > data_end)
+	if ((void *)(ip6h + 40) > data_end)
 		return 0;
 	return ip6h[6];
 }
@@ -67,7 +91,7 @@ int xdp_prog1(struct xdp_md *ctx)
 	h_proto = eth->h_proto;
 
 	/* check VLAN tag; could be repeated to support double-tagged VLAN */
-	if (h_proto == htons(ETH_P_8021Q) || h_proto == htons(ETH_P_8021AD)) {
+	if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD)) {
 		struct vlan_hdr *vhdr;
 
 		vhdr = data + nh_off;
@@ -77,9 +101,9 @@ int xdp_prog1(struct xdp_md *ctx)
 		h_proto = vhdr->h_vlan_encapsulated_proto;
 	}
 
-	if (h_proto == htons(ETH_P_IP))
+	if (h_proto == bpf_htons(ETH_P_IP))
 		ipproto = parse_ipv4(data, nh_off, data_end);
-	else if (h_proto == htons(ETH_P_IPV6))
+	else if (h_proto == bpf_htons(ETH_P_IPV6))
 		ipproto = parse_ipv6(data, nh_off, data_end);
 	else
 		ipproto = 0;
