@@ -1,0 +1,137 @@
+// XPOST Compact ELF, initial wire version 0.
+// Normative binary design document; NOT Google Protobuf / NOT protoc input.
+// Fields are concatenated in declaration order. No tags, varints or implicit
+// lengths. Integers are unsigned little-endian. Offsets are file-relative.
+scalar u8;       // 1 byte
+scalar u16le;    // 2 bytes
+scalar u24le;    // 3 bytes
+scalar u32le;    // 4 bytes
+// bytes[N] means exactly N bytes; align4(n) = (n + 3) & ~3.
+
+// ESP32-C3 profile limits (reject, never truncate):
+// complete file <= 4096 bytes; metadata <= 1024 bytes; maps <= 8;
+// names: 1..31 ASCII bytes excluding NUL, no embedded NUL;
+// each layout: <= 32 descriptors; each descriptor: 1..255 bits;
+// key storage <= 64 bytes; value storage <= 256 bytes; capacity: 1..64.
+// Descriptor intervals >255 bits are unsupported; do not split them.
+// Layout intervals follow the compiler's final memory layout, including
+// inter-field and tail padding, without loader-inserted padding. Array fields
+// occupy one interval (not one interval per element). Nested structures are
+// flattened in member order. Overlapping/union layouts are unsupported.
+// Padding intervals carry their bit length just like fields. This format does
+// not preserve field names, signedness or a field/padding distinction.
+// Sum(layout) MUST equal sizeof(T)*8, and MUST be divisible by 8.
+// No alternate splitting/merging of intervals: layout participates in identity.
+// Storage base and element stride must satisfy 4-byte alignment. Types requiring
+// alignment >4 are unsupported. Allocation stride may include extra padding;
+// it does NOT increase logical key/value size or the bytes compared by HASH.
+// Safety contract: key/value padding is zero before use and stays zero.
+// HASH hashes/compares the complete logical key, including its zero padding.
+// The producer must establish target layout/alignment and the safety contract;
+// a container decoder cannot infer or prove these from the raw image.
+
+message Elf32Header { // 52 bytes
+  bytes[16] e_ident; // 7f454c46 01010100 00000000 00000000
+  u16le e_type;      // 1: ET_REL (private container, no loader relocation)
+  u16le e_machine;   // 243: EM_RISCV
+  u32le e_version;   // 1: EV_CURRENT, unrelated to xpost_version
+  u32le e_entry;     // 0; XPOST executes image at its first byte / slot_address
+  u32le e_phoff;     // 0
+  u32le e_shoff;     // 52: SHT immediately follows EHDR
+  u32le e_flags;     // 1: EF_RISCV_RVC, RV32IMC / ilp32 profile
+  u16le e_ehsize;    // 52
+  u16le e_phentsize; // 0
+  u16le e_phnum;     // 0
+  u16le e_shentsize; // 40
+  u16le e_shnum;     // 4
+  u16le e_shstrndx;  // 3
+}
+
+message Elf32SectionHeader { // 40 bytes
+  u32le sh_name;
+  u32le sh_type;
+  u32le sh_flags;
+  u32le sh_addr;
+  u32le sh_offset;
+  u32le sh_size;
+  u32le sh_link;
+  u32le sh_info;
+  u32le sh_addralign;
+  u32le sh_entsize;
+}
+// Exact section headers, in the field order above:
+// [0] 0, 0,          0, 0,            0,            0,          0,0,0,0
+// [1] 1, 0x80000001, 0, 0,            212,          meta_size,  2,0,4,0
+// [2]13, 0x80000002, 6, slot_address, image_offset, image_size, 0,0,4,0
+// [3]26, 3,          0, 0,            names_offset, 36,         0,0,1,0
+// Types 0x80000001/2 are application-reserved META/IMAGE types.
+// META.sh_link=2 associates metadata with IMAGE. IMAGE flags=ALLOC|EXECINSTR.
+// slot_address: nonzero, divisible by 4, must match the selected target slot.
+// Image extent must fit that slot; no unresolved relocations or implicit BSS
+// initialization may be required by the raw image.
+
+message CString4 {
+  bytes ascii; // 1..31 bytes; ends at the first NUL below
+  u8 terminator; // 0
+  bytes padding; // 0..3 zero bytes, total string encoding divisible by 4
+}
+
+message XpostMetaV0 {
+  u8 xpost_version;   // 0
+  u8 machine;         // 1 = ESP32_C3; other profiles rejected
+  u16le map_count;    // 0..8
+  u32le helper_address; // nonzero 4-byte-aligned helper dispatcher entry address
+  CString4 xdp_name;
+  MapDescriptorV0 maps[map_count];
+}
+
+message MapDescriptorV0 {
+  CString4 name;
+  u8 map_type;       // Linux BPF enum: HASH=1, ARRAY=2; others unsupported here
+  u24le len;         // requested capacity, 1..64 in this profile
+  u32le map_vma;     // nonzero, 4-byte-aligned linked .maps symbol address
+                     // Equals the image-side helper map argument; initial bind
+                     // reference only, NOT the identity or runtime storage address.
+  u32le key_layout_len;   // number of u8 descriptors; 0 means None
+  u32le value_layout_len; // number of u8 descriptors; 0 means None
+  u8 key_layout[key_layout_len];
+  u8 value_layout[value_layout_len];
+  bytes padding; // 0..3 zeros to align entire record to 4 bytes
+}
+// HASH: key and value layouts required. ARRAY: key layout None, implicit u32
+// index; value layout required. Some([]) is not representable.
+// Example: u32 layout is [32], wire byte 0x20. A final layout with an 8-bit
+// field, 24-bit gap, 32-bit field is [8,24,32], total 8 bytes.
+// Map identity = (name, map_type, key_layout, value_layout). len is excluded.
+// Existing capacity >= requested len: reuse without resizing.
+// Existing capacity < requested len: report error, reject this binding, preserve
+// existing map. Missing identity: create subject to the runtime memory budget.
+// No duplicate map names or map_vma values within one image.
+// Runtime resolves image-side references through identity to runtime storage;
+// publish bindings before execution and retire them with the image lifecycle.
+// Across ALL live maps, actual SRAM allocations including allocator/container
+// overhead and alignment must total <=8192 bytes; count shared maps once.
+// This is a loader admission rule, NOT a claim the encoder can verify globally.
+
+message XpostCompactElfV0 {
+  Elf32Header header;
+  Elf32SectionHeader sections[4]; // starts at 52
+  XpostMetaV0 meta;             // starts at 212; meta_size divisible by 4
+  bytes image;                 // exact original nonempty raw image
+  bytes[36] section_names;     // "\0.xpost.meta\0.xpost.image\0.shstrtab\0"
+  bytes sht_padding;           // 0..3 zeros after names, align digest to 4 bytes
+  bytes[32] sha256_image;      // SHA256(image) only, immediately followed by EOF
+}
+// Canonical offsets:
+// e_shoff = 52
+// meta_offset = 212
+// image_offset = 212 + meta_size
+// names_offset = image_offset + image_size
+// digest_offset = align4(names_offset + 36); file_size = digest_offset + 32
+// sh_size always excludes inter-section padding, SHT and digest.
+// Decoder MUST check every fixed value, range, offset, length, profile limit,
+// zero padding, name, map combination and SHA256; parse maps exactly to meta end.
+// Reject unknown version/type, truncated or overlapping sections, overflow in
+// arithmetic/alignment, appended bytes and noncanonical layout. Bounds-check
+// before allocating, scanning strings or reading descriptor arrays.
+// The digest is a raw-image checksum, not metadata integrity or authentication.
