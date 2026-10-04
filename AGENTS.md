@@ -15,8 +15,8 @@ pixi run clean
   are read as-is and used for slot linking and XDP ELF metadata. libbpf-mcu
   does not choose what to flash.
 - Omit target → build `bpf` then `esp32c3` for every `tests/**/*.c` except
-  `tests/failed/`.
-- `-c <stem>` → only `tests/**/<stem>.c`.
+  `tests/unused/`.
+- `-c <stem>` → only matching `tests/**/<stem>.c` (also excludes `unused/`).
 
 Artifacts land in `../build/<stem>/`:
 

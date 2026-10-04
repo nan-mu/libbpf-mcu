@@ -95,7 +95,7 @@ def _default_inputs(crate: str | None = None):
     inputs = sorted(
         path
         for path in TESTS_DIR.rglob("*.c")
-        if "failed" not in path.relative_to(TESTS_DIR).parts
+        if "unused" not in path.relative_to(TESTS_DIR).parts
     )
     if crate is not None:
         matched = [path for path in inputs if path.stem == crate]

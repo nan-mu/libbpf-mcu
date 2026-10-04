@@ -76,6 +76,15 @@ typedef long long int __s64;
 
 struct bpf_map;
 
+/* Classic libbpf map definition (SEC("maps") blob layout). */
+struct bpf_map_def {
+	unsigned int type;
+	unsigned int key_size;
+	unsigned int value_size;
+	unsigned int max_entries;
+	unsigned int map_flags;
+};
+
 #ifndef __BPF_DYNPTR_DEFINED
 #define __BPF_DYNPTR_DEFINED
 struct bpf_dynptr {

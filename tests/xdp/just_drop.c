@@ -1,12 +1,15 @@
-/* Derived from Høiland-Jørgensen et al., "The eXpress Data Path", Listing 1 (Ch.4).
- * UDP path returns XDP_DROP; the unmodified listing is just_tx.c.
- * Includes + parse_ipv6 complete the build. */
+/* just_drop — count then drop; companion to just_tx (paper Listing 1 shape).
+ *
+ * Vendored AOT: examples/just_xdp/just_drop.elf
+ * Matches just_drop_hal + xpost-test formal (`get map counter`):
+ *   ARRAY `counter`, key = IPv4 src last octet (0..255), value = pkt count.
+ *   Always XDP_DROP (no TX / no MAC swap). Non-IPv4: drop without counting.
+ */
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 #include "vmlinux.h"
 
 #define ETH_P_IP 0x0800
-#define ETH_P_IPV6 0x86DD
 #define ETH_P_8021Q 0x8100
 #define ETH_P_8021AD 0x88A8
 
@@ -19,107 +22,64 @@ struct vlan_hdr {
 };
 #endif
 
-struct bpf_map_def {
-	unsigned int type;
-	unsigned int key_size;
-	unsigned int value_size;
-	unsigned int max_entries;
-	unsigned int map_flags;
-};
-
-/* map used to count packets; key is IP protocol, value is pkt count.
- * First-case ESP32-C3 deployment uses ARRAY (single core). PERCPU_ARRAY
- * remains a multicore extension and is not part of the first H′ instance. */
-struct bpf_map_def SEC("maps") rxcnt = {
+struct bpf_map_def SEC("maps") counter = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(u32),
 	.value_size = sizeof(long),
 	.max_entries = 256,
 };
 
-/* swaps MAC addresses using direct packet data access */
-static void swap_src_dst_mac(void *data)
-{
-	unsigned short *p = data;
-	unsigned short dst[3];
-
-	dst[0] = p[0];
-	dst[1] = p[1];
-	dst[2] = p[2];
-	p[0] = p[3];
-	p[1] = p[4];
-	p[2] = p[5];
-	p[3] = dst[0];
-	p[4] = dst[1];
-	p[5] = dst[2];
-}
-
-static int parse_ipv4(void *data, u64 nh_off, void *data_end)
+/* IPv4 src last octet, or -1 if truncated / not enough bytes. */
+static int ipv4_src_last_octet(void *data, u64 nh_off, void *data_end)
 {
 	struct iphdr *iph = data + nh_off;
+	__u8 *octets;
 
 	if ((void *)(iph + 1) > data_end)
-		return 0;
-	return iph->protocol;
+		return -1;
+	octets = (__u8 *)&iph->saddr;
+	return octets[3];
 }
 
-/* Listed in paper Listing 1 but definition omitted from the PDF excerpt. */
-static int parse_ipv6(void *data, u64 nh_off, void *data_end)
-{
-	__u8 *ip6h = data + nh_off;
-
-	if ((void *)(ip6h + 40) > data_end)
-		return 0;
-	return ip6h[6];
-}
-
-SEC("xdp1") /* marks main eBPF program entry point */
+SEC("xdp1")
 int xdp_prog1(struct xdp_md *ctx)
 {
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
 	struct ethhdr *eth = data;
-	int rc = XDP_DROP;
 	long *value;
 	u16 h_proto;
 	u64 nh_off;
-	u32 ipproto;
+	int last;
+	u32 key;
 
 	nh_off = sizeof(*eth);
 	if (data + nh_off > data_end)
-		return rc;
+		return XDP_DROP;
 
 	h_proto = eth->h_proto;
 
-	/* check VLAN tag; could be repeated to support double-tagged VLAN */
 	if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD)) {
 		struct vlan_hdr *vhdr;
 
 		vhdr = data + nh_off;
 		nh_off += sizeof(struct vlan_hdr);
 		if (data + nh_off > data_end)
-			return rc;
+			return XDP_DROP;
 		h_proto = vhdr->h_vlan_encapsulated_proto;
 	}
 
-	if (h_proto == bpf_htons(ETH_P_IP))
-		ipproto = parse_ipv4(data, nh_off, data_end);
-	else if (h_proto == bpf_htons(ETH_P_IPV6))
-		ipproto = parse_ipv6(data, nh_off, data_end);
-	else
-		ipproto = 0;
-
-	/* lookup map element for ip protocol, used for packet counter */
-	value = bpf_map_lookup_elem(&rxcnt, &ipproto);
-	if (value)
-		*value += 1;
-
-	/* swap MAC addrs for UDP packets, transmit out this interface */
-	if (ipproto == IPPROTO_UDP) {
-		swap_src_dst_mac(data);
-		rc = XDP_DROP;
+	if (h_proto == bpf_htons(ETH_P_IP)) {
+		last = ipv4_src_last_octet(data, nh_off, data_end);
+		if (last >= 0) {
+			key = (__u32)last;
+			value = bpf_map_lookup_elem(&counter, &key);
+			if (value)
+				*value += 1;
+		}
 	}
-	return rc;
+
+	return XDP_DROP;
 }
 
 char LICENSE[] SEC("license") = "GPL";

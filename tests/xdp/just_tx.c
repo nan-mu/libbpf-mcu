@@ -18,14 +18,6 @@ struct vlan_hdr {
 };
 #endif
 
-struct bpf_map_def {
-	unsigned int type;
-	unsigned int key_size;
-	unsigned int value_size;
-	unsigned int max_entries;
-	unsigned int map_flags;
-};
-
 /* map used to count packets; key is IP protocol, value is pkt count.
  * First-case ESP32-C3 deployment uses ARRAY (single core). PERCPU_ARRAY
  * remains a multicore extension and is not part of the first H′ instance. */

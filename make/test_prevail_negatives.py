@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile failed/ negatives and require PREVAIL rejection (S1–S4)."""
+"""Compile unused/ negatives and require PREVAIL rejection (S1–S4)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FAILED = ROOT / "tests" / "failed"
+FAILED = ROOT / "tests" / "unused"
 PREVAIL = ROOT.parent / "prevail" / "bin" / "prevail"
 CLANG = "clang"
 
