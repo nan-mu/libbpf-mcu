@@ -10,8 +10,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from tiny_log import error, info, warning
 from llvm_tools import resolve_llvm_tool
+from prevail_gate import prevail_bin
+from tiny_log import error, info, warning
 
 MAKE_DIR = Path(__file__).resolve().parent
 ROOT = MAKE_DIR.parent
@@ -43,6 +44,35 @@ class MemMapV0:
 
 
 @dataclass(frozen=True)
+class McuLink:
+    """Present only when this graph may compile ESP32-C3 code."""
+
+    mem: MemMapV0
+    linker: Path
+    tool_bin: Path
+    compact_elf: bool
+
+
+@dataclass(frozen=True)
+class PrevailStamp:
+    """build/<stem>/prevail.ok. Absence is the refusal."""
+
+    stem: str
+
+    @property
+    def path(self) -> Path:
+        return DEFAULT_BUILD_DIR / self.stem / "prevail.ok"
+
+
+@dataclass(frozen=True)
+class GraphPlan:
+    sources: tuple[Path, ...]
+    mcu: McuLink | None
+    release: bool
+    objdump: str
+
+
+@dataclass(frozen=True)
 class BuildPaths:
     inputs: list[Path]
     outputs: list[Path]
@@ -55,34 +85,7 @@ class BuildTarget:
     outputs: list[Path]
 
 
-class BuildRegistry:
-    def __init__(self):
-        self._targets = None
-
-    def _load_targets(self):
-        make_dir = NINJA_DIR
-        if not make_dir.is_dir():
-            error(f"目录不存在: {make_dir}")
-            sys.exit(1)
-
-        self._targets = sorted(
-            file_path.stem.lower()
-            for file_path in make_dir.iterdir()
-            if file_path.is_file()
-        )
-
-    def get(self):
-        if self._targets is None:
-            self._load_targets()
-        return self._targets[:]
-
-    def verify(self, target):
-        if self._targets is None:
-            self._load_targets()
-        return target.lower() in self._targets
-
-
-build_registry = BuildRegistry()
+TARGETS = ("bpf", "esp32c3")
 
 
 def _split_paths(value):
@@ -130,13 +133,10 @@ def _derive_default_outputs(inputs, target):
 
 def check_build_args(target, inputs, outputs, crate: str | None = None):
     if target is None:
-        targets = build_registry.get()
-        if not targets:
-            error("未找到任何 target")
-            sys.exit(1)
+        targets = list(TARGETS)
     else:
         normalized_target = target.lower()
-        if not build_registry.verify(normalized_target):
+        if normalized_target not in TARGETS:
             error(f"未找到 target: {target}")
             sys.exit(1)
         targets = [normalized_target]
@@ -326,118 +326,134 @@ def load_mem_map_from_firmware(firmware_elf: Path, tool: Path) -> MemMapV0:
         sys.exit(1)
 
 
-def build_target(
-    build,
-    force=False,
-    release=False,
-    objdump=DEFAULT_OBJDUMP,
-    objcopy=DEFAULT_OBJCOPY,
-    firmware: Path | None = None,
-    compact_elf=True,
-):
-    del objcopy
-    template = NINJA_DIR / f"{build.target}.ninja"
+def mcu_cc_edge(src: Path, obj: Path, stamp: PrevailStamp, depfile: Path) -> str:
+    """Explicit input is src only. Implicit input is stamp.path."""
+    return f"build {obj}: mcu_cc {src} | {stamp.path}\n  depfile = {depfile}"
+
+
+def _report_edge(
+    obj: Path, src: Path, out: Path, flags: str, extra_inputs: str = ""
+) -> str:
+    implicit = " ".join(str(path) for path in REPORT_SCRIPTS)
+    if extra_inputs:
+        implicit = f"{implicit} {extra_inputs}"
+    return (
+        f"build {out}: report {obj} | {implicit}\n"
+        f"  src = {src}\n"
+        f"  report_flags = {flags}"
+    )
+
+
+def _defaults_for_stem(src: Path, plan: GraphPlan) -> list[Path]:
+    base = DEFAULT_BUILD_DIR / src.stem
+    if plan.mcu is None:
+        return [base / "bpf.toml"]
+    outputs = [base / "esp32c3.bin", base / "esp32c3.toml"]
+    if plan.mcu.compact_elf:
+        outputs.append(base / f"{src.stem}.elf")
+    return outputs
+
+
+def edges_for_stem(src: Path, plan: GraphPlan) -> str:
+    """Emit one stem. plan.mcu decides whether the cone includes the stamp and mcu_cc."""
+    stem = src.stem
+    base = DEFAULT_BUILD_DIR / stem
+    bpf_o = base / "bpf.o"
+    lines = [
+        f"build {bpf_o}: bpf_cc {src}\n  depfile = {bpf_o.with_suffix('.d')}",
+        _report_edge(
+            bpf_o,
+            src,
+            bpf_o.with_suffix(".toml"),
+            _report_flags("bpf", plan.release, has_linker=False),
+        ),
+    ]
+    if plan.mcu is None:
+        return "\n".join(lines)
+
+    stamp = PrevailStamp(stem)
+    mcu_o = base / "esp32c3.o"
+    linked = mcu_o.with_suffix(".elf")
+    bin_path = mcu_o.with_suffix(".bin")
+    report_path = mcu_o.with_suffix(".toml")
+    bpf_toml = bpf_o.with_suffix(".toml")
+    lines.append(
+        f"build {stamp.path}: prevail {bpf_o} | {prevail_bin()} {MAKE_DIR / 'prevail_gate.py'}"
+    )
+    lines.append(mcu_cc_edge(src, mcu_o, stamp, mcu_o.with_suffix(".d")))
+    lines.append(f"build {linked}: link {mcu_o} | {plan.mcu.linker}")
+    lines.append(f"build {bin_path}: bin {linked}")
+    lines.append(
+        _report_edge(
+            linked,
+            src,
+            report_path,
+            _report_flags("esp32c3", plan.release, has_linker=True),
+            extra_inputs=str(bpf_toml),
+        )
+    )
+    if plan.mcu.compact_elf:
+        mem = plan.mcu.mem
+        compact = base / f"{stem}.elf"
+        lines.append(
+            f"build {compact}: pack {bin_path} | {plan.mcu.tool_bin} {bpf_toml} {report_path}\n"
+            f"  image = {bin_path}\n"
+            f"  bpf_toml = {bpf_toml}\n"
+            f"  name = {stem}\n"
+            f"  slot = {mem.slot_addr:#x}\n"
+            f"  helper = {mem.helper_addr:#x}\n"
+            f"  machine = {XPOST_ESP32_C3_ARCH}\n"
+            f"  report = {report_path}"
+        )
+    return "\n".join(lines)
+
+
+def write_build_ninja(plan: GraphPlan) -> Path:
+    """Fill make/ninja/graph.ninja into build/.ninja/build.ninja."""
+    if plan.mcu is not None and not prevail_bin().is_file():
+        error(f"PREVAIL binary missing: {prevail_bin()}")
+        sys.exit(1)
+
+    template = NINJA_DIR / "graph.ninja"
     if not template.is_file():
         error(f"ninja 模板不可用: {template}")
         sys.exit(1)
 
-    mem: MemMapV0 | None = None
-    tool: Path | None = None
-    if build.target == "esp32c3":
-        if firmware is None:
-            error("esp32c3 需要 --firmware <firmware.elf>（含 .xpost.mem / XPM1）")
-            sys.exit(1)
-        tool = ensure_tool(force=force)
-        mem = load_mem_map_from_firmware(Path(firmware), tool)
-        info(
-            f"XPM1 helper={mem.helper_addr:#x} slot={mem.slot_addr:#x}+{mem.slot_len:#x} "
-            f"table={mem.table_addr:#x}+{mem.table_len:#x}"
-        )
-
-    linker = _linker_script(build.target, mem)
     ninja_dir = DEFAULT_BUILD_DIR / ".ninja"
     ninja_dir.mkdir(parents=True, exist_ok=True)
     ninja_file = ninja_dir / "build.ninja"
 
-    host = _host_triple()
-    tool_bin = tool_bin_path()
-    implicit = " ".join(str(path) for path in REPORT_SCRIPTS)
     edges: list[str] = []
     defaults: list[Path] = []
-
-    if build.target == "esp32c3" and compact_elf:
+    if plan.mcu is not None and plan.mcu.compact_elf:
         tool_deps = " ".join(
-            str(p)
-            for p in (
+            str(path)
+            for path in (
                 TOOLS_MANIFEST,
                 TOOLS_SRC,
                 TOOLS_DIR / "src" / "bpf_meta.rs",
                 XPOST_ELF_MANIFEST,
             )
-            if p.is_file()
+            if path.is_file()
         )
-        edges.append(f"build {tool_bin}: tool | {tool_deps}")
+        edges.append(f"build {plan.mcu.tool_bin}: tool | {tool_deps}")
+    for src in plan.sources:
+        edges.append(edges_for_stem(src, plan))
+        defaults.extend(_defaults_for_stem(src, plan))
 
-    for input_path, output_path in zip(build.inputs, build.outputs):
-        stem = Path(input_path).stem
-        depfile = output_path.with_suffix(".d")
-        edges.append(
-            f"build {output_path}: cc {input_path}\n"
-            f"  depfile = {depfile}"
-        )
-
-        if linker is not None:
-            linked_elf = output_path.with_suffix(".elf")
-            bin_path = output_path.with_suffix(".bin")
-            report_path = output_path.with_suffix(".toml")
-            bpf_toml = output_path.parent / "bpf.toml"
-            edges.append(f"build {linked_elf}: link {output_path} | {linker}")
-            edges.append(f"build {bin_path}: bin {linked_elf}")
-            edges.append(
-                f"build {report_path}: report {linked_elf} | {implicit} {bpf_toml}\n"
-                f"  src = {input_path}"
-            )
-            defaults.append(bin_path)
-            defaults.append(report_path)
-            if build.target == "esp32c3" and compact_elf:
-                assert mem is not None
-                compact = output_path.parent / f"{stem}.elf"
-                edges.append(
-                    f"build {compact}: pack {bin_path} | {tool_bin} {bpf_toml} {report_path}\n"
-                    f"  image = {bin_path}\n"
-                    f"  bpf_toml = {bpf_toml}\n"
-                    f"  name = {stem}\n"
-                    f"  slot = {mem.slot_addr:#x}\n"
-                    f"  helper = {mem.helper_addr:#x}\n"
-                    f"  machine = {XPOST_ESP32_C3_ARCH}\n"
-                    f"  report = {report_path}"
-                )
-                defaults.append(compact)
-        else:
-            report_path = output_path.with_suffix(".toml")
-            defaults.append(report_path)
-            edges.append(
-                f"build {report_path}: report {output_path} | {implicit}\n"
-                f"  src = {input_path}"
-            )
-
+    linker = plan.mcu.linker if plan.mcu is not None else None
+    tool_bin = plan.mcu.tool_bin if plan.mcu is not None else tool_bin_path()
     content = template.read_text()
     content = content.replace("@ROOT@", str(ROOT))
     content = content.replace("@CLANG@", CLANG)
     content = content.replace("@PYTHON@", sys.executable)
     content = content.replace("@MAKE@", str(MAKE_DIR))
-    content = content.replace("@OBJDUMP@", objdump)
+    content = content.replace("@OBJDUMP@", plan.objdump)
     content = content.replace("@OBJCOPY@", DEFAULT_OBJCOPY)
-    content = content.replace(
-        "@LINKER@", str(linker) if linker is not None else ""
-    )
-    content = content.replace(
-        "@REPORT_FLAGS@",
-        _report_flags(build.target, release, has_linker=linker is not None),
-    )
+    content = content.replace("@LINKER@", str(linker) if linker is not None else "")
     content = content.replace("@TOOLS_MANIFEST@", str(TOOLS_MANIFEST))
     content = content.replace("@TOOLS_TARGET@", str(TOOLS_TARGET))
-    content = content.replace("@HOST_TRIPLE@", host)
+    content = content.replace("@HOST_TRIPLE@", _host_triple())
     content = content.replace("@TOOL_BIN@", str(tool_bin))
     content = content.replace("@EDGES@", "\n".join(edges))
     content = content.replace("@DEFAULT@", " ".join(str(path) for path in defaults))
@@ -446,7 +462,7 @@ def build_target(
     info(f"已生成 ninja: {ninja_file}")
     if linker is not None:
         info(f"linker: {linker}")
-    run_ninja(ninja_file, force=force)
+    return ninja_file
 
 
 def run_ninja(ninja_file, force=False):

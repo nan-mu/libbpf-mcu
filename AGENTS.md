@@ -34,12 +34,17 @@ firmware. `layout.toml` is not a compile input. Do not confuse `esp32c3.elf`
 ## Pipeline
 
 Python (`make/cli.py` / `make/build.py`) only plans the route: resolve inputs, ensure
-the host tool, read XPM1, write the ninja graph. Ninja executes:
+the host tool, read XPM1, write one ninja graph. Ninja executes:
 
 1. `cargo build` → `tools/target/<host>/release/xpost-mcu-elf` (restat; rebuild when
    `tools/` or `xpost-elf` inputs change)
-2. clang cc / link / bin / report
-3. `xpost-mcu-elf pack` (direct binary call, never `cargo run`) + stamp `elf_size_kb`
+2. clang compiles `bpf.o`. When the build includes ESP32-C3, ninja runs PREVAIL on
+   that `bpf.o` and writes `prevail.ok` before the ESP32-C3 cc edge.
+3. clang link / bin / report
+4. `xpost-mcu-elf pack` (direct binary call, never `cargo run`) + stamp `elf_size_kb`
+
+`prevail/` is a git submodule. The binary is `prevail/bin/prevail`. `build bpf`
+emits only the bpf edges and does not run PREVAIL.
 
 Encode/decode uses `xpost-elf` only. Maps that cannot enter XDP ELF V0 are
 omitted silently from metadata.

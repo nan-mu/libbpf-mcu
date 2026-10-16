@@ -1,0 +1,3 @@
+[submodule "prevail"]
+	path = prevail
+	url = https://github.com/vbpf/prevail.git

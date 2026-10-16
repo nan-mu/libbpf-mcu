@@ -19,11 +19,13 @@ from pathlib import Path
 MAKE_DIR = Path(__file__).resolve().parent
 ROOT = MAKE_DIR.parent
 WORKSPACE = ROOT.parent
-DEFAULT_PREVAIL = WORKSPACE / "prevail" / "bin" / "prevail"
 
 # Late import so `python receipt.py` works from make/.
 sys.path.insert(0, str(MAKE_DIR))
 from llvm_tools import resolve_llvm_tool  # noqa: E402
+from prevail_gate import prevail_bin  # noqa: E402
+
+DEFAULT_PREVAIL = prevail_bin()
 
 DEFAULT_OBJDUMP = resolve_llvm_tool("llvm-objdump")
 DEFAULT_READELF = resolve_llvm_tool("llvm-readelf")
@@ -57,7 +59,7 @@ def prevail_accept(
         "stdout": proc.stdout.strip(),
         "stderr": proc.stderr.strip(),
         "accepted": ok,
-        "commit": git_head(WORKSPACE / "prevail"),
+        "commit": git_head(ROOT / "prevail"),
     }
 
 

@@ -3,17 +3,23 @@ import os
 import sys
 from pathlib import Path
 
-from tiny_log import debug, info, set_scope
+from tiny_log import debug, error, info, set_scope
 
 from build import (
     DEFAULT_OBJCOPY,
     DEFAULT_OBJDUMP,
     BuildPaths,
-    BuildTarget,
-    build_target,
+    GraphPlan,
+    McuLink,
+    _linker_script,
     check_build_args,
     check_build_fs,
     clean_build,
+    ensure_tool,
+    load_mem_map_from_firmware,
+    run_ninja,
+    tool_bin_path,
+    write_build_ninja,
 )
 
 
@@ -86,24 +92,40 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(2)
-        # With --firmware and no target: build bpf then esp32c3 (target=None → all).
+        # With --firmware and no target: one graph that includes esp32c3.
         builds = check_build_args(target, args.inputs, args.outputs, crate=args.crate)
-        for build in builds:
-            paths = check_build_fs(BuildPaths(build.inputs, build.outputs))
-            build = BuildTarget(build.target, paths.inputs, paths.outputs)
-            info(f"编译目标 [{build.target}]")
-            if os.environ.get("DEBUG") == "1":
-                debug(f"输入文件: {[str(path) for path in build.inputs]}")
-                debug(f"输出文件: {[str(path) for path in build.outputs]}")
-            build_target(
-                build,
-                force=args.force,
-                release=args.release,
-                objdump=args.objdump,
-                objcopy=args.objcopy,
-                firmware=args.firmware if build.target == "esp32c3" else None,
+        checked = check_build_fs(BuildPaths(builds[0].inputs, builds[0].outputs))
+        want_mcu = any(item.target == "esp32c3" for item in builds)
+        mcu = None
+        if want_mcu:
+            if args.firmware is None:
+                error("esp32c3 需要 --firmware <firmware.elf>（含 .xpost.mem / XPM1）")
+                sys.exit(1)
+            tool = ensure_tool(force=args.force)
+            mem = load_mem_map_from_firmware(Path(args.firmware), tool)
+            info(
+                f"XPM1 helper={mem.helper_addr:#x} slot={mem.slot_addr:#x}+{mem.slot_len:#x} "
+                f"table={mem.table_addr:#x}+{mem.table_len:#x}"
+            )
+            linker = _linker_script("esp32c3", mem)
+            assert linker is not None
+            mcu = McuLink(
+                mem=mem,
+                linker=linker,
+                tool_bin=tool_bin_path(),
                 compact_elf=not args.no_compact_elf,
             )
+        names = ", ".join(item.target for item in builds)
+        info(f"编译目标 [{names}]")
+        if os.environ.get("DEBUG") == "1":
+            debug(f"输入文件: {[str(path) for path in checked.inputs]}")
+        plan = GraphPlan(
+            sources=tuple(checked.inputs),
+            mcu=mcu,
+            release=args.release,
+            objdump=args.objdump,
+        )
+        run_ninja(write_build_ninja(plan), force=args.force)
     elif args.command == "clean":
         clean_build()
     elif args.command == "test":

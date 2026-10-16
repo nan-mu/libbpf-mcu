@@ -10,7 +10,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FAILED = ROOT / "tests" / "unused"
-PREVAIL = ROOT.parent / "prevail" / "bin" / "prevail"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from prevail_gate import prevail_bin  # noqa: E402
+
+PREVAIL = prevail_bin()
 CLANG = "clang"
 
 CASES = [
