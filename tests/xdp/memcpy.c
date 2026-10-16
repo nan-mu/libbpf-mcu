@@ -44,14 +44,23 @@ SEC("xdp")
 int memcpy_xdp(struct xdp_md *ctx)
 {
 	__u8 *payload;
-	__u32 avail, param, i;
+	__u8 *end = (__u8 *)(long)ctx->data_end;
+	__u32 avail, param;
+	int i;
 
 	if (ctx_view(ctx, &payload, &avail, &param))
 		return XDP_ABORTED;
-	if (param == 0 || param > avail / 2)
+	/* Exec value is 32 bytes, so the payload is 24. param <= 12 matches
+	 * the old param <= avail/2 bound on that value. Unroll keeps every
+	 * packet offset constant for PREVAIL. */
+	if (payload + 24 > end || avail < 24 || param == 0 || param > 12)
 		return XDP_ABORTED;
-	for (i = 0; i < param; i++)
+#pragma unroll
+	for (i = 0; i < 12; i++) {
+		if ((__u32)i >= param)
+			continue;
 		payload[param + i] = payload[i];
+	}
 	bpf_printk("OK finish");
 	return XDP_PASS;
 }

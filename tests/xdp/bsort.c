@@ -52,16 +52,28 @@ SEC("xdp")
 int bsort(struct xdp_md *ctx)
 {
 	__u8 *payload;
-	__u32 avail, n, i, j;
+	__u8 *end = (__u8 *)(long)ctx->data_end;
+	__u32 avail, n;
+	int i, j;
 
 	if (ctx_view(ctx, &payload, &avail, &n))
 		return XDP_ABORTED;
-	if (n < 2 || n > 64 || avail < n * 4)
+	/* 24-byte payload holds at most 6 words. The old n <= 64 bound
+	 * already aborted above that once avail < n * 4. */
+	if (payload + 24 > end || avail < 24 || n < 2 || n > 6)
 		return XDP_ABORTED;
-	for (i = 0; i < n - 1; i++) {
-		for (j = 0; j < n - 1 - i; j++) {
-			__u32 a = load_u32(payload + j * 4);
-			__u32 b = load_u32(payload + (j + 1) * 4);
+#pragma unroll
+	for (i = 0; i < 5; i++) {
+		if ((__u32)i + 1 >= n)
+			continue;
+#pragma unroll
+		for (j = 0; j < 5; j++) {
+			__u32 a, b;
+
+			if ((__u32)j + 1 >= n - (__u32)i)
+				continue;
+			a = load_u32(payload + j * 4);
+			b = load_u32(payload + (j + 1) * 4);
 			if (a > b) {
 				store_u32(payload + j * 4, b);
 				store_u32(payload + (j + 1) * 4, a);

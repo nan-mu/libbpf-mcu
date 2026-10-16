@@ -48,31 +48,36 @@ static __always_inline int ctx_view(struct xdp_md *ctx, __u8 **payload,
 	return 0;
 }
 
-/* Wikipedia / RFC 3720 §12.1 Fletcher-32, 360-word inner chunks. */
+/* Wikipedia / RFC 3720 §12.1 Fletcher-32.
+ * Exec payload is 24 bytes, so param + 4 <= 24 (param <= 20) is a single
+ * 360-word chunk. Offsets are unrolled so PREVAIL sees constants. */
 static __always_inline __u32 f32(const __u8 *data, __u32 len)
 {
 	__u32 sum1 = 0xffffu, sum2 = 0xffffu;
-	__u32 i = 0;
+	int w, k;
 
-	while (len > 1) {
-		__u32 words = len / 2;
-		if (words > 360)
-			words = 360;
-		len -= words * 2;
-		while (words--) {
-			__u16 w = (__u16)data[i] | ((__u16)data[i + 1] << 8);
-			i += 2;
-			sum1 += w;
-			sum2 += sum1;
-		}
-		sum1 = (sum1 & 0xffffu) + (sum1 >> 16);
-		sum2 = (sum2 & 0xffffu) + (sum2 >> 16);
-	}
-	if (len) {
-		sum1 += data[i];
+#pragma unroll
+	for (w = 0; w < 10; w++) {
+		__u16 word;
+
+		if ((__u32)(w * 2 + 1) >= len)
+			continue;
+		word = (__u16)data[w * 2] | ((__u16)data[w * 2 + 1] << 8);
+		sum1 += word;
 		sum2 += sum1;
-		sum1 = (sum1 & 0xffffu) + (sum1 >> 16);
-		sum2 = (sum2 & 0xffffu) + (sum2 >> 16);
+	}
+	sum1 = (sum1 & 0xffffu) + (sum1 >> 16);
+	sum2 = (sum2 & 0xffffu) + (sum2 >> 16);
+	if (len & 1) {
+#pragma unroll
+		for (k = 0; k < 20; k += 2) {
+			if ((__u32)k + 1 != len)
+				continue;
+			sum1 += data[k];
+			sum2 += sum1;
+			sum1 = (sum1 & 0xffffu) + (sum1 >> 16);
+			sum2 = (sum2 & 0xffffu) + (sum2 >> 16);
+		}
 	}
 	sum1 = (sum1 & 0xffffu) + (sum1 >> 16);
 	sum2 = (sum2 & 0xffffu) + (sum2 >> 16);
@@ -83,13 +88,20 @@ SEC("xdp")
 int fletcher32(struct xdp_md *ctx)
 {
 	__u8 *payload;
-	__u32 avail, param;
+	__u8 *end = (__u8 *)(long)ctx->data_end;
+	__u32 avail, param, sum;
+	int k;
 
 	if (ctx_view(ctx, &payload, &avail, &param))
 		return XDP_ABORTED;
-	if (param == 0 || param > avail || avail < param + 4)
+	if (payload + 24 > end || avail < 24 || param == 0 || param > 20)
 		return XDP_ABORTED;
-	store_u32(payload + param, f32(payload, param));
+	sum = f32(payload, param);
+#pragma unroll
+	for (k = 1; k <= 20; k++) {
+		if (param == (__u32)k)
+			store_u32(payload + k, sum);
+	}
 	bpf_printk("OK finish");
 	return XDP_PASS;
 }
