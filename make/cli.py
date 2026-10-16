@@ -112,6 +112,7 @@ def main():
 
         tests = [
             [sys.executable, str(Path(__file__).parent / "test_btf_layout.py")],
+            [sys.executable, str(Path(__file__).parent / "test_prevail_select.py")],
             [sys.executable, str(Path(__file__).parent / "test_prevail_negatives.py")],
             [sys.executable, str(Path(__file__).parent / "test_reentrancy_model.py")],
             [sys.executable, str(Path(__file__).parent / "test_xpost_elf.py")],
