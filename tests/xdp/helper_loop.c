@@ -26,6 +26,8 @@ int helper_loop(struct xdp_md *ctx)
 	n = *hdr;
 	if (n > 8)
 		n = 8;
+	/* Keep the clamp in a register. eBPF otherwise emits i < 8 inside the loop. */
+	asm volatile("" : "+r"(n));
 	for (i = 0; i < n; i++) {
 		__u32 *cnt;
 

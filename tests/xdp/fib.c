@@ -70,10 +70,14 @@ int fib(struct xdp_md *ctx)
 
 	if (ctx_view(ctx, &payload, &avail, &param))
 		return XDP_ABORTED;
+	/* RV32 OR-merges this with the check inside ctx_view. eBPF does not. */
+	asm volatile("" ::: "memory");
 	if (avail < 4)
 		return XDP_ABORTED;
 	if (param > 47)
 		param = 47;
+	/* Keep the clamp in a register. eBPF otherwise emits i < 47 inside the loop. */
+	asm volatile("" : "+r"(param));
 	store_u32(payload, fib_u32(param));
 	bpf_printk("OK finish");
 	return XDP_PASS;

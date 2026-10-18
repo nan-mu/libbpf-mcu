@@ -71,6 +71,8 @@ static __always_inline __u32 f32(const __u8 *data, __u32 len)
 	if (len & 1) {
 #pragma unroll
 		for (k = 0; k < 20; k += 2) {
+			/* Stop both compilers turning this unroll into different decision trees. */
+			asm volatile("" ::: "memory");
 			if ((__u32)k + 1 != len)
 				continue;
 			sum1 += data[k];
@@ -99,6 +101,7 @@ int fletcher32(struct xdp_md *ctx)
 	sum = f32(payload, param);
 #pragma unroll
 	for (k = 1; k <= 20; k++) {
+		asm volatile("" ::: "memory");
 		if (param == (__u32)k)
 			store_u32(payload + k, sum);
 	}
