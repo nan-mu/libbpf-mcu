@@ -35,7 +35,7 @@ static __always_inline void store_u32(__u8 *p, __u32 v)
 }
 
 static __always_inline int ctx_view(struct xdp_md *ctx, __u8 **payload,
-				    __u32 *avail, __u32 *param)
+				    __u32 *param)
 {
 	__u8 *data = (__u8 *)(long)ctx->data;
 	__u8 *end = (__u8 *)(long)ctx->data_end;
@@ -44,7 +44,6 @@ static __always_inline int ctx_view(struct xdp_md *ctx, __u8 **payload,
 		return -1;
 	*param = load_u32(data + 4);
 	*payload = data + 8;
-	*avail = (__u32)(end - *payload);
 	return 0;
 }
 
@@ -53,14 +52,14 @@ int bsort(struct xdp_md *ctx)
 {
 	__u8 *payload;
 	__u8 *end = (__u8 *)(long)ctx->data_end;
-	__u32 avail, n;
+	__u32 n;
 	int i, j;
 
-	if (ctx_view(ctx, &payload, &avail, &n))
+	if (ctx_view(ctx, &payload, &n))
 		return XDP_ABORTED;
-	/* 24-byte payload holds at most 6 words. The old n <= 64 bound
-	 * already aborted above that once avail < n * 4. */
-	if (payload + 24 > end || avail < 24 || n < 2 || n > 6)
+	/* 24-byte payload holds at most 6 words. One pointer check: the two
+	 * backends schedule `payload + 24 > end || avail < 24` in opposite orders. */
+	if (payload + 24 > end || n < 2 || n > 6)
 		return XDP_ABORTED;
 #pragma unroll
 	for (i = 0; i < 5; i++) {
