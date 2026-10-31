@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use object::{Object, ObjectSection};
+use object::{Object, ObjectSection, ObjectSymbol};
 use xpost_elf::{SECTION_NAME, build_container, decode};
 
 use bpf_meta::metadata_from_bpf_toml;
@@ -22,6 +22,11 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Print `{addr,size}` for one firmware ELF symbol.
+    Symbol {
+        firmware: PathBuf,
+        name: String,
+    },
     /// Dump firmware `.xpost.mem` (XPM1) addresses as one JSON object on stdout.
     MemMap {
         /// Linked firmware ELF carrying `.xpost.mem`.
@@ -58,6 +63,17 @@ fn parse_u32(s: &str) -> Result<u32, String> {
 fn parse_u32_as_u8(s: &str) -> Result<u8, String> {
     let v = parse_u32(s)?;
     u8::try_from(v).map_err(|_| format!("machine out of u8 range: {v}"))
+}
+
+fn dump_symbol(firmware: &PathBuf, name: &str) -> Result<()> {
+    let data = fs::read(firmware).with_context(|| format!("read {}", firmware.display()))?;
+    let file = object::File::parse(&*data).context("parse firmware ELF")?;
+    let sym = file
+        .symbols()
+        .find(|sym| sym.name().ok() == Some(name))
+        .ok_or_else(|| anyhow::anyhow!("ELF missing symbol `{name}`"))?;
+    println!("{{\"addr\":{},\"size\":{}}}", sym.address(), sym.size());
+    Ok(())
 }
 
 fn dump_mem_map(firmware: &PathBuf) -> Result<()> {
@@ -104,6 +120,7 @@ fn pack(args: Cmd) -> Result<()> {
 
 fn run(args: Args) -> Result<()> {
     match args.cmd {
+        Cmd::Symbol { firmware, name } => dump_symbol(&firmware, &name),
         Cmd::MemMap { firmware } => dump_mem_map(&firmware),
         pack_cmd @ Cmd::Pack { .. } => pack(pack_cmd),
     }

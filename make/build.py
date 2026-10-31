@@ -7,7 +7,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from llvm_tools import resolve_llvm_tool
@@ -324,6 +324,36 @@ def load_mem_map_from_firmware(firmware_elf: Path, tool: Path) -> MemMapV0:
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         error(f"xpost-mcu-elf mem-map bad stdout: {line!r} ({exc})")
         sys.exit(1)
+
+
+def apply_slot_symbol(mem: MemMapV0, firmware_elf: Path, tool: Path, name: str) -> MemMapV0:
+    """Replace the XPM1 slot with one firmware symbol. Images are not relocatable."""
+    proc = subprocess.run(
+        [str(tool), "symbol", str(firmware_elf), name],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        error(f"xpost-mcu-elf symbol {name} failed: exit={proc.returncode}: {err}")
+        sys.exit(proc.returncode)
+    lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        error(f"xpost-mcu-elf symbol {name} produced no stdout")
+        sys.exit(1)
+    line = lines[-1]
+    try:
+        data = json.loads(line)
+        addr = int(data["addr"])
+        size = int(data["size"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        error(f"xpost-mcu-elf symbol bad stdout: {line!r} ({exc})")
+        sys.exit(1)
+    if addr == 0 or size == 0:
+        error(f"symbol {name} has addr={addr:#x} size={size:#x}")
+        sys.exit(1)
+    info(f"slot symbol {name} addr={addr:#x} size={size:#x}")
+    return replace(mem, slot_addr=addr, slot_len=size)
 
 
 def mcu_cc_edge(src: Path, obj: Path, stamp: PrevailStamp, depfile: Path) -> str:

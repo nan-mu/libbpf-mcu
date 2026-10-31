@@ -16,6 +16,7 @@ from build import (
     check_build_fs,
     clean_build,
     ensure_tool,
+    apply_slot_symbol,
     load_mem_map_from_firmware,
     run_ninja,
     tool_bin_path,
@@ -76,6 +77,11 @@ def main():
         action="store_true",
         help="ESP32-C3: do not emit the parallel <stem>.elf Compact ELF container",
     )
+    build_parser.add_argument(
+        "--slot-symbol",
+        default=None,
+        help="firmware ELF symbol; its address and size replace XPM1 slot_addr/slot_len",
+    )
 
     subparsers.add_parser("clean")
     subparsers.add_parser("test")
@@ -103,6 +109,8 @@ def main():
                 sys.exit(1)
             tool = ensure_tool(force=args.force)
             mem = load_mem_map_from_firmware(Path(args.firmware), tool)
+            if args.slot_symbol:
+                mem = apply_slot_symbol(mem, Path(args.firmware), tool, args.slot_symbol)
             info(
                 f"XPM1 helper={mem.helper_addr:#x} slot={mem.slot_addr:#x}+{mem.slot_len:#x} "
                 f"table={mem.table_addr:#x}+{mem.table_len:#x}"
