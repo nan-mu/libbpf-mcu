@@ -1,15 +1,19 @@
-/* UDP bounce that swaps the IPv4 addresses.
+/* UDP bounce that rewrites the IPv4 destination to 203.0.113.10.
  *
- * A standard 20-byte IPv4 header plus a UDP header is required. The Ethernet
- * MACs are swapped so the frame returns to the sender. Swapping both IPv4
- * addresses and both UDP ports leaves the IPv4 and UDP checksums unchanged.
- * tcpdump then shows the original destination as the source.
+ * The paired image `case_mark` writes 203.0.113.77. Both return XDP_TX for
+ * the same UDP stimulus. The IPv4 header checksum is recomputed over the
+ * fixed 20-byte header, and the UDP checksum is cleared because IPv4 allows
+ * a zero UDP checksum. Ethernet MACs are swapped so the rewritten frame
+ * returns to the sender.
  */
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 #include "vmlinux.h"
 
 #define ETH_P_IP 0x0800
+
+/* 203.0.113.10 */
+#define MARK_DST 0xcb00710a
 
 struct bpf_map_def SEC("maps") rxcnt = {
 	.type = BPF_MAP_TYPE_ARRAY,
@@ -33,6 +37,28 @@ static void swap_mac(void *data)
 	p[5] = dst2;
 }
 
+/* Ones' complement over the 20-byte header. check is zeroed first. */
+static void ipv4_csum(struct iphdr *ip)
+{
+	__u8 *b = (void *)ip;
+	__u32 sum = 0;
+
+	ip->check = 0;
+	sum += ((__u32)b[0] << 8) | b[1];
+	sum += ((__u32)b[2] << 8) | b[3];
+	sum += ((__u32)b[4] << 8) | b[5];
+	sum += ((__u32)b[6] << 8) | b[7];
+	sum += ((__u32)b[8] << 8) | b[9];
+	sum += ((__u32)b[10] << 8) | b[11];
+	sum += ((__u32)b[12] << 8) | b[13];
+	sum += ((__u32)b[14] << 8) | b[15];
+	sum += ((__u32)b[16] << 8) | b[17];
+	sum += ((__u32)b[18] << 8) | b[19];
+	sum = (sum & 0xffff) + (sum >> 16);
+	sum = (sum & 0xffff) + (sum >> 16);
+	ip->check = bpf_htons((__u16)~sum);
+}
+
 SEC("xdp1")
 int xdp_prog1(struct xdp_md *ctx)
 {
@@ -43,8 +69,6 @@ int xdp_prog1(struct xdp_md *ctx)
 	struct udphdr *udp;
 	long *value;
 	__u32 proto;
-	__be32 addr;
-	__be16 port;
 
 	if ((void *)(eth + 1) > data_end)
 		return XDP_DROP;
@@ -69,12 +93,9 @@ int xdp_prog1(struct xdp_md *ctx)
 		*value += 1;
 
 	swap_mac(data);
-	addr = ip->saddr;
-	ip->saddr = ip->daddr;
-	ip->daddr = addr;
-	port = udp->source;
-	udp->source = udp->dest;
-	udp->dest = port;
+	ip->daddr = bpf_htonl(MARK_DST);
+	ipv4_csum(ip);
+	udp->check = 0;
 	return XDP_TX;
 }
 
