@@ -51,6 +51,7 @@ class McuLink:
     linker: Path
     tool_bin: Path
     compact_elf: bool
+    image_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -374,13 +375,20 @@ def _report_edge(
     )
 
 
+def compact_name(plan: GraphPlan, stem: str) -> str:
+    """Container name. A second link of the same source passes `--image-name`."""
+    if plan.mcu is not None and plan.mcu.image_name:
+        return plan.mcu.image_name
+    return stem
+
+
 def _defaults_for_stem(src: Path, plan: GraphPlan) -> list[Path]:
     base = DEFAULT_BUILD_DIR / src.stem
     if plan.mcu is None:
         return [base / "bpf.toml"]
     outputs = [base / "esp32c3.bin", base / "esp32c3.toml"]
     if plan.mcu.compact_elf:
-        outputs.append(base / f"{src.stem}.elf")
+        outputs.append(base / f"{compact_name(plan, src.stem)}.elf")
     return outputs
 
 
@@ -424,12 +432,13 @@ def edges_for_stem(src: Path, plan: GraphPlan) -> str:
     )
     if plan.mcu.compact_elf:
         mem = plan.mcu.mem
-        compact = base / f"{stem}.elf"
+        image_name = compact_name(plan, stem)
+        compact = base / f"{image_name}.elf"
         lines.append(
             f"build {compact}: pack {bin_path} | {plan.mcu.tool_bin} {bpf_toml} {report_path}\n"
             f"  image = {bin_path}\n"
             f"  bpf_toml = {bpf_toml}\n"
-            f"  name = {stem}\n"
+            f"  name = {image_name}\n"
             f"  slot = {mem.slot_addr:#x}\n"
             f"  helper = {mem.helper_addr:#x}\n"
             f"  machine = {XPOST_ESP32_C3_ARCH}\n"

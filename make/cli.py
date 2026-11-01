@@ -24,6 +24,15 @@ from build import (
 )
 
 
+def check_image_name(name: str | None) -> str | None:
+    if name is None:
+        return None
+    if not name or any(ch in name for ch in "/\\.") or not all(ch.isalnum() or ch == "_" for ch in name):
+        error(f"--image-name must be a single identifier, got {name!r}")
+        sys.exit(2)
+    return name
+
+
 @set_scope("libbpf-mcu")
 def main():
     if os.environ.get("DEBUG") == "1":
@@ -82,6 +91,11 @@ def main():
         default=None,
         help="firmware ELF symbol; its address and size replace XPM1 slot_addr/slot_len",
     )
+    build_parser.add_argument(
+        "--image-name",
+        default=None,
+        help="Compact ELF container name; default is the source stem",
+    )
 
     subparsers.add_parser("clean")
     subparsers.add_parser("test")
@@ -117,11 +131,13 @@ def main():
             )
             linker = _linker_script("esp32c3", mem)
             assert linker is not None
+            image_name = check_image_name(args.image_name)
             mcu = McuLink(
                 mem=mem,
                 linker=linker,
                 tool_bin=tool_bin_path(),
                 compact_elf=not args.no_compact_elf,
+                image_name=image_name,
             )
         names = ", ".join(item.target for item in builds)
         info(f"编译目标 [{names}]")
