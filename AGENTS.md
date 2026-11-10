@@ -54,6 +54,26 @@ omitted silently from metadata.
 - `include/` — MCU freestanding (`esp32c3` ninja)
 - `include-bpf/` — host BPF (`bpf` ninja)
 
+## JIT
+
+`jit/` is a separate host tool. `pixi run build` does not run it, and it is not
+the freestanding C-to-RV32IMC path above.
+
+It compiles eBPF bytecode to RV32IM on the Mac. It does not execute that image
+and it does not link it. RV32IMC can run the encoding. The compiler emits no
+RVC, F, D, or A. Register pairing follows the Jitterbug RV32 JIT. Helper calls
+and pseudo `lddw`s are relocations in the sibling `.reloc` file. ALU64 div/mod,
+atomics, and tail calls are rejected. Exit puts `R0` in `a0`/`a1`. That is not
+the firmware ilp32 helper ABI.
+
+```bash
+cargo test --manifest-path jit/Cargo.toml
+cargo run --release --manifest-path jit/Cargo.toml -- compile <bpf.o-or-raw> -o out.rv32
+```
+
+`--repeat N` times only the compile call. `ns_min`, `ns_med`, and `ns_max` are
+those samples.
+
 ## Scope
 
 Phase 1 proves RV32IMC only. Architecture-agnostic remains a design goal until a

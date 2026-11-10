@@ -1,5 +1,6 @@
 # pixi environments
 .pixi/*
 tools/target/
+jit/target/
 !.pixi/config.toml
 __pycache__/
