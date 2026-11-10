@@ -96,6 +96,16 @@ def main():
         default=None,
         help="Compact ELF container name; default is the source stem",
     )
+    build_parser.add_argument(
+        "--engine",
+        choices=["aot", "rbpf"],
+        default="aot",
+        help=(
+            "what the container carries. aot: the linked RV32IMC machine code. "
+            "rbpf: the eBPF bytecode, with each map reference rewritten to the "
+            "map index so the interpreter can resolve it at load"
+        ),
+    )
 
     subparsers.add_parser("clean")
     subparsers.add_parser("test")
@@ -138,6 +148,7 @@ def main():
                 tool_bin=tool_bin_path(),
                 compact_elf=not args.no_compact_elf,
                 image_name=image_name,
+                engine=args.engine,
             )
         names = ", ".join(item.target for item in builds)
         info(f"编译目标 [{names}]")

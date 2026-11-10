@@ -38,8 +38,12 @@ rule tool
     description = TOOL xpost-mcu-elf
     restat = 1
 
+rule section
+    command = @PYTHON@ @MAKE@/xdp_section.py --obj $obj --out $sec_out
+    description = section $sec_out
+
 rule pack
-    command = @TOOL_BIN@ pack --image $image --bpf-toml $bpf_toml --name $name --slot-address $slot --helper-address $helper --machine $machine -o $out && @PYTHON@ @MAKE@/stamp_elf_size.py --report $report --elf $out
+    command = @TOOL_BIN@ pack --image $image --bpf-toml $bpf_toml --name $name --slot-address $slot --helper-address $helper --machine $machine $engine_flags -o $out && @PYTHON@ @MAKE@/stamp_elf_size.py --report $report --elf $out
     description = pack $out
 
 @EDGES@

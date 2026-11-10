@@ -52,6 +52,9 @@ class McuLink:
     tool_bin: Path
     compact_elf: bool
     image_name: str | None = None
+    # What the container carries. "aot" is the linked machine code; "rbpf" is the
+    # eBPF bytecode, which needs its map references turned into indices.
+    engine: str = "aot"
 
 
 @dataclass(frozen=True)
@@ -434,17 +437,45 @@ def edges_for_stem(src: Path, plan: GraphPlan) -> str:
         mem = plan.mcu.mem
         image_name = compact_name(plan, stem)
         compact = base / f"{image_name}.elf"
+        # A bytecode container holds the eBPF program, not the linked machine
+        # code: the interpreter cannot execute RV32IMC instructions. The section
+        # is extracted from the object so the container carries exactly the bytes
+        # the interpreter will run.
+        if plan.mcu.engine == "rbpf":
+            section = base / "xdp.bin"
+            lines.append(
+                f"build {section}: section {bpf_o} | {MAKE_DIR / 'xdp_section.py'} {MAKE_DIR / 'llvm_tools.py'}\n"
+                f"  obj = {bpf_o}\n"
+                f"  sec_out = {section}"
+            )
+            pack_image = section
+        else:
+            pack_image = bin_path
         lines.append(
-            f"build {compact}: pack {bin_path} | {plan.mcu.tool_bin} {bpf_toml} {report_path}\n"
-            f"  image = {bin_path}\n"
+            f"build {compact}: pack {pack_image} | {plan.mcu.tool_bin} {bpf_toml} {report_path}\n"
+            f"  image = {pack_image}\n"
             f"  bpf_toml = {bpf_toml}\n"
             f"  name = {image_name}\n"
             f"  slot = {mem.slot_addr:#x}\n"
             f"  helper = {mem.helper_addr:#x}\n"
             f"  machine = {XPOST_ESP32_C3_ARCH}\n"
+            f"  engine_flags = {engine_flags(plan.mcu.engine, bpf_o)}\n"
             f"  report = {report_path}"
         )
     return "\n".join(lines)
+
+
+def engine_flags(engine: str, bpf_o: Path) -> str:
+    """Extra `pack` arguments for one engine.
+
+    A bytecode image needs its map references turned into indices. The map
+    identity lives in the object's relocation table, not in the bytes, so the
+    object is passed along; without it `pack` cannot tell which `lddw` refers to
+    which map and refuses rather than guessing.
+    """
+    if engine == "rbpf":
+        return f"--map-index --obj {bpf_o}"
+    return ""
 
 
 def write_build_ninja(plan: GraphPlan) -> Path:
