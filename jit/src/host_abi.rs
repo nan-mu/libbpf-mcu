@@ -4,7 +4,7 @@
 //! This model does the same split. The bytes at the VMR are a descriptor.
 //! `storage` is the address of the values. It is not the VMR.
 
-pub const HELPER: u32 = 0x4038_1000;
+pub const HELPER: u32 = 0x4038_0000;
 pub const MAP_MAGIC: u32 = u32::from_le_bytes(*b"MAP1");
 pub const KIND_ARRAY: u32 = 1;
 pub const KIND_HASH: u32 = 2;

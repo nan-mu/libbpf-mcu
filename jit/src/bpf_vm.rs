@@ -252,7 +252,10 @@ fn endian(dst: u64, imm: i32, from_be: bool, is64: bool) -> Result<u64, String> 
     let v = dst as u32;
     match (from_be, imm) {
         (false, 16) => Ok(u64::from(v & 0xffff)),
-        (false, 32) | (false, 64) => Ok(u64::from(v)),
+        (false, 32) => Ok(u64::from(v)),
+        // `{END, *, ALU}` with 64 acts on the whole 64-bit value (RFC 9669,
+        // section 4.2). le64 on a little-endian host is the identity.
+        (false, 64) => Ok(dst),
         (true, 16) => Ok(u64::from(v.swap_bytes() >> 16)),
         (true, 32) => Ok(u64::from(v.swap_bytes())),
         (true, 64) => Ok(dst.swap_bytes()),

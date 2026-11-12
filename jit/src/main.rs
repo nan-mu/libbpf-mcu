@@ -162,7 +162,7 @@ fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
     );
     match report.status {
         "pass" => Ok(0),
-        "unsupported" => Ok(2),
+        "unsupported" | "inconclusive" => Ok(2),
         _ => Ok(1),
     }
 }

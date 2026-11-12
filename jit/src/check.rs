@@ -8,7 +8,7 @@ use std::ops::Range;
 use crate::bpf::Insn;
 use crate::bpf_vm;
 use crate::compile::{self, Image};
-use crate::host_abi;
+use crate::host_abi::{self, write_map, KIND_ARRAY};
 use crate::rv_vm;
 
 pub struct Report {
@@ -43,22 +43,32 @@ pub fn check_packet(
     mem[ctx..ctx + 4].copy_from_slice(&0x1000u32.to_le_bytes());
     mem[ctx + 4..ctx + 8].copy_from_slice(&(0x1000u32 + packet.len() as u32).to_le_bytes());
     let mut maps = HashMap::new();
+    let mut watch = vec![data..end];
     let mut n = 0u32;
     for name in symbols.values() {
         if maps.contains_key(name) {
             continue;
         }
-        maps.insert(name.clone(), 0x3000 + n * 0x40);
+        let vmr = 0x3000 + n * 0x40;
+        let storage = 0x8000 + n * 0x800;
+        // The host model is an ARRAY of 256 eight-byte values for every map.
+        // It does not read the object's map section, so a HASH program meets
+        // array semantics here. JIT and reference share this model, so the
+        // comparison stays a comparison of lowering.
+        if write_map(&mut mem, vmr, KIND_ARRAY, 4, 8, 256, storage).is_err() {
+            return Report {
+                status: "fail",
+                detail: "map descriptor does not fit".into(),
+                r0: None,
+                rv_bytes: 0,
+                relocs: 0,
+            };
+        }
+        maps.insert(name.clone(), vmr);
+        watch.push(storage as usize..storage as usize + 0x800);
         n += 1;
     }
-    compare(
-        insns,
-        symbols,
-        &maps,
-        &mem,
-        ctx as u32,
-        &[data..end],
-    )
+    compare(insns, symbols, &maps, &mem, ctx as u32, &watch)
 }
 
 pub fn compare(
@@ -106,8 +116,12 @@ pub fn compare(
     let rv = rv_vm::run(&code, r1, mem.to_vec(), helper);
     let (bpf_r0, rv) = match (bpf, rv) {
         (Err(bpf_err), Err(rv_err)) => {
+            // Both engines refusing is not a comparison. The harness gives
+            // each side the same memory, so a shared bound makes them fault
+            // together. Calling that a pass would hide a disagreement in
+            // registers or memory.
             return Report {
-                status: "pass",
+                status: "inconclusive",
                 detail: format!("both fault: reference {bpf_err}; rv32 {rv_err}"),
                 r0: None,
                 rv_bytes: code.len() * 4,

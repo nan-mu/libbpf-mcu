@@ -932,6 +932,8 @@ fn emit_end(code: &mut Vec<u32>, dst: Slot, imm: i32, from_be: bool, pc: usize) 
             code.push(addi(rd.hi, ZERO, 0));
         }
         (false, 32) => code.push(addi(rd.hi, ZERO, 0)),
+        // `{END, LE, ALU}` with 64 is the identity of the whole 64-bit value
+        // on a little-endian host, not a truncation to 32 bits.
         (false, 64) => {}
         (true, 16) => {
             emit_rev16(code, rd.lo);
@@ -1437,10 +1439,33 @@ fn patch_call(code: &mut [u32], rv_off: u32, helper: u32) -> Result<(), JitError
 
 fn patch_lddw(code: &mut [u32], rv_off: u32, addr: u32) -> Result<(), JitError> {
     let at = word_at(code, rv_off, 4)?;
-    let lo_rd = ((code[at] >> 7) & 31) as u8;
-    let hi_rd = ((code[at + 2] >> 7) & 31) as u8;
-    let lo = abs_pair(lo_rd, addr);
-    let hi = abs_pair(hi_rd, 0);
+    // The unlinked sequence is lui/addi for the low half, then the same pair
+    // for the high half, each addi reading the register its lui wrote.
+    let shape = [
+        ((code[at] & 0x7f) as u8, ((code[at] >> 7) & 31) as u8),
+        ((code[at + 1] & 0x7f) as u8, ((code[at + 1] >> 7) & 31) as u8),
+        ((code[at + 2] & 0x7f) as u8, ((code[at + 2] >> 7) & 31) as u8),
+        ((code[at + 3] & 0x7f) as u8, ((code[at + 3] >> 7) & 31) as u8),
+    ];
+    let addi_rs1 = |word: u32| ((word >> 15) & 31) as u8;
+    let ok = shape[0].0 == 0x37
+        && shape[1].0 == 0x13
+        && shape[1].1 == addi_rs1(code[at + 1])
+        && shape[2].0 == 0x37
+        && shape[3].0 == 0x13
+        && shape[3].1 == addi_rs1(code[at + 3])
+        && shape[1].1 == shape[0].1
+        && shape[3].1 == shape[2].1
+        && shape[0].1 != 0
+        && shape[2].1 != 0;
+    if !ok {
+        return Err(JitError::Unresolved {
+            what: "lddw",
+            detail: format!("offset {rv_off:#x} is not the unlinked four-word pair"),
+        });
+    }
+    let lo = abs_pair(shape[0].1, addr);
+    let hi = abs_pair(shape[2].1, 0);
     code[at] = lo[0];
     code[at + 1] = lo[1];
     code[at + 2] = hi[0];

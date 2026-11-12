@@ -1,10 +1,21 @@
 #!/bin/sh
 # Compile tests/xdp C to eBPF, run PREVAIL, then compare the JIT image with
 # the eBPF reference. The exit status is the number of JIT failures.
-# unsupported is recorded and is not a pass.
+# unsupported and inconclusive are recorded and neither is a pass.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 CLANG="${CLANG:-clang}"
+PREVAIL="${PREVAIL:-$ROOT/prevail/bin/prevail}"
+if [ ! -x "$PREVAIL" ]; then
+  # A worktree has an empty submodule dir; the main checkout has the built one.
+  MAIN=$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")
+  PREVAIL="$MAIN/prevail/bin/prevail"
+fi
+if [ ! -x "$PREVAIL" ]; then
+  echo "PREVAIL is not executable; set PREVAIL to a built prevail binary" >&2
+  exit 3
+fi
+export PREVAIL
 OUT="$ROOT/build/jit-check"
 mkdir -p "$OUT"
 printf 'program\tprevail\tjit\tline\n' > "$OUT/report.tsv"
@@ -45,6 +56,9 @@ for name in div2 xdp_drop case_mark just_drop just_tx firewall bitswap bsort; do
     2) jit=unsupported ;;
     *) jit=fail; fail=$((fail + 1)) ;;
   esac
+  if grep -q 'status=inconclusive' "$OUT/$name.check"; then
+    jit=inconclusive
+  fi
   printf '%s\t%s\t%s\t%s\n' "$name" "$prevail" "$jit" "$line" >> "$OUT/report.tsv"
 done
 cat "$OUT/report.tsv"

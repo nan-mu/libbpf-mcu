@@ -189,6 +189,111 @@ fn frame_is_592_bytes() {
 }
 
 #[test]
+fn alu32_bswap_widths() {
+    // Both endian selections, all three widths, including the 64-bit case
+    // that acts on the whole register (RFC 9669, section 4.2).
+    for imm in [16, 32, 64] {
+        for src in [SRC_K, SRC_X] {
+            let prog = [
+                insn(CLASS_LD | SIZE_DW | MODE_IMM, 0, 0, 0, 0x1234_5678),
+                insn(0, 0, 0, 0, 0x9abc_def0u32 as i32),
+                insn(CLASS_ALU | ALU_END | src, 0, 0, 0, imm),
+                exit(),
+            ];
+            run(&prog);
+        }
+    }
+    // The 64-bit swap must not truncate. lddw takes the low word first, so
+    // 0x1234_5678_9abc_def0 reverses to 0xf0de_bc9a_7856_3412.
+    let prog = [
+        insn(CLASS_LD | SIZE_DW | MODE_IMM, 0, 0, 0, 0x9abc_def0u32 as i32),
+        insn(0, 0, 0, 0, 0x1234_5678),
+        insn(CLASS_ALU | ALU_END | SRC_X, 0, 0, 0, 64),
+        exit(),
+    ];
+    let repo = compare(
+        &prog,
+        &HashMap::new(),
+        &HashMap::new(),
+        &vec![0u8; MEM_BYTES],
+        0,
+        &[],
+    );
+    assert_eq!(repo.status, "pass", "{}", repo.detail);
+    assert_eq!(repo.r0, Some(0xf0de_bc9a_7856_3412));
+}
+
+#[test]
+fn link_rejects_a_zero_or_missing_address() {
+    let mut symbols = HashMap::new();
+    symbols.insert(0u64, "counter".into());
+    let prog = [
+        insn(CLASS_LD | SIZE_DW | MODE_IMM, 1, PSEUDO_MAP_FD, 0, 0),
+        insn(0, 0, 0, 0, 0),
+        insn(CLASS_JMP | JMP_CALL, 0, 0, 0, 1),
+        exit(),
+    ];
+    let image = xpost_jit::compile(&prog, &symbols).unwrap();
+    let mut maps = HashMap::new();
+    maps.insert("counter".to_string(), 0x3000u32);
+    let zero = xpost_jit::link(
+        &image,
+        &xpost_jit::LinkIn {
+            helper: 0,
+            maps: &maps,
+        },
+    );
+    assert!(zero.is_err());
+    let missing = xpost_jit::link(
+        &image,
+        &xpost_jit::LinkIn {
+            helper: xpost_jit::HELPER,
+            maps: &HashMap::new(),
+        },
+    );
+    assert!(missing.is_err());
+    maps.insert("counter".into(), 0);
+    let zero_map = xpost_jit::link(
+        &image,
+        &xpost_jit::LinkIn {
+            helper: xpost_jit::HELPER,
+            maps: &maps,
+        },
+    );
+    assert!(zero_map.is_err());
+}
+
+#[test]
+fn map_hit_increments_storage() {
+    // After a helper call R1..R5 are unreadable, so the value pointer must be
+    // loaded into R1 before it is used again.
+    let mut mem = vec![0u8; MEM_BYTES];
+    write_map(&mut mem, 0x3000, KIND_ARRAY, 4, 8, 256, 0x8000).unwrap();
+    mem[0x8000 + 3 * 8] = 0x2a;
+    let mut symbols = HashMap::new();
+    symbols.insert(0u64, "counter".into());
+    let mut maps = HashMap::new();
+    maps.insert("counter".into(), 0x3000);
+    let prog = [
+        insn(CLASS_LD | SIZE_DW | MODE_IMM, 1, PSEUDO_MAP_FD, 0, 0),
+        insn(0, 0, 0, 0, 0),
+        insn(CLASS_ST | MODE_MEM | SIZE_W, REG_FP, 0, -4, 3),
+        insn(CLASS_ALU64 | ALU_MOV | SRC_X, 2, REG_FP, 0, 0),
+        insn(CLASS_ALU64 | ALU_ADD | SRC_K, 2, 0, 0, -4),
+        insn(CLASS_JMP | JMP_CALL, 0, 0, 0, 1),
+        insn(CLASS_JMP | JMP_JEQ | SRC_K, 0, 0, 4, 0),
+        insn(CLASS_LDX | MODE_MEM | SIZE_DW, 1, 0, 0, 0),
+        insn(CLASS_ALU64 | ALU_ADD | SRC_K, 1, 0, 0, 1),
+        insn(CLASS_STX | MODE_MEM | SIZE_DW, 0, 1, 0, 0),
+        insn(CLASS_ALU64 | ALU_MOV | SRC_X, 0, 1, 0, 0),
+        insn(CLASS_JMP | JMP_EXIT, 0, 0, 0, 0),
+    ];
+    let report = compare(&prog, &symbols, &maps, &mem, 0, &[0x8000..0x8008]);
+    assert_eq!(report.status, "pass", "{}", report.detail);
+    assert_eq!(report.r0, Some(0x2b));
+}
+
+#[test]
 fn support_matrix_does_not_panic() {
     let text = support_json();
     assert!(!text.contains("\"compile\":\"panic\""));
