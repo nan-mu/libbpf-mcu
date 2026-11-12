@@ -64,7 +64,6 @@ int buf(struct xdp_md *ctx)
 	}
 	if (avail >= param + 4)
 		store_u32(payload + param, acc);
-	bpf_printk("OK finish");
 	return XDP_PASS;
 }
 

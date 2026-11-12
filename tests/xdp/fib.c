@@ -79,7 +79,6 @@ int fib(struct xdp_md *ctx)
 	/* Keep the clamp in a register. eBPF otherwise emits i < 47 inside the loop. */
 	asm volatile("" : "+r"(param));
 	store_u32(payload, fib_u32(param));
-	bpf_printk("OK finish");
 	return XDP_PASS;
 }
 
