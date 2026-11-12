@@ -1,0 +1,8 @@
+ts	phase	decision	why	evidence	result
+2026-11-12T09:42:00Z	start	opened the JIT audit on the userspace-jit commit	the task names that commit as the review baseline	worktree jit-audit-a91c4e7b at 1898246baf4f4a4119c159af6bedb76ad2c3ea2b	open
+2026-11-12T09:50:00Z	baseline	ran the existing JIT tests before edits	a later failure has to be separable from the starting tree	cargo test in jit/, 5 unit tests and 14 exec tests	tests green
+2026-11-12T10:20:00Z	compile	reject a bad lddw second word, a branch into that word, an unknown ALU opcode, and a BPF-to-BPF call	those inputs used to be accepted or could panic	jit/tests/exec.rs	tests green
+2026-11-12T10:40:00Z	link	helper calls use the ilp32 dispatcher shape and link refuses a zero or missing address	the firmware function is helper_dispatcher(idx, a1..a5), not the Linux RV32 pair calling convention	xpost/src/helper/mod.rs and xpost/src/xdp/ingress/mod.rs	array lookup test green
+2026-11-12T18:32:00Z	load	select xdp or xdp1 instead of the empty .text section	Clang marks an empty .text executable, so the first pass compiled zero instructions	build/jit-check/div2.bpf.o section headers	div2 r0 0x4
+2026-11-12T18:40:00Z	mem	lower half and word memory ops as bytes	case_mark stored a u32 at packet offset 0x1e and the RV interpreter rejected the misaligned sw	jit/tests/diff.rs unaligned_word_roundtrip	case_mark r0 0x3
+2026-11-12T18:48:00Z	device	did not flash the DUT	flash_xdp only builds a named AOT profile, and bsort is larger than the firmware slot	user-xpost-agent flash_xdp schema, exec_bench .xpost.mem slot_len 8192	INCONCLUSIVE

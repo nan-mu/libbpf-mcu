@@ -28,7 +28,13 @@ class ProgramRef:
 
 
 def prevail_bin() -> Path:
-    """Absolute path of the PREVAIL binary inside this repo."""
+    """Absolute path of the PREVAIL binary inside this repo.
+
+    `PREVAIL` overrides that path when this checkout has not built the submodule.
+    """
+    override = os.environ.get("PREVAIL")
+    if override:
+        return Path(override)
     return ROOT / "prevail" / "bin" / "prevail"
 
 

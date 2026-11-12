@@ -59,16 +59,24 @@ omitted silently from metadata.
 `jit/` is a separate host tool. `pixi run build` does not run it, and it is not
 the freestanding C-to-RV32IMC path above.
 
-It compiles eBPF bytecode to RV32IM on the Mac. It does not execute that image
-and it does not link it. RV32IMC can run the encoding. The compiler emits no
-RVC, F, D, or A. Register pairing follows the Jitterbug RV32 JIT. Helper calls
-and pseudo `lddw`s are relocations in the sibling `.reloc` file. ALU64 div/mod,
-atomics, and tail calls are rejected. Exit puts `R0` in `a0`/`a1`. That is not
-the firmware ilp32 helper ABI.
+It compiles eBPF bytecode to RV32IM on the Mac. RV32IMC can run the encoding.
+The compiler emits no RVC, F, D, or A. Register pairing follows the Jitterbug
+RV32 JIT. `compile` leaves helper calls and map `lddw`s as relocations.
+`check` links those against `helper_dispatcher` and a VMR address, then
+compares the image with the eBPF reference interpreter. An omitted section
+selects `xdp` or `xdp1`, not the empty `.text` Clang emits. Half and word
+memory operations are byte loads and stores, because eBPF allows an
+unaligned address. BPF-to-BPF calls,
+ALU64 div/mod, atomics, and tail calls are rejected. A helper call uses the
+firmware ilp32 shape: id in `a0`, R1..R5 lows in `a1`..`a5`, return
+zero-extended from `a0`. The program entry still takes `ctx` in `a0` and
+returns R0 in `a0`/`a1`.
 
 ```bash
 cargo test --manifest-path jit/Cargo.toml
 cargo run --release --manifest-path jit/Cargo.toml -- compile <bpf.o-or-raw> -o out.rv32
+cargo run --release --manifest-path jit/Cargo.toml -- check <bpf.o>
+jit/scripts/check-xdp.sh
 ```
 
 `--repeat N` times only the compile call. `ns_min`, `ns_med`, and `ns_max` are

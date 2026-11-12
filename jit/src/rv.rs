@@ -254,16 +254,8 @@ pub fn lbu(rd: u8, imm: i32, rs1: u8) -> u32 {
     i_type(imm, rs1, 4, rd, LOAD)
 }
 
-pub fn lhu(rd: u8, imm: i32, rs1: u8) -> u32 {
-    i_type(imm, rs1, 5, rd, LOAD)
-}
-
 pub fn sb(rs2: u8, imm: i32, rs1: u8) -> u32 {
     s_type(imm, rs2, rs1, 0)
-}
-
-pub fn sh(rs2: u8, imm: i32, rs1: u8) -> u32 {
-    s_type(imm, rs2, rs1, 1)
 }
 
 pub fn sw(rs2: u8, imm: i32, rs1: u8) -> u32 {
