@@ -1,6 +1,7 @@
 //! Host CLI: read firmware XPM1 and pack Compact ELF via `xpost-elf`.
 
 mod bpf_meta;
+mod jit_image;
 
 use std::fs;
 use std::path::PathBuf;
@@ -57,6 +58,24 @@ enum Cmd {
         /// the map identity lives in its relocation table, not in the bytes.
         #[arg(long)]
         obj: Option<PathBuf>,
+        #[arg(short = 'o', long)]
+        out: PathBuf,
+    },
+    /// Compile eBPF to RV32IM, link it at the firmware slot, and pack Compact ELF V0.
+    PackJit {
+        /// Linked firmware ELF carrying `.xpost.mem`; supplies slot and helper addresses.
+        #[arg(long)]
+        firmware: PathBuf,
+        /// Clang-produced eBPF object.
+        #[arg(long)]
+        obj: PathBuf,
+        #[arg(long)]
+        bpf_toml: PathBuf,
+        #[arg(long)]
+        name: String,
+        /// Program section to compile. Defaults to the loader's own choice.
+        #[arg(long)]
+        section: Option<String>,
         #[arg(short = 'o', long)]
         out: PathBuf,
     },
@@ -236,11 +255,52 @@ fn index_map_references(image: &[u8], obj_path: &PathBuf, bpf_toml: &PathBuf) ->
     Ok(out)
 }
 
+fn pack_jit_cmd(args: Cmd) -> Result<()> {
+    let Cmd::PackJit {
+        firmware,
+        obj,
+        bpf_toml,
+        name,
+        section,
+        out,
+    } = args
+    else {
+        unreachable!()
+    };
+    let toml_out = out.with_extension("jit.toml");
+    let packed = jit_image::pack_jit(
+        &firmware,
+        &obj,
+        &bpf_toml,
+        &name,
+        section.as_deref(),
+        &toml_out,
+    )?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    fs::write(&out, &packed.container).with_context(|| format!("write {}", out.display()))?;
+    eprintln!(
+        "name={} slot={:#x} slot_len={} helper={:#x} code_bytes={} image_len={} container_bytes={} relocs={} maps={:?}",
+        name,
+        packed.slot_addr,
+        packed.slot_len,
+        packed.helper_addr,
+        packed.code_bytes,
+        packed.image_len,
+        packed.container.len(),
+        packed.relocs,
+        packed.maps
+    );
+    Ok(())
+}
+
 fn run(args: Args) -> Result<()> {
     match args.cmd {
         Cmd::Symbol { firmware, name } => dump_symbol(&firmware, &name),
         Cmd::MemMap { firmware } => dump_mem_map(&firmware),
         pack_cmd @ Cmd::Pack { .. } => pack(pack_cmd),
+        jit_cmd @ Cmd::PackJit { .. } => pack_jit_cmd(jit_cmd),
     }
 }
 

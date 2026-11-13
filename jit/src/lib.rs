@@ -47,5 +47,5 @@ pub use compile::{compile, frame_bytes, link, Image, JitError, LinkIn, Reloc, Re
 pub use host_abi::{dispatch, write_map, HELPER, KIND_ARRAY, KIND_HASH, MAP_MAGIC};
 pub use load::{load_bpf, LoadError, Source};
 pub use matrix::json as support_json;
-pub use rv::disassemble;
+pub use rv::{check_rv32im, disassemble};
 pub use rv_vm::{run as run_rv, Stop};

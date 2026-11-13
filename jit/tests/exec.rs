@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use xpost_jit::isa::*;
-use xpost_jit::{compile, disassemble, Insn};
+use xpost_jit::{compile, disassemble, link, Insn, LinkIn, RelocKind, HELPER, KIND_ARRAY};
 const MEM: usize = 0x4_0000;
 
 fn i(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> Insn {
@@ -267,4 +267,43 @@ fn bpf_to_bpf_call_is_refused() {
     ];
     let msg = compile(&p, &HashMap::new()).unwrap_err().to_string();
     assert!(msg.contains("bpf-to-bpf"), "{msg}");
+}
+
+/// Clang leaves `src_reg` at 0 on a map `lddw` and names the map only in the
+/// ELF relocation. Keying off `src_reg` alone loaded the constant 0, so the
+/// helper received map 0 and every lookup missed while both engines agreed.
+#[test]
+fn clang_map_lddw_resolves_through_the_relocation() {
+    let mut symbols = HashMap::new();
+    symbols.insert(0u64, "counter".to_string());
+    let p = [
+        i(CLASS_LD | SIZE_DW | MODE_IMM, 1, 0, 0, 0),
+        i(0, 0, 0, 0, 0),
+        i(CLASS_ST | SIZE_W | MODE_MEM, REG_FP, 0, -4, 0),
+        i(alu64(ALU_MOV, SRC_X), 2, REG_FP, 0, 0),
+        i(alu64(ALU_ADD, SRC_K), 2, 0, 0, -4),
+        i(jmp64(JMP_CALL, 0), 0, 0, 0, 1),
+        i(alu64(ALU_MOV, SRC_X), 1, 0, 0, 0),
+        i(alu64(ALU_MOV, SRC_K), 0, 0, 0, 0),
+        i(jmp64(JMP_JEQ, SRC_K), 1, 0, 1, 0),
+        i(alu64(ALU_MOV, SRC_K), 0, 0, 0, 1),
+        i(jmp64(JMP_EXIT, 0), 0, 0, 0, 0),
+    ];
+    let image = compile(&p, &symbols).expect("compile");
+    assert!(
+        image
+            .relocs
+            .iter()
+            .any(|r| r.kind == RelocKind::Lddw && r.symbol.as_deref() == Some("counter")),
+        "the map reference must be recorded as a relocation: {:?}",
+        image.relocs
+    );
+
+    let mut maps = HashMap::new();
+    maps.insert("counter".to_string(), 0x3000u32);
+    let code = link(&image, &LinkIn { helper: HELPER, maps: &maps }).expect("link");
+    let mut mem = vec![0u8; MEM];
+    xpost_jit::write_map(&mut mem, 0x3000, KIND_ARRAY, 4, 8, 256, 0x8000).expect("map descriptor");
+    let stop = xpost_jit::run_rv(&code, 0, mem, Some(HELPER)).expect("run");
+    assert_eq!(stop.a0, 1, "lookup of array slot 0 must return its storage address");
 }

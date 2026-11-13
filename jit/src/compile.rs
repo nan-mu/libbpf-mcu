@@ -397,7 +397,11 @@ fn emit_lddw(ctx: &mut Ctx<'_>, insns: &[Insn], pc: usize) -> Result<usize, JitE
     check_lddw_second(pc, next)?;
     let dst = bpf_slot(insn.dst);
     let live = get64(&mut ctx.code, dst, TMP1);
-    if insn.src == 0 {
+    let symbol = ctx.symbols.get(&(pc as u64 * 8)).cloned();
+    // Clang leaves src_reg at 0 and names the map only in the ELF relocation,
+    // so the relocation is the identity. Testing src_reg alone turned every
+    // map load into the constant 0 and each lookup then missed.
+    if insn.src == 0 && symbol.is_none() {
         emit_imm(&mut ctx.code, live.lo, insn.imm);
         emit_imm(&mut ctx.code, live.hi, next.imm);
     } else {
@@ -411,7 +415,7 @@ fn emit_lddw(ctx: &mut Ctx<'_>, insns: &[Insn], pc: usize) -> Result<usize, JitE
             bpf_pc: pc as u32,
             src_reg: insn.src,
             imm: insn.imm,
-            symbol: ctx.symbols.get(&(pc as u64 * 8)).cloned(),
+            symbol,
         });
     }
     put64(&mut ctx.code, dst, live);

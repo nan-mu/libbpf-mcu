@@ -4,3 +4,9 @@ tools/target/
 jit/target/
 !.pixi/config.toml
 __pycache__/
+
+# generated build output and the oracle's regenerable case dump
+build/
+jit/oracle/target/
+jit/oracle/build/
+jit/oracle/results.json

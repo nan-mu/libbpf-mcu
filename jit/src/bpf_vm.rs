@@ -39,16 +39,17 @@ pub fn execute(
             if next.code != 0 || next.dst != 0 || next.src != 0 || next.off != 0 {
                 return Err(format!("bpf pc {pc}: bad lddw"));
             }
-            let value = if insn.src == 0 {
-                (insn.imm as u32 as u64) | ((next.imm as u32 as u64) << 32)
-            } else {
-                let name = symbols
-                    .get(&(pc as u64 * 8))
-                    .ok_or_else(|| format!("bpf pc {pc}: lddw has no symbol"))?;
-                let addr = maps
-                    .get(name)
-                    .ok_or_else(|| format!("bpf pc {pc}: map {name}"))?;
-                u64::from(*addr)
+            let value = match symbols.get(&(pc as u64 * 8)) {
+                None if insn.src == 0 => {
+                    (insn.imm as u32 as u64) | ((next.imm as u32 as u64) << 32)
+                }
+                None => return Err(format!("bpf pc {pc}: lddw has no symbol")),
+                Some(name) => {
+                    let addr = maps
+                        .get(name)
+                        .ok_or_else(|| format!("bpf pc {pc}: map {name}"))?;
+                    u64::from(*addr)
+                }
             };
             write_reg(&mut reg, insn.dst, value)?;
             pc += 2;
