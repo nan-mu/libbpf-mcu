@@ -1,0 +1,9 @@
+program	prevail	jit	line
+div2	pass	pass	status=pass section=xdp bpf_insns=29 rv_bytes=556 relocs=0 r0=0x4 detail=r0 0x4
+xdp_drop	pass	pass	status=pass section=xdp bpf_insns=22 rv_bytes=564 relocs=2 r0=0x2 detail=r0 0x2
+case_mark	pass	pass	status=pass section=xdp1 bpf_insns=105 rv_bytes=2528 relocs=2 r0=0x3 detail=r0 0x3
+just_drop	pass	pass	status=pass section=xdp1 bpf_insns=34 rv_bytes=1012 relocs=2 r0=0x1 detail=r0 0x1
+just_tx	pass	pass	status=pass section=xdp1 bpf_insns=58 rv_bytes=1752 relocs=2 r0=0x3 detail=r0 0x3
+firewall	pass	pass	status=pass section=xdp bpf_insns=23 rv_bytes=668 relocs=2 r0=0x2 detail=r0 0x2
+bitswap	pass	pass	status=pass section=xdp bpf_insns=68 rv_bytes=1252 relocs=0 r0=0x2 detail=r0 0x2
+bsort	pass	pass	status=pass section=xdp bpf_insns=619 rv_bytes=12940 relocs=0 r0=0x2 detail=r0 0x2

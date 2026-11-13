@@ -20,7 +20,7 @@ RX stimulus: UDP from this Mac (`192.168.110.96`) to the board (`192.168.110.106
 |---|---|---|
 | JIT unit + integration | `cargo test --release` in `jit/` | 34 pass (5 lib, 11 diff, 18 exec), 0 fail |
 | C→eBPF→JIT check | `jit/scripts/check-xdp.sh` | 8 programs, PREVAIL pass, 8 JIT pass |
-| Independent oracle | `cargo test --manifest-path jit/oracle/Cargo.toml --release` | 8727 cases: 8199 pass, 27 adjudicated divergences, 501 unsupported, 0 inconclusive |
+| Independent oracle | `cargo test --manifest-path jit/oracle/Cargo.toml --release` | 8727 cases: 8199 pass, 27 failures, 501 unsupported, 0 inconclusive. **111 of these are engine-vs-engine disagreements** (27 failures + 84 inside unsupported), all attributed to rbpf and spec-confirmed in §3 |
 | C→eBPF→JIT→ELF V0 | `jit/scripts/build-elf.sh` | 7 containers accepted, `bsort` refused over capacity |
 | Device RX (P4) | `jit/scripts/p4_drive.py` | 6 programs × AOT control + JIT, all OBSERVED, safety counters clean |
 | Device hot-switch | `jit/scripts/p4_switch.py` | 2 switches, `ok=1 rollback=0 severe=0` |
@@ -71,24 +71,42 @@ The oracle is the `rbpf` fork at `/Volumes/SSD/bs/xpost/rbpf`, a genuinely separ
 implementation. It compares return value, termination status, the full packet window,
 map storage, and the ordered helper trace `(id, arg1..arg5) → ret`.
 
-Coverage: 6188 boundary probes, 2000 seeded random programs, 14 real-program cases,
-25 negative cases. Boundary values include `0`, `-1`, `i32::MIN/MAX`, `i64::MIN/MAX`,
-overflow edges, and shift counts `0,1,31,32,33,63,64,65`.
+Coverage, counted from `results.json`: 6688 boundary probes (6176 pass, 12 fail, 500
+unsupported), 2000 seeded random programs, 14 real-program cases, 25 negative cases.
+Boundary values include `0`, `-1`, `i32::MIN/MAX`, `i64::MIN/MAX`, overflow edges, and
+shift counts `0,1,31,32,33,63,64,65`.
 
-**27 divergences, all one question.** ALU32 `mod` with a zero divisor: the JIT keeps the
-low 32 bits and clears the high half; rbpf keeps all 64 bits.
+The oracle also runs its **own** RV32 executor alongside the library's on every case and
+requires identical returns and memory. `executor_split` is recorded on 8702 cases and is
+null on every one, so the two executors never disagreed.
 
-Adjudicated to rbpf, on measured evidence: `alu32/mod/x/0xffffffffffffffff/0x1` **passes**
-— rbpf zero-extends the ALU32 result with a non-zero divisor even when the destination's
-high half is set. It only preserves 64 bits on the zero-divisor path, which contradicts
-its own behavior elsewhere. `jit/oracle/examples/modzero.rs` confirms it: inserting
-`mov32 dst,dst` after each ALU32 MOD/DIV makes all 15 random cases agree.
+**111 engine-vs-engine disagreements, in four groups.** 27 are one question, ALU32 `mod`
+with a zero divisor: the JIT keeps the low 32 bits and clears the high half, rbpf keeps all
+64 bits. The other 84 sit in the `unsupported` bucket but are real disagreements with
+differing returns and memory: 44 rbpf JMP64-immediate cases and 40 SDIV/SMOD cases. They
+are attributed to rbpf, not to the JIT. A further 368 unsupported cases are JIT refusals
+and 48 are both engines refusing.
 
-**Limit, stated plainly.** The RFC 9669 clause text is **unverified**. Network policy
-blocks both `rfc-editor.org` and `datatracker.ietf.org`. The adjudication rests on the
-ALU32 zero-extension invariant and rbpf's internal inconsistency, not on a reading of the
-spec. Impact is narrow: it needs a zero divisor *and* a non-zero destination high half.
-No program in `tests/xdp` reaches it.
+**The JIT is right on all four, and the spec says so.** The IETF BPF WG source for
+RFC 9669 (`ietf-wg-bpf/ebpf-docs`, `rst/instruction-set.rst`) states verbatim:
+
+> If execution would result in modulo by zero, for ``ALU64`` the value of the destination
+> register is unchanged whereas for ``ALU`` the upper 32 bits of the destination register
+> are zeroed.
+
+That is exactly the JIT's behavior. The same document defines `imm` as a **signed** integer
+immediate, which confirms F3 against rbpf's zero-extending `JGT_IMM`, and defines SDIV/SMOD
+with `offset` 1, which confirms F4.
+
+Corroborating measurement: `alu32/mod/x/0xffffffffffffffff/0x1` **passes** — rbpf
+zero-extends with a non-zero divisor even when the destination's high half is set, so it
+contradicts itself on the zero-divisor path. `jit/oracle/examples/modzero.rs` inserts
+`mov32 dst,dst` after each ALU32 MOD/DIV and all 15 random cases then agree.
+
+**Evidence limit.** This is the RFC's own body text read from the WG repository at HEAD,
+not the published RFC page. `rfc-editor.org` and `datatracker.ietf.org` are both blocked by
+network policy. The clause is unambiguous, so the adjudication is spec-confirmed rather
+than inferred.
 
 ### Four-way split of claims
 
@@ -152,13 +170,38 @@ Both branches of every map conditional were exercised, with the map seeded and e
 Every JIT case: `runtime_errors`, `bad_md`, `stack_misalign`, `reentry`, `helper_unresolved`,
 `helper_map`, `pool_drop_misalign` all **zero**.
 
-Hot-update: on `case_xdp`, staged AOT into slot 1, activated 0→1, staged JIT into slot 0,
-activated 1→0. Both switches `ok=1 rollback=0 severe=0`. The JIT image participates in the
-existing lease/stage/activate model unchanged.
+**Chain of custody.** Each `case.json` records a cold-table readback after install, e.g.
+`name=jit_just_drop offset=0x0 len=0x550` = 1360 bytes, matching that container's
+`container_bytes=1360` exactly for all six programs, and differing from the AOT container
+of the same program (488 bytes). Combined with `xdp_pass=0` and `xdp_drop=358`, an inactive
+slot cannot produce this, because `ingress::run` returns Pass when not active. Separately,
+a fresh `pack-jit` run reproduces the flashed `jit_xdp_drop` container byte for byte, which
+establishes the packer is deterministic. The readback is what ties the board to the image.
 
-Perf totals include background traffic from the shared WiFi network. Stimulus was isolated
-by the per-source map key (e.g. `counter[96]` equals the packet count exactly) and by ACK
-behavior, not by raw perf totals.
+**Hot-update, with a limit.** On `case_xdp`, staged `case_mark_idle` (AOT) into slot 1,
+activated 0→1, staged JIT `case_mark` into slot 0, activated 1→0. Both switches
+`ok=1 rollback=0 severe=0`. This proves the JIT image participates in the existing
+lease/stage/activate state machine. It does **not** prove a packet executed correctly
+through a slot after a switch: `p4_switch.py` sends no stimulus, and all four steps complete
+inside 103 ms of control-plane traffic. Post-switch datapath execution is **not verified**,
+which matters because F7 shows the cold sibling of this path is broken for interpreter images.
+
+**Counting, and where it does not hold.** Perf totals include background traffic from the
+shared WiFi network. The per-source map key isolates stimulus only where the key is
+per-source, and only approximately: JIT `just_drop` shows `counter[96]` +31 for 30 sent, so
+one background frame shared that source. `case_mark` and `just_tx` key on `rxcnt[17]`, which
+is **not** per-source; their `+34` and `+100` over a ~10 s window in which the board saw 361
+frames are background-dominated and are **not** stimulus counts. For those two programs the
+trustworthy evidence is the action split (UDP→TX, non-UDP→DROP) and `bad_md`=0, not the totals.
+`jit_xdp_drop_pass` and `jit_firewall_pass` have no AOT control run; their PASS behavior is
+expected from the empty map, not measured against a control.
+
+**TX attempts are mostly rejected, on both arms.** `jit_just_tx` records `xdp_tx=100` but
+`tx_submitted=29` and `tx_fail_bad_buf=71`, with `tx_grp_src=71`. AOT is 95 / 29 / 66 / 66.
+The likely cause is background broadcast and multicast frames acquiring a group source MAC
+after the swap, which is what `tx_grp_src` counts; AOT fails identically, so this is not a
+JIT defect. That reading is **inferred**, not measured, since no capture exists. "TX works"
+here means the TX action and path are exercised, not that most frames went out.
 
 ## 6. Performance and resources (P5)
 
@@ -179,14 +222,31 @@ MCU per-execution, firmware's own 2000-run batch mean (µs), `exec_bench`, ident
 | bsort | 7.61 | **over capacity** | — | 534.4 | 5.24 |
 
 AOT and JIT share the **identical firmware** and differ only in the cold-table container,
-measured in two order-balanced interleaved passes.
+measured in two order-balanced interleaved passes. **That pair is the fair comparison.**
+
+**HAL is not comparable, and the table above must not be read as an engine ranking.**
+`invoke_batch` brackets `xpost::xdp::ingress::run` (`xpost/src/ext/exec_call/mod.rs:60`),
+which is the whole flight path: the `IN_FLIGHT` claim, the `PAUSE` and `ACTIVE` loads,
+engine dispatch, packet-window validation and the perf hooks. HAL's bench brackets only
+`run_hal(&mut scratch)` (`xpost/examples/exec_bench_hal/src/bin/main.rs:249`). HAL skips the
+wrapper the other three arms pay, so its 1.16 µs against AOT's 5.36 µs is a difference in
+what was timed, not in engine speed. The task book's "identical methodology per arm" is
+therefore **not met for HAL**; it is met for AOT, JIT and rBPF.
+
+**The JIT/AOT ratio is a floor, not the engine-only ratio.** The same per-flight constant
+sits in the AOT denominator, so 1.12× understates the engine-only difference. The lever to
+remove it exists, `invoke_batch_bare` (`exec_call/mod.rs:89`), but it is gated
+`#[cfg(all(feature = "perf-aggregate", feature = "interp"))]`, so it is unavailable on the
+AOT/JIT firmware. Using it would require modifying xpost, which this task forbids. The
+constant is therefore **not bounded**, and no engine-only ratio is claimed.
 
 **What limits the number.** The single-shot `exec seg engine` median is flat at ~70 µs
 across workloads whose work differs 20×, because it brackets `invoke` including perf hooks
 that cost more than a small program. The batch mean divides the 1 µs clock quantization by
-2000 and amortizes interrupts, so it resolves actual engine work. Repeatability: AOT incr
-5363 ns in a probe, 5362 ns in the matrix. Noise floor is the 1 µs systimer plus embassy
-and USB-serial interrupts; WiFi is not initialized in `exec_bench`. CPU 160 MHz, IRAM-resident.
+2000 and amortizes interrupts, so it resolves work better, but it still includes the flight
+wrapper above. Repeatability: AOT incr 5363 ns in a probe, 5362 ns in the matrix. Noise
+floor is the 1 µs systimer plus embassy and USB-serial interrupts; WiFi is not initialized
+in `exec_bench`. CPU 160 MHz, IRAM-resident.
 
 Resources:
 
@@ -236,24 +296,32 @@ first bullet, on the inputs tested. Specifically not established:
    returned TX with `bad_md`=0, but byte-level capture needs root tcpdump and there is no
    passwordless sudo. TX action and map effects are confirmed; the rewritten bytes are
    **INCONCLUSIVE** on silicon. Host oracle compares them fully.
-2. **RFC 9669 clause text unverified** for the ALU32 mod-by-zero case (§3).
-3. **Stack budget not reconciled.** The 592-byte frame is measured against the tool's
+2. **HAL is not a comparable arm, and the JIT/AOT ratio is a floor.** HAL's timer brackets
+   only `run_hal`; the other arms bracket the whole flight path. The per-flight constant is
+   unbounded because `invoke_batch_bare` is `interp`-only and xpost may not be modified. No
+   engine-only ratio is claimed (§6).
+3. **Post-switch datapath execution not verified.** The hot-switch run sent no traffic (§5).
+4. **Stack budget not reconciled.** The 592-byte frame is measured against the tool's
    default budget, not against a measured firmware reservation. No stack-budget receipt
    exists. `stack_misalign`=0 on every run is not a depth proof.
-4. **`.rodata`/`.data`/`.bss` unsupported.** A non-map `lddw` symbol is refused explicitly.
+5. **`.rodata`/`.data`/`.bss` unsupported.** A non-map `lddw` symbol is refused explicitly.
    No test program needs them.
-5. **rBPF helper cost NOT MEASURED** because of F7, an XPOST cold-boot gap. HAL has no
+6. **rBPF helper cost NOT MEASURED** because of F7, an XPOST cold-boot gap. HAL has no
    `helper_loop` twin by design.
-6. **Failure fallback not injected.** Clean-path safety counters are zero, but a deliberately
+7. **Failure fallback not injected.** Clean-path safety counters are zero, but a deliberately
    corrupt image was not run to observe the Drop path.
-7. **Map semantics shared by construction** in the oracle; HASH modelled as ARRAY on the host.
-8. **Verifier assumptions** are not re-checked by the JIT (§3, third bullet).
+8. **Map semantics shared by construction** in the oracle; HASH modelled as ARRAY on the host.
+   The oracle also rewrites ctx loads on its own side to reach host memory, so it does not
+   execute byte-identical input to the JIT. Recorded per case as `ctx_patches`.
+9. **Verifier assumptions** are not re-checked by the JIT (§3, third bullet).
+10. **Per-source counting is approximate** and does not reach `case_mark` or `just_tx` (§5).
 
 **Integration acceptance.** The core goal is met and verified on silicon: a JIT-produced
 Compact ELF V0, built from a real Clang object on macOS, executes on the XPOST RX path
-through the existing loader, helper, map, slot, and hot-update model, with no MCU runtime
-change, matching AOT behavior. The gaps above are recorded rather than closed, so this
-stays a Draft until they are resolved or explicitly accepted.
+through the existing loader, helper, map and slot model, with no MCU runtime change,
+matching AOT behavior on the cases run. Hot-update is verified as a state machine only, not
+as a post-switch datapath. The gaps above are recorded rather than closed, so this stays a
+Draft until they are resolved or explicitly accepted.
 
 ## 9. Evidence
 
@@ -262,4 +330,7 @@ stays a Draft until they are resolved or explicitly accepted.
 - `jit/reports/p4/` — per-case JSON, serial logs, perf, `summary.tsv`, switch and lifecycle.
 - `jit/reports/p5/` — 80 matrix records, `host-compile.tsv`, `resources.tsv`, `failures.json`.
 - `jit/oracle/` — the independent oracle; `results.json` is regenerable and not committed.
-- `build/jit-elf/report.tsv` — container build results including the `bsort` refusal.
+- `jit/reports/containers/` — committed copies of the container and check reports plus every
+  `pack-jit` stderr line, including both `bsort` refusals and the `jit_*` containers that
+  were actually flashed. The live `build/` tree is gitignored, so these are the versions a
+  reviewer who clones the branch can open.

@@ -1,0 +1,1 @@
+name=bitswap slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=1252 image_len=1268 container_bytes=1604 relocs=0 maps=[("workload", 1077413604)]

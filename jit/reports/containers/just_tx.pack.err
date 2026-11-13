@@ -1,0 +1,1 @@
+name=just_tx slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=1752 image_len=1768 container_bytes=2092 relocs=2 maps=[("rxcnt", 1077414104)]

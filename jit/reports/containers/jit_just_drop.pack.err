@@ -1,0 +1,1 @@
+name=jit_just_drop slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=1012 image_len=1028 container_bytes=1360 relocs=2 maps=[("counter", 1077413364)]

@@ -1,0 +1,1 @@
+name=firewall slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=668 image_len=684 container_bytes=1016 relocs=2 maps=[("blacklist", 1077413020)]
