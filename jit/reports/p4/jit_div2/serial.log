@@ -1,0 +1,10 @@
+OK get serial n=9 since_ms=1794556819495 until_ms=1794556826087
+2026-11-13T08:00:19.498Z [cmd] → enable xdp
+2026-11-13T08:00:19.501Z [uart] OK enable xdp
+2026-11-13T08:00:19.501Z [cmd] ← OK enable xdp
+2026-11-13T08:00:26.069Z [cmd] → disable xdp
+2026-11-13T08:00:26.070Z [uart] OK disable xdp
+2026-11-13T08:00:26.070Z [cmd] ← OK disable xdp
+2026-11-13T08:00:26.079Z [cmd] → get perf
+2026-11-13T08:00:26.080Z [uart] OK get perf 2152
+2026-11-13T08:00:26.083Z [cmd] ← OK get perf

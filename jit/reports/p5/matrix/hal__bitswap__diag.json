@@ -1,0 +1,23 @@
+{
+  "arm": "hal",
+  "workload": "bitswap",
+  "diag": true,
+  "firmware": "/Users/nan/.cursor/worktrees/jit-audit-a91c4e7b/libbpf-mcu-d0bf3ed3f2b9/build/p5/fw/exec_bench_hal_diag",
+  "container": null,
+  "reps_requested": 1,
+  "samples_us": [
+    1
+  ],
+  "errors": [],
+  "bench": {
+    "runs": 2000,
+    "mean_ns": 1281,
+    "act": "XDP_PASS"
+  },
+  "output": {
+    "expected_hex": "0200000001000000a5a55a5a0000000000000000000000000000000000000000",
+    "got_hex": "0200000001000000a5a55a5a0000000000000000000000000000000000000000",
+    "match": true
+  },
+  "serial_log": "/Users/nan/.cursor/worktrees/jit-audit-a91c4e7b/libbpf-mcu-d0bf3ed3f2b9/jit/reports/p5/matrix/hal__bitswap__diag.serial.log"
+}

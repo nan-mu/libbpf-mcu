@@ -1,0 +1,9 @@
+OK get serial n=8 since_ms=1794557487600 until_ms=1794557572994
+2026-11-13T08:11:27.611Z [cmd] → update map workload 0 4294967296
+2026-11-13T08:11:32.621Z [cmd] → get map workload
+2026-11-13T08:12:02.632Z [cmd] → clear perf
+2026-11-13T08:12:07.643Z [cmd] → get perf
+2026-11-13T08:12:12.653Z [cmd] → enable exec
+2026-11-13T08:12:17.664Z [cmd] → get finish (host wait)
+2026-11-13T08:12:17.979Z [cmd] → get map workload
+2026-11-13T08:12:47.987Z [cmd] → get perf

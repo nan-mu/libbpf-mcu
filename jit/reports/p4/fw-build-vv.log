@@ -1,0 +1,217 @@
+       Fresh core v0.0.0 (/Users/nan/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core)
+       Fresh unicode-ident v1.0.26
+       Fresh litrs v1.0.0
+       Fresh equivalent v1.0.2
+       Fresh compiler_builtins v0.1.160 (/Users/nan/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins)
+       Fresh document-features v0.2.12
+       Fresh indexmap v2.14.2
+       Fresh version_check v0.9.5
+       Fresh itoa v1.0.18
+       Fresh alloc v0.0.0 (/Users/nan/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc)
+       Fresh proc-macro2 v1.0.107
+       Fresh serde_core v1.0.229
+       Fresh ident_case v1.0.1
+       Fresh unsafe-libyaml v0.2.11
+       Fresh ryu v1.0.23
+       Fresh somni-parser v0.2.2
+       Fresh strsim v0.11.1
+       Fresh quote v1.0.47
+       Fresh critical-section v1.2.0
+       Fresh somni-expr v0.2.0
+       Fresh embedded-hal v1.0.0
+       Fresh futures-core v0.3.34
+       Fresh fnv v1.0.7
+       Fresh syn v2.0.119
+       Fresh syn v3.0.6
+       Fresh futures-sink v0.3.34
+       Fresh nb v1.1.0
+       Fresh embedded-io v0.7.1
+       Fresh toml_datetime v1.1.1+spec-1.1.0
+       Fresh serde_derive v1.0.229
+       Fresh toml_parser v1.1.3+spec-1.1.0
+       Fresh embedded-io-async v0.7.0
+       Fresh heck v0.5.0
+       Fresh riscv-macros v0.3.0
+       Fresh serde v1.0.229
+       Fresh paste v1.0.15
+       Fresh embedded-io v0.6.1
+       Fresh riscv-pac v0.2.0
+       Fresh futures-task v0.3.34
+       Fresh serde_yaml v0.9.34+deprecated
+       Fresh embassy-sync v0.8.0
+       Fresh embedded-io-async v0.6.1
+       Fresh riscv v0.15.0
+       Fresh heapless v0.8.0
+       Fresh pin-project-lite v0.2.17
+       Fresh riscv-target-parser v0.1.3
+       Fresh futures-util v0.3.34
+       Fresh darling_core v0.21.3
+       Fresh nb v0.1.3
+       Fresh void v1.0.2
+       Fresh esp-metadata-generated v0.4.0
+       Fresh autocfg v1.5.1
+       Fresh darling_macro v0.21.3
+       Fresh portable-atomic v1.15.0
+       Fresh embassy-sync v0.7.2
+       Fresh embedded-hal-async v1.0.0
+       Fresh embedded-hal v0.2.7
+       Fresh embassy-sync v0.6.2
+       Fresh darling v0.21.3
+       Fresh esp-sync v0.2.1
+       Fresh toml_edit v0.25.15+spec-1.1.0
+       Fresh darling_core v0.24.1
+       Fresh embedded-storage v0.3.1
+       Fresh vcell v0.1.3
+       Fresh typenum v1.20.1
+       Fresh num-traits v0.2.19
+       Fresh esp32c3 v0.32.2
+       Fresh generic-array v0.14.7
+       Fresh darling_macro v0.24.1
+       Fresh proc-macro-crate v3.5.0
+       Fresh enumset_derive v0.15.0
+       Fresh strum_macros v0.27.2
+       Fresh riscv-rt-macros v0.6.1
+       Fresh termcolor v1.4.1
+       Fresh embassy-hal-internal v0.4.0
+       Fresh esp-rom-sys v0.1.4
+       Fresh strum v0.27.2
+       Fresh enumset v1.1.14
+       Fresh riscv-rt v0.16.0
+       Fresh esp-hal-procmacros v0.22.0
+       Fresh darling v0.24.1
+       Fresh embedded-storage-async v0.4.1
+       Fresh bitfield-macros v0.19.5
+       Fresh embassy-futures v0.1.2
+       Fresh esp-config v0.7.0
+       Fresh gcd v2.3.0
+       Fresh indoc v2.0.7
+       Fresh utf8parse v0.2.2
+       Fresh cfg-if v1.0.5
+       Fresh embassy-embedded-hal v0.6.0
+       Fresh libc v0.2.189
+       Fresh bitfield v0.19.5
+       Fresh anstyle-parse v1.0.0
+       Fresh fugit v0.3.9
+       Fresh instability v0.3.13
+       Fresh esp-riscv-rt v0.14.0
+       Fresh crypto-common v0.1.7
+       Fresh block-buffer v0.10.4
+       Fresh xpost-macros v0.1.0 (/Volumes/SSD/bs/xpost/xpost-macros)
+       Fresh embedded-can v0.4.1
+       Fresh delegate v0.13.5
+       Fresh darling_core v0.20.11
+       Fresh bytemuck v1.25.2
+       Fresh rand_core v0.9.5
+       Fresh bitflags v2.13.2
+       Fresh rand_core v0.6.4
+       Fresh ufmt-write v0.1.0
+       Fresh rand_core v0.10.1
+       Fresh log v0.4.34
+       Fresh is_terminal_polyfill v1.70.2
+       Fresh colorchoice v1.0.5
+       Fresh anstyle v1.0.14
+       Fresh byteorder v1.5.0
+       Fresh anstyle-query v1.1.5
+       Fresh esp-hal v1.1.2
+       Fresh darling_macro v0.20.11
+       Fresh digest v0.10.7
+       Fresh rustversion v1.0.23
+       Fresh anstream v1.0.0
+       Fresh hash32 v0.3.1
+       Fresh cpufeatures v0.2.17
+       Fresh embassy-time-driver v0.2.2
+       Fresh const-default v1.0.0
+       Fresh foldhash v0.1.5
+       Fresh clap_lex v1.1.1
+       Fresh stable_deref_trait v1.2.1
+       Fresh hashbrown v0.15.5
+       Fresh rlsf v0.2.3
+       Fresh darling v0.20.11
+       Fresh clap_builder v4.6.7
+       Fresh heapless v0.9.3
+       Fresh crc32fast v1.5.2
+       Fresh clap_derive v4.6.7
+       Fresh linked_list_allocator v0.10.6
+       Fresh allocator-api2 v0.3.1
+       Fresh embassy-executor-timer-queue v0.1.0
+       Fresh serde_spanned v1.1.1
+       Fresh toml_writer v1.1.2+spec-1.1.0
+       Fresh jiff-core v0.1.1
+       Fresh clap v4.6.7
+       Fresh esp-alloc v0.10.0
+       Fresh object v0.36.7
+       Fresh toml v1.1.6+spec-1.1.0
+       Fresh jiff v0.2.37
+       Fresh embassy-executor-macros v0.8.0
+       Fresh esp-wifi-sys-esp32c3 v0.2.0
+       Fresh anyhow v1.0.104
+       Fresh embassy-time v0.5.1
+       Fresh esp-radio-rtos-driver v0.3.0
+       Fresh docsplay-macros v0.1.2
+       Fresh portable_atomic_enum_macros v0.2.1
+       Fresh embassy-net-driver v0.2.0
+       Fresh scopeguard v1.2.0
+       Fresh cordyceps v0.3.5
+       Fresh esp-phy v0.2.0
+       Fresh embassy-executor v0.10.0
+       Fresh portable_atomic_enum v0.3.1
+       Fresh lock_api v0.4.14
+       Fresh docsplay v0.1.3
+       Fresh xpost-build v0.1.1 (/Volumes/SSD/bs/xpost/xpost-build)
+       Fresh sha2 v0.10.9
+       Fresh num-derive v0.4.2
+       Fresh embedded-nal v0.9.0
+       Fresh bitflags v1.3.2
+       Fresh allocator-api2 v0.2.21
+       Fresh managed v0.8.0
+       Fresh xpost-type v0.1.0 (/Volumes/SSD/bs/xpost/xpost-type)
+       Fresh memchr v2.8.3
+       Fresh foldhash v0.2.0
+       Fresh allocator-api2 v0.4.0
+       Fresh esp-radio v0.18.0 (/Volumes/SSD/bs/xpost/esp-radio)
+       Fresh nom v8.0.0
+       Fresh smoltcp v0.13.1
+       Fresh embedded-nal-async v0.9.0
+       Fresh hashbrown v0.17.1
+       Fresh xpost-elf v0.1.0 (/Volumes/SSD/bs/xpost/xpost-elf)
+       Fresh esp-storage v0.9.0
+       Fresh talc v5.1.1
+       Fresh embassy-time-queue-utils v0.3.2
+       Fresh esp-println v0.17.0
+       Fresh winnow v1.0.4
+       Fresh embassy-net v0.9.1
+       Fresh static_cell v2.1.1
+       Fresh xpost-serial v0.1.0 (/Volumes/SSD/bs/xpost/xpost-serial)
+       Fresh esp-bootloader-esp-idf v0.5.0
+       Fresh esp-rtos v0.3.0
+       Fresh xpost v0.1.1 (/Volumes/SSD/bs/xpost)
+warning: unused import: `AtomicBool`
+ --> /Volumes/SSD/bs/xpost/src/ext/perf/aggregate.rs:9:23
+  |
+9 | use portable_atomic::{AtomicBool, AtomicU32, AtomicU64};
+  |                       ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `PRIMARY_LEN`
+  --> /Volumes/SSD/bs/xpost/src/xdp/ingress/mod.rs:39:66
+   |
+39 |         ACTIVE, IN_FLIGHT, PAUSE, PRIMARY_ENGINE, PRIMARY_ENTRY, PRIMARY_LEN, QUIESCE_DROPS,
+   |                                                                  ^^^^^^^^^^^
+
+warning: associated constant `INTERP_CODE` is never used
+  --> /Volumes/SSD/bs/xpost/src/xdp/engine.rs:30:22
+   |
+26 | impl Engine {
+   | ----------- associated constant in this implementation
+...
+30 |     pub(crate) const INTERP_CODE: u8 = 1;
+   |                      ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `xpost` (lib) generated 3 warnings (run `cargo fix --lib -p xpost` to apply 2 suggestions)
+       Dirty just_xdp v0.1.0 (/Volumes/SSD/bs/xpost/examples/just_xdp): the file `src/bin/main.rs` has changed (1794555422.289415000s, 42s after last build at 1794555380.781831350s)
+   Compiling just_xdp v0.1.0 (/Volumes/SSD/bs/xpost/examples/just_xdp)
+     Running `CARGO=/Users/nan/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo CARGO_BIN_NAME=just_xdp CARGO_CRATE_NAME=just_xdp CARGO_MANIFEST_DIR=/Volumes/SSD/bs/xpost/examples/just_xdp CARGO_MANIFEST_PATH=/Volumes/SSD/bs/xpost/examples/just_xdp/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=just_xdp CARGO_PKG_README='' CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION=1.88 CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' CARGO_PRIMARY_PACKAGE=1 DYLD_FALLBACK_LIBRARY_PATH='/Users/nan/.rustup/toolchains/nightly-aarch64-apple-darwin/lib:/Users/nan/lib:/usr/local/lib:/usr/lib' ESP_LOG=info ESP_RADIO_CONFIG_WIFI_MAX_BURST_SIZE=16 OUT_DIR=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/just_xdp/7a23b30e7b3bd749/out WIFI_PASS=22332233 WIFI_SSID=CMCC-dKji XPOST_BOARD=/Volumes/SSD/bs/xpost/examples/esp32c3 XPOST_EMBED_META=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/just_xdp/7a23b30e7b3bd749/out/xpost_embed_meta.txt /Users/nan/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/rustc --crate-name just_xdp --edition=2024 src/bin/main.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat,unused-externs-silent --crate-type bin --emit=dep-info,link -C opt-level=s -C lto=fat -C codegen-units=1 -C debuginfo=2 --cfg 'feature="perf-cag"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("perf-cag", "perf-lookup", "perf-t"))' -C metadata=e1dee6f750a08fcb --out-dir /Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/just_xdp/dafa37a5176a25fc/out --target riscv32imc-unknown-none-elf -C linker=/Volumes/SSD/bs/xpost/examples/just_xdp/../../xpost-build/xpost-link -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/bitfield-macros/a6ff1ca6f3f2fea1/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/delegate/210174df37499889/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/docsplay-macros/b523552c9986b77e/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/document-features/008037b3f6d0aca5/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/embassy-executor-macros/10f12e893b40b82e/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/enumset_derive/73d47e0464113c03/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/esp-hal-procmacros/ef4ef4019f5c96f3/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/instability/46db3d60590bc3d5/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/num-derive/93383942d28fd5cf/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/paste/8c7d36c2118a8255/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/portable_atomic_enum_macros/43ced1f8b8692abf/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/riscv-macros/fcdc39064791eed4/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/riscv-rt-macros/291fc7b42c375195/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/rustversion/239d106d7cf4bdee/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/strum_macros/11f8f9fbf4e1631f/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/xpost-macros/5fa2c8f0defbf828/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/alloc/e7860d1f66a9c689/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/allocator-api2/248e33dea3cf2a0a/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/allocator-api2/b193966dd519be29/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/allocator-api2/c651e9284ca3f9d9/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/bitfield/bdc6411fad58d847/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/bitflags/39c75ebe3daa114f/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/bitflags/e111c63de02d4299/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/block-buffer/89a4ad4a629c0842/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/bytemuck/2f133b71972f8da1/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/byteorder/4cf128f3386fe6af/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/cfg-if/1b3f8f213aa9a960/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/compiler_builtins/3ebd692989b01de0/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/const-default/fdd28b39a644b32f/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/cordyceps/54c1f073cbacb17b/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/core/190a967d1bddaa90/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/critical-section/7e468bbeeceeac6c/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/crypto-common/51abf16476cb917c/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/digest/e58c59165bb07473/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/docsplay/6ac1f6a061523d12/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-embedded-hal/9da89dfcff8638a5/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-executor-timer-queue/5dd14d6d862f000e/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-executor/18d11de76b64923d/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-futures/2e4b867a7253513f/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-hal-internal/78c120d8f58362d4/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-net-driver/277dc884d061b4a9/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-net/97df4e280e527b17/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-sync/3e90de2cbd6b3125/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-sync/5041fbed5974bbd0/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-sync/7c93c3779ed6bb32/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-time-driver/6d367520a4ee9737/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-time-queue-utils/46ef8f883ffbb4a2/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-time/a78c4a149230b8cf/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-can/95ba05094dae2c7c/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-hal-async/360951cd73642f99/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-hal/803c159e8eb2c3d9/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-hal/e82b8c904dde1b6d/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-io-async/af71963f64b7c027/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-io-async/e6aed0675df74581/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-io/6df47af1e8f3ab14/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-io/e336f0b9ede65a0e/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-nal-async/857588e428677156/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-nal/de26467218f60cfc/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-storage-async/40bdf64de6547ec6/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-storage/78f4e6ad8bb7cb14/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/enumset/770a55c8cb2e32bb/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-alloc/a2ff3f78e291e787/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-bootloader-esp-idf/a46f1eed9bcdc5d6/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-config/82c7530b25557aa7/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-hal/50dd3059fdb3c8af/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-metadata-generated/2a25949889233cd3/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-phy/acfdd6d27186819f/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-println/3afd76f5b5243945/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-radio-rtos-driver/91ee68eecf144d11/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-radio/dafec07698331a57/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-riscv-rt/e73471ac05574b02/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-rom-sys/50f5510c8316629b/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-rtos/4db9ffb0081d8b15/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-storage/2c11180ea1b29d5d/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-sync/0e38ceaee49d04ed/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-wifi-sys-esp32c3/4e7c07ca3c9cbf7e/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp32c3/8f53a6d42f55dd68/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/foldhash/6f3295f2f9413a4e/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/fugit/115314659b998506/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/futures-core/bc84e8168df045ed/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/futures-sink/9a6f8289d82e5e6f/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/futures-task/fcb5e9c56a7ac3ff/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/futures-util/09377278e030074a/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/gcd/9bccb03da79ecc26/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/generic-array/f6a15ee5169113d5/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/hash32/4bbae2553405c536/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/hashbrown/714a9ca074b156f8/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/heapless/63355a45e477072f/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/heapless/d20cc69e2f2b9faf/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/linked_list_allocator/ca1d8587c7869a80/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/lock_api/bcfffa7a916bdacf/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/log/1e3aa6fcf4b23e50/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/managed/b12446bf708390a5/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/memchr/a96496d3f9cb9dde/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/nb/620fc8f5d077f521/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/nb/f8854a9eb30bda6c/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/nom/25d9538f7938d407/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/num-traits/046bfa22bd1f8f61/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/pin-project-lite/1989534144872a6b/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/portable-atomic/2b728a0b0421d95c/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/portable_atomic_enum/2671cfeeea9f6c1e/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/rand_core/88ebf56c1d6866ac/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/rand_core/8d1ab4c2863f9125/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/rand_core/d6793ed573ad98bc/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/riscv-pac/d99c07f5563220b6/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/riscv-rt/18206e5dd98cdbd6/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/riscv/ac9398cc7cd9a246/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/rlsf/22249122f8871f39/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/scopeguard/19579387f319748e/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/sha2/1088e307d3ba5d41/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/smoltcp/50e05966176dfa62/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/stable_deref_trait/3cb7d156b62aaa88/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/static_cell/a05f7759ff0dabf5/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/strum/c49327229cb03cf0/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/talc/2cf56d8772486c43/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/typenum/773c882d9e213589/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/ufmt-write/bf1ab2c95a9f29cd/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/vcell/0c0cf4d51491946b/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/void/2061dd917907d876/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/winnow/14f69a55097c38ea/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/xpost-elf/90261458170ccff6/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/xpost-serial/497455bddc5e681c/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/xpost-type/b38c76644f1d6b1b/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/xpost/9ac704f68638ac20/out -L dependency=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/just_xdp/dafa37a5176a25fc/out --extern 'noprelude,nounused:alloc=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/alloc/e7860d1f66a9c689/out/liballoc-e7860d1f66a9c689.rlib' --extern 'noprelude,nounused:alloc=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/alloc/e7860d1f66a9c689/out/liballoc-e7860d1f66a9c689.rmeta' --extern 'noprelude,nounused:compiler_builtins=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/compiler_builtins/3ebd692989b01de0/out/libcompiler_builtins-3ebd692989b01de0.rlib' --extern 'noprelude,nounused:compiler_builtins=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/compiler_builtins/3ebd692989b01de0/out/libcompiler_builtins-3ebd692989b01de0.rmeta' --extern 'noprelude,nounused:core=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/core/190a967d1bddaa90/out/libcore-190a967d1bddaa90.rlib' --extern 'noprelude,nounused:core=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/core/190a967d1bddaa90/out/libcore-190a967d1bddaa90.rmeta' --extern critical_section=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/critical-section/7e468bbeeceeac6c/out/libcritical_section-7e468bbeeceeac6c.rlib --extern critical_section=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/critical-section/7e468bbeeceeac6c/out/libcritical_section-7e468bbeeceeac6c.rmeta --extern embassy_executor=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-executor/18d11de76b64923d/out/libembassy_executor-18d11de76b64923d.rlib --extern embassy_executor=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-executor/18d11de76b64923d/out/libembassy_executor-18d11de76b64923d.rmeta --extern embassy_futures=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-futures/2e4b867a7253513f/out/libembassy_futures-2e4b867a7253513f.rlib --extern embassy_futures=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-futures/2e4b867a7253513f/out/libembassy_futures-2e4b867a7253513f.rmeta --extern embassy_net=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-net/97df4e280e527b17/out/libembassy_net-97df4e280e527b17.rlib --extern embassy_net=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-net/97df4e280e527b17/out/libembassy_net-97df4e280e527b17.rmeta --extern embassy_time=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-time/a78c4a149230b8cf/out/libembassy_time-a78c4a149230b8cf.rlib --extern embassy_time=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embassy-time/a78c4a149230b8cf/out/libembassy_time-a78c4a149230b8cf.rmeta --extern embedded_io=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-io/e336f0b9ede65a0e/out/libembedded_io-e336f0b9ede65a0e.rlib --extern embedded_io=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-io/e336f0b9ede65a0e/out/libembedded_io-e336f0b9ede65a0e.rmeta --extern embedded_io_async=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-io-async/af71963f64b7c027/out/libembedded_io_async-af71963f64b7c027.rlib --extern embedded_io_async=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/embedded-io-async/af71963f64b7c027/out/libembedded_io_async-af71963f64b7c027.rmeta --extern esp_alloc=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-alloc/a2ff3f78e291e787/out/libesp_alloc-a2ff3f78e291e787.rlib --extern esp_alloc=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-alloc/a2ff3f78e291e787/out/libesp_alloc-a2ff3f78e291e787.rmeta --extern esp_bootloader_esp_idf=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-bootloader-esp-idf/a46f1eed9bcdc5d6/out/libesp_bootloader_esp_idf-a46f1eed9bcdc5d6.rlib --extern esp_bootloader_esp_idf=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-bootloader-esp-idf/a46f1eed9bcdc5d6/out/libesp_bootloader_esp_idf-a46f1eed9bcdc5d6.rmeta --extern esp_hal=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-hal/50dd3059fdb3c8af/out/libesp_hal-50dd3059fdb3c8af.rlib --extern esp_hal=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-hal/50dd3059fdb3c8af/out/libesp_hal-50dd3059fdb3c8af.rmeta --extern esp_println=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-println/3afd76f5b5243945/out/libesp_println-3afd76f5b5243945.rlib --extern esp_println=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-println/3afd76f5b5243945/out/libesp_println-3afd76f5b5243945.rmeta --extern esp_radio=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-radio/dafec07698331a57/out/libesp_radio-dafec07698331a57.rlib --extern esp_radio=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-radio/dafec07698331a57/out/libesp_radio-dafec07698331a57.rmeta --extern esp_rtos=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-rtos/4db9ffb0081d8b15/out/libesp_rtos-4db9ffb0081d8b15.rlib --extern esp_rtos=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-rtos/4db9ffb0081d8b15/out/libesp_rtos-4db9ffb0081d8b15.rmeta --extern just_xdp=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/just_xdp/bfd6090c93b14eb8/out/libjust_xdp-bfd6090c93b14eb8.rlib --extern just_xdp=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/just_xdp/bfd6090c93b14eb8/out/libjust_xdp-bfd6090c93b14eb8.rmeta --extern log=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/log/1e3aa6fcf4b23e50/out/liblog-1e3aa6fcf4b23e50.rlib --extern log=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/log/1e3aa6fcf4b23e50/out/liblog-1e3aa6fcf4b23e50.rmeta --extern portable_atomic=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/portable-atomic/2b728a0b0421d95c/out/libportable_atomic-2b728a0b0421d95c.rlib --extern portable_atomic=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/portable-atomic/2b728a0b0421d95c/out/libportable_atomic-2b728a0b0421d95c.rmeta --extern static_cell=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/static_cell/a05f7759ff0dabf5/out/libstatic_cell-a05f7759ff0dabf5.rlib --extern static_cell=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/static_cell/a05f7759ff0dabf5/out/libstatic_cell-a05f7759ff0dabf5.rmeta --extern xpost=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/xpost/9ac704f68638ac20/out/libxpost-9ac704f68638ac20.rlib --extern xpost=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/xpost/9ac704f68638ac20/out/libxpost-9ac704f68638ac20.rmeta --extern xpost_serial=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/xpost-serial/497455bddc5e681c/out/libxpost_serial-497455bddc5e681c.rlib --extern xpost_serial=/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/xpost-serial/497455bddc5e681c/out/libxpost_serial-497455bddc5e681c.rmeta -Z unstable-options --cfg portable_atomic_unsafe_assume_single_core --force-warn=unused_crate_dependencies -L /Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-rom-sys/94df9a6bf9332a77/out -L /Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp32c3/8b358310d922482f/out -L /Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-hal/dfa2a9e08d6d5986/out -L /Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/riscv-rt/5212929932d5ef80/out -L /Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-radio/ea965c8d01d2a6a7/out -L /Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-phy/740eb61b8b685927/out -L /Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/esp-wifi-sys-esp32c3/794f3a88b64fe000/out -C link-arg=--error-handling-script=/Volumes/SSD/bs/xpost/examples/just_xdp/target/release/build/just_xdp/0028b19da90f5d0f/out/build_script_build -C link-arg=-T/Volumes/SSD/bs/xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/build/just_xdp/7a23b30e7b3bd749/out/custom-sections.x -C link-arg=-Tlinkall.x`
+    Finished `release` profile [optimized + debuginfo] target(s) in 2.39s

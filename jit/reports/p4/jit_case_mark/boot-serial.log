@@ -1,0 +1,20 @@
+OK get serial n=19 since_ms=1794556617167 until_ms=1794556636601
+2026-11-13T07:56:57.176Z FLASH begin clear xdp *
+2026-11-13T07:56:58.640Z [uart] I (223) boot: Loaded app from partition at offset 0x10000
+2026-11-13T07:56:58.640Z [uart] I (223) boot: Disabling RNG early entropy source...
+2026-11-13T07:56:58.664Z [uart] xpost ready ipv4=? port=8080
+2026-11-13T07:56:58.714Z [uart] OK init
+2026-11-13T07:57:01.594Z FLASH end clear xdp *
+2026-11-13T07:57:01.604Z FLASH begin xdp name=jit_case_mark
+2026-11-13T07:57:09.579Z [uart] I (223) boot: Loaded app from partition at offset 0x10000
+2026-11-13T07:57:09.579Z [uart] I (223) boot: Disabling RNG early entropy source...
+2026-11-13T07:57:09.608Z [uart] xpost ready ipv4=? port=8080
+2026-11-13T07:57:10.509Z [uart] OK init
+2026-11-13T07:57:12.529Z FLASH install Created { offset: 0 }
+2026-11-13T07:57:12.529Z FLASH end xdp name=jit_case_mark
+2026-11-13T07:57:16.537Z [cmd] → ping
+2026-11-13T07:57:16.546Z [uart] OK ping
+2026-11-13T07:57:16.546Z [cmd] ← OK ping
+2026-11-13T07:57:16.555Z [cmd] → disable xdp
+2026-11-13T07:57:16.556Z [uart] OK disable xdp
+2026-11-13T07:57:16.556Z [cmd] ← OK disable xdp

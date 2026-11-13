@@ -1,0 +1,13 @@
+OK get serial n=12 since_ms=1794556696656 until_ms=1794556706566
+2026-11-13T07:58:16.659Z [cmd] → enable xdp
+2026-11-13T07:58:16.663Z [uart] OK enable xdp
+2026-11-13T07:58:16.663Z [cmd] ← OK enable xdp
+2026-11-13T07:58:26.517Z [cmd] → disable xdp
+2026-11-13T07:58:26.523Z [uart] OK disable xdp
+2026-11-13T07:58:26.524Z [cmd] ← OK disable xdp
+2026-11-13T07:58:26.532Z [cmd] → get map rxcnt
+2026-11-13T07:58:26.534Z [uart] OK get map 1437
+2026-11-13T07:58:26.550Z [cmd] ← OK get map
+2026-11-13T07:58:26.557Z [cmd] → get perf
+2026-11-13T07:58:26.560Z [uart] OK get perf 2152
+2026-11-13T07:58:26.563Z [cmd] ← OK get perf

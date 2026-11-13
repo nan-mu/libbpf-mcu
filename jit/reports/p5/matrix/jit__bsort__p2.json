@@ -1,0 +1,22 @@
+{
+  "arm": "jit",
+  "workload": "bsort",
+  "diag": false,
+  "firmware": "/Users/nan/.cursor/worktrees/jit-audit-a91c4e7b/libbpf-mcu-d0bf3ed3f2b9/build/p5/fw/exec_bench_aot",
+  "container": "/Users/nan/.cursor/worktrees/jit-audit-a91c4e7b/libbpf-mcu-d0bf3ed3f2b9/build/p5/jit/bsort.elf",
+  "reps_requested": 50,
+  "samples_us": [],
+  "seg": [],
+  "errors": [],
+  "bench": null,
+  "sweep": [],
+  "status": "NOT_MEASURED",
+  "reason": "xpost-mcu-elf: image is 12956 bytes but slot 0x40380200 holds 8192; refusing to truncate",
+  "output": {
+    "expected_hex": null,
+    "got_hex": null,
+    "match": null
+  },
+  "pass": 2,
+  "serial_log": "/Users/nan/.cursor/worktrees/jit-audit-a91c4e7b/libbpf-mcu-d0bf3ed3f2b9/jit/reports/p5/matrix/jit__bsort__p2.serial.log"
+}

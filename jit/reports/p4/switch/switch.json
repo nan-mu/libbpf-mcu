@@ -1,0 +1,30 @@
+{
+  "steps": [
+    {
+      "step": "initial (boot leased jit_case_mark -> slot0)",
+      "reply": null,
+      "status": "OK get xdp 3580158305 0 255 0 0 0 0 0 1"
+    },
+    {
+      "step": "stage case_mark_idle -> slot1 (AOT)",
+      "reply": "OK xdp flash 1 1 0 agent_rx=1794557240.920179",
+      "status": "OK get xdp 3580158305 0 1 1 0 0 0 0 0"
+    },
+    {
+      "step": "activate slot0 -> slot1 (AOT)",
+      "reply": "OK xdp switch 1 0 0 0 1 1 0 0 101089175 agent_rx=1794557240.941204",
+      "status": "OK get xdp 3580158305 1 0 0 0 0 0 0 0"
+    },
+    {
+      "step": "stage jit_case_mark -> slot0 (JIT)",
+      "reply": "OK xdp flash 0 2 0 agent_rx=1794557240.964266",
+      "status": "OK get xdp 3580158305 1 0 2 0 0 0 0 0"
+    },
+    {
+      "step": "activate slot1 -> slot0 (JIT)",
+      "reply": "OK xdp switch 1 0 0 1 0 2 0 0 101132904 agent_rx=1794557240.984907",
+      "status": "OK get xdp 3580158305 0 1 1 0 0 0 0 0"
+    }
+  ],
+  "serial": "OK get serial n=27 since_ms=1794557240895 until_ms=1794557240998\n2026-11-13T08:07:20.907Z [cmd] \u2192 get xdp\n2026-11-13T08:07:20.908Z [uart] OK get xdp 3580158305 0 255 0 0 0 0 0 1\n2026-11-13T08:07:20.909Z [cmd] \u2190 OK get xdp\n2026-11-13T08:07:20.914Z [cmd] \u2192 xdp flash case_mark_idle 1\n2026-11-13T08:07:20.920Z [uart] OK xdp flash 1 1 0\n2026-11-13T08:07:20.920Z [cmd] \u2190 OK xdp flash\n2026-11-13T08:07:20.925Z [cmd] \u2192 get xdp\n2026-11-13T08:07:20.930Z [uart] OK get xdp 3580158305 0 1 1 0 0 0 0 0\n2026-11-13T08:07:20.930Z [cmd] \u2190 OK get xdp\n2026-11-13T08:07:20.936Z [cmd] \u2192 xdp switch 1 1 pass\n2026-11-13T08:07:20.941Z [uart] OK xdp switch 1 0 0 0 1 1 0 0 101089175\n2026-11-13T08:07:20.941Z [cmd] \u2190 OK xdp switch\n2026-11-13T08:07:20.946Z [cmd] \u2192 get xdp\n2026-11-13T08:07:20.951Z [uart] OK get xdp 3580158305 1 0 0 0 0 0 0 0\n2026-11-13T08:07:20.951Z [cmd] \u2190 OK get xdp\n2026-11-13T08:07:20.956Z [cmd] \u2192 xdp flash jit_case_mark 0\n2026-11-13T08:07:20.964Z [uart] OK xdp flash 0 2 0\n2026-11-13T08:07:20.964Z [cmd] \u2190 OK xdp flash\n2026-11-13T08:07:20.969Z [cmd] \u2192 get xdp\n2026-11-13T08:07:20.974Z [uart] OK get xdp 3580158305 1 0 2 0 0 0 0 0\n2026-11-13T08:07:20.974Z [cmd] \u2190 OK get xdp\n2026-11-13T08:07:20.979Z [cmd] \u2192 xdp switch 0 2 pass\n2026-11-13T08:07:20.984Z [uart] OK xdp switch 1 0 0 1 0 2 0 0 101132904\n2026-11-13T08:07:20.984Z [cmd] \u2190 OK xdp switch\n2026-11-13T08:07:20.990Z [cmd] \u2192 get xdp\n2026-11-13T08:07:20.995Z [uart] OK get xdp 3580158305 0 1 1 0 0 0 0 0\n2026-11-13T08:07:20.995Z [cmd] \u2190 OK get xdp"
+}

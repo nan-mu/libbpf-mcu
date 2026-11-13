@@ -1,0 +1,33 @@
+workload	arm	n	min_us	median_us	p90_us	max_us	errors	output_match	diag_bench_ns	status	reason
+incr	aot	101	53	69	70	150	0	True	5362	ok	
+incr	hal	51	12	12	13	37	0	True	1156	ok	
+incr	jit	101	54	70	70	151	0	True	6012	ok	
+incr	rbpf	101	376	424	425	540	0	True	44030	ok	
+square	aot	101	53	69	70	150	0	True	5362	ok	
+square	hal	51	2	12	12	15	0	True	1138	ok	
+square	jit	101	54	70	70	151	0	True	6013	ok	
+square	rbpf	101	360	428	429	544	0	True	44066	ok	
+bitswap	aot	101	53	69	70	150	0	True	5650	ok	
+bitswap	hal	51	1	12	12	28	0	True	1281	ok	
+bitswap	jit	101	55	71	72	152	0	True	7200	ok	
+bitswap	rbpf	101	437	544	553	656	0	True	80269	ok	
+fib	aot	101	54	70	71	151	0	True	6662	ok	
+fib	hal	51	2	13	13	20	0	True	2392	ok	
+fib	jit	101	56	72	74	153	0	True	8587	ok	
+fib	rbpf	101	530	586	586	699	0	True	178843	ok	
+buf	aot	101	54	70	71	151	0	True	6512	ok	
+buf	hal	51	3	13	13	30	0	True	2386	ok	
+buf	jit	101	58	74	76	155	0	True	10750	ok	
+buf	rbpf	101	572	641	642	763	0	True	201219	ok	
+memcpy	aot	101	53	69	70	150	0	True	5550	ok	
+memcpy	hal	51	1	12	13	15	0	True	1624	ok	
+memcpy	jit	101	55	71	72	152	0	True	7125	ok	
+memcpy	rbpf	101	421	458	459	592	0	True	78225	ok	
+fletcher32	aot	101	54	70	71	151	0	True	6350	ok	
+fletcher32	hal	51	2	13	13	28	0	True	2164	ok	
+fletcher32	jit	101	57	73	74	154	0	True	9125	ok	
+fletcher32	rbpf	101	509	556	557	682	0	True	155731	ok	
+bsort	aot	101	56	71	72	153	0	True	7613	ok	
+bsort	hal	51	5	13	14	22	0	True	5242	ok	
+bsort	jit	0	-	-	-	-	0	None	None	NOT_MEASURED	xpost-mcu-elf: image is 12956 bytes but slot 0x40380200 holds 8192; refusing to truncate
+bsort	rbpf	101	1007	1057	1057	1167	0	True	534419	ok	

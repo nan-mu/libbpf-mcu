@@ -1,0 +1,16 @@
+program	bpf_insns	rv_bytes	ns_min	ns_med	ns_max	source
+div2	29	556	1375	1459	172792	given (parent, 200 repeats, release, this Mac)
+xdp_drop	22	564	708	792	16208	given
+case_mark	105	2528	2208	2333	17875	given
+just_drop	34	1012	791	875	9375	given
+just_tx	58	1752	1166	1270	11042	given
+firewall	23	668	458	500	5792	given
+bitswap	68	1252	916	1000	9417	given
+bsort	619	12940	6500	6979	18125	given
+incr	30	536	709	791	19542	measured P5 (xpost-jit compile --repeat 200, release)
+square	30	536	625	750	14083	measured P5
+fib	41	708	750	833	14708	measured P5
+buf	46	796	833	875	12084	measured P5
+memcpy	73	1396	1125	1208	12500	measured P5
+fletcher32	402	5052	5542	5667	20208	measured P5
+helper_loop	28	860	750	833	19083	measured P5

@@ -1,0 +1,65 @@
+{
+  "arm": "rbpf",
+  "workload": "incr",
+  "diag": true,
+  "firmware": "/Users/nan/.cursor/worktrees/jit-audit-a91c4e7b/libbpf-mcu-d0bf3ed3f2b9/build/p5/fw/exec_bench_rbpf_diag",
+  "container": "/Users/nan/.cursor/worktrees/jit-audit-a91c4e7b/libbpf-mcu-d0bf3ed3f2b9/build/p5/rbpf/incr.elf",
+  "reps_requested": 1,
+  "samples_us": [
+    376
+  ],
+  "seg": [
+    {
+      "load": 77,
+      "lease": 152,
+      "engine": 376,
+      "release": 46,
+      "store": 126,
+      "total": 777
+    }
+  ],
+  "errors": [],
+  "bench": {
+    "runs": 2000,
+    "mean_ns": 44030,
+    "act": "XDP_PASS"
+  },
+  "sweep": [
+    {
+      "wl": null,
+      "op": 0,
+      "param": 1,
+      "runs": 200,
+      "mean_ns": 46650
+    },
+    {
+      "wl": null,
+      "op": 0,
+      "param": 2,
+      "runs": 200,
+      "mean_ns": 43990
+    },
+    {
+      "wl": null,
+      "op": 0,
+      "param": 4,
+      "runs": 200,
+      "mean_ns": 43990
+    },
+    {
+      "wl": null,
+      "op": 0,
+      "param": 8,
+      "runs": 200,
+      "mean_ns": 43990
+    }
+  ],
+  "boot_ok": true,
+  "boot_log": "ESP-ROM:esp32c3-api1-20210207\r\nBuild:Feb  7 2021\r\nrst:0x15 (USB_UART_CHIP_RESET),boot:0xc (SPI_FAST_FLASH_BOOT)\r\nSaved PC:0x40380862\r\nSPIWP:0xee\r\nmode:DIO, clock div:2\r\nload:0x3fcd5830,len:0x153c\r\nload:0x403cbf10,len:0xcec\r\nload:0x403ce710,len:0x2fcc\r\nentry 0x403cbf1a\r\nI (24) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader\r\nI (25) boot: chip revision: v0.4\r\nI (25) boot: efuse block revision: v1.3\r\nI (26) boot.esp32c3: SPI Speed      : 40MHz\r\nI (30) boot.esp32c3: SPI Mode       : DIO\r\nI (33) boot.esp32c3: SPI Flash Size : 4MB\r\nI (37) boot: Enabling RNG early entropy source...\r\nI (42) boot: Partition Table:\r\nI (44) boot: ## Label            Usage          Type ST Offset   Length\r\nI (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000\r\nI (57) boot:  1 phy_init         RF data          01 01 0000f000 00001000\r\nI (64) boot:  2 factory          factory app      00 00 00010000 003f0000\r\nI (70) boot: End of partition table\r\nI (73) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=086e8h ( 34536) map\r\nI (89) esp_image: segment 1: paddr=00018710 vaddr=3fc85310 size=02814h ( 10260) load\r\nI (91) esp_image: segment 2: paddr=0001af2c vaddr=40380000 size=00200h (   512) load\r\nI (96) esp_image: segment 3: paddr=0001b134 vaddr=40382200 size=03110h ( 12560) load\r\nI (106) esp_image: segment 4: paddr=0001e24c vaddr=00000000 size=01dcch (  7628) \r\nESP-ROM:esp32c3-api1-20210207\r\nBuild:Feb  7 2021\r\nrst:0x15 (USB_UART_CHIP_RESET),boot:0xc (SPI_FAST_FLASH_BOOT)\r\nSaved PC:0x40058842\r\nSPIWP:0xee\r\nmode:DIO, clock div:2\r\nload:0x3fcd5830,len:0x153c\r\nload:0x403cbf10,len:0xcec\r\nload:0x403ce710,len:0x2fcc\r\nentry 0x403cbf1a\r\nI (24) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader\r\nI (25) boot: chip revision: v0.4\r\nI (25) boot: efuse block revision: v1.3\r\nI (26) boot.esp32c3: SPI Speed      : 40MHz\r\nI (30) boot.esp32c3: SPI Mode       : DIO\r\nI (33) boot.esp32c3: SPI Flash Size : 4MB\r\nI (37) boot: Enabling RNG early entropy source...\r\nI (42) boot: Partition Table:\r\nI (44) boot: ## Label            Usage          Type ST Offset   Length\r\nI (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000\r\nI (57) boot:  1 phy_init         RF data          01 01 0000f000 00001000\r\nI (64) boot:  2 factory          factory app      00 00 00010000 003f0000\r\nI (70) boot: End of partition table\r\nI (73) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=086e8h ( 34536) map\r\nI (89) esp_image: segment 1: paddr=00018710 vaddr=3fc85310 size=02814h ( 10260) load\r\nI (91) esp_image: segment 2: paddr=0001af2c vaddr=40380000 size=00200h (   512) load\r\nI (96) esp_image: segment 3: paddr=0001b134 vaddr=40382200 size=03110h ( 12560) load\r\nI (106) esp_image: segment 4: paddr=0001e24c vaddr=00000000 size=01dcch (  7628) \r\nI (112) esp_image: segment 5: paddr=00020020 vaddr=42010020 size=25dach (155052) map\r\nI (154) boot: Loaded app from partition at offset 0x10000\r\nI (154) boot: Disabling RNG early entropy source...\r\nINFO - interp selftest: act=2 in=0x41 out=0x42 through=0xc0ffee ok=true\nINFO - clock probe: 1000 reads = 655 us (0.7 us/read)\nINFO - empty flight: 100 runs = 948 us (9.5 us/run)\nINFO - incr flight: 100 runs = 6046 us (60.5 us/run)\nINFO - leased split x50: before_hook=240 engine=56 after_hook=508 outer=867 us\nINFO - xdp init images=1\nINFO - report xdp incr\nINFO - report map Hash workload\nINFO - xdp switched, not leased\nOK init\n",
+  "output": {
+    "expected_hex": "0000000000000000010000000000000000000000000000000000000000000000",
+    "got_hex": "0000000000000000010000000000000000000000000000000000000000000000",
+    "match": true
+  },
+  "serial_log": "/Users/nan/.cursor/worktrees/jit-audit-a91c4e7b/libbpf-mcu-d0bf3ed3f2b9/jit/reports/p5/probe/rbpf__incr.serial.log"
+}
