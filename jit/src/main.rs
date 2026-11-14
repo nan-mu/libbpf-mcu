@@ -132,10 +132,15 @@ fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--section" => {
-                section = Some(rest.next().ok_or_else(|| "missing value for --section".to_string())?);
+                section = Some(
+                    rest.next()
+                        .ok_or_else(|| "missing value for --section".to_string())?,
+                );
             }
             "--packet" => {
-                let hex = rest.next().ok_or_else(|| "missing value for --packet".to_string())?;
+                let hex = rest
+                    .next()
+                    .ok_or_else(|| "missing value for --packet".to_string())?;
                 packet = parse_hex(&hex)?;
             }
             other if other.starts_with('-') => return Err(format!("unknown flag {other}")),
@@ -157,7 +162,10 @@ fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
         src.insns.len(),
         report.rv_bytes,
         report.relocs,
-        report.r0.map(|v| format!("{v:#x}")).unwrap_or_else(|| "-".into()),
+        report
+            .r0
+            .map(|v| format!("{v:#x}"))
+            .unwrap_or_else(|| "-".into()),
         report.detail
     );
     match report.status {

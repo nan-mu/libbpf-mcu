@@ -9,7 +9,13 @@ use xpost_jit::{compare, support_json, write_map, Insn, KIND_ARRAY};
 const MEM_BYTES: usize = 0x4_0000;
 
 fn insn(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> Insn {
-    Insn { code, dst, src, off, imm }
+    Insn {
+        code,
+        dst,
+        src,
+        off,
+        imm,
+    }
 }
 
 fn words(dst: u8, value: u64) -> [Insn; 2] {
@@ -123,7 +129,16 @@ fn div_mod_signed_and_zero() {
 
 #[test]
 fn jumps_on_signs_and_zero() {
-    let vals = [0i64, 1, -1, 2, i32::MAX as i64, i32::MIN as i64, i64::MAX, i64::MIN];
+    let vals = [
+        0i64,
+        1,
+        -1,
+        2,
+        i32::MAX as i64,
+        i32::MIN as i64,
+        i64::MAX,
+        i64::MIN,
+    ];
     let ops = [
         JMP_JEQ, JMP_JNE, JMP_JGT, JMP_JGE, JMP_JLT, JMP_JLE, JMP_JSGT, JMP_JSGE, JMP_JSLT,
         JMP_JSLE, JMP_JSET,
@@ -178,7 +193,14 @@ fn unaligned_word_roundtrip() {
         insn(CLASS_LDX | MODE_MEM | SIZE_W, 0, 1, 2, 0),
         exit(),
     ];
-    let report = compare(&prog, &HashMap::new(), &HashMap::new(), &mem, 0x1000, &[0x1000..0x1008]);
+    let report = compare(
+        &prog,
+        &HashMap::new(),
+        &HashMap::new(),
+        &mem,
+        0x1000,
+        &[0x1000..0x1008],
+    );
     assert_eq!(report.status, "pass", "{}", report.detail);
     assert_eq!(report.r0, Some(0x1234_5678));
 }
@@ -206,7 +228,13 @@ fn alu32_bswap_widths() {
     // The 64-bit swap must not truncate. lddw takes the low word first, so
     // 0x1234_5678_9abc_def0 reverses to 0xf0de_bc9a_7856_3412.
     let prog = [
-        insn(CLASS_LD | SIZE_DW | MODE_IMM, 0, 0, 0, 0x9abc_def0u32 as i32),
+        insn(
+            CLASS_LD | SIZE_DW | MODE_IMM,
+            0,
+            0,
+            0,
+            0x9abc_def0u32 as i32,
+        ),
         insn(0, 0, 0, 0, 0x1234_5678),
         insn(CLASS_ALU | ALU_END | SRC_X, 0, 0, 0, 64),
         exit(),

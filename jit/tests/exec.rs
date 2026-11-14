@@ -243,10 +243,7 @@ fn rejects_bad_lddw_and_a_branch_into_it() {
 
 #[test]
 fn unknown_alu_and_bad_reg_are_errors() {
-    let bad_op = [
-        i(0xe7, 0, 0, 0, 1),
-        i(jmp64(JMP_EXIT, 0), 0, 0, 0, 0),
-    ];
+    let bad_op = [i(0xe7, 0, 0, 0, 1), i(jmp64(JMP_EXIT, 0), 0, 0, 0, 0)];
     let caught = std::panic::catch_unwind(|| compile(&bad_op, &HashMap::new()));
     let err = caught.expect("compile panicked").unwrap_err();
     assert!(err.to_string().contains("unsupported"), "{err}");
@@ -301,9 +298,19 @@ fn clang_map_lddw_resolves_through_the_relocation() {
 
     let mut maps = HashMap::new();
     maps.insert("counter".to_string(), 0x3000u32);
-    let code = link(&image, &LinkIn { helper: HELPER, maps: &maps }).expect("link");
+    let code = link(
+        &image,
+        &LinkIn {
+            helper: HELPER,
+            maps: &maps,
+        },
+    )
+    .expect("link");
     let mut mem = vec![0u8; MEM];
     xpost_jit::write_map(&mut mem, 0x3000, KIND_ARRAY, 4, 8, 256, 0x8000).expect("map descriptor");
     let stop = xpost_jit::run_rv(&code, 0, mem, Some(HELPER)).expect("run");
-    assert_eq!(stop.a0, 1, "lookup of array slot 0 must return its storage address");
+    assert_eq!(
+        stop.a0, 1,
+        "lookup of array slot 0 must return its storage address"
+    );
 }

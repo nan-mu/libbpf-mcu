@@ -92,6 +92,10 @@ impl Insn {
     }
 }
 
+pub(crate) fn is_lddw(insn: Insn) -> bool {
+    insn.class() == CLASS_LD && insn.size() == SIZE_DW && insn.mode() == MODE_IMM
+}
+
 pub fn decode_insns(bytes: &[u8]) -> Result<Vec<Insn>, String> {
     if bytes.len() % 8 != 0 {
         return Err(format!(

@@ -34,8 +34,10 @@ pub fn execute(
         }
         let insn = insns[pc];
         let class = insn.class();
-        if class == CLASS_LD && insn.size() == SIZE_DW && insn.mode() == MODE_IMM {
-            let next = *insns.get(pc + 1).ok_or_else(|| format!("bpf pc {pc}: truncated lddw"))?;
+        if is_lddw(insn) {
+            let next = *insns
+                .get(pc + 1)
+                .ok_or_else(|| format!("bpf pc {pc}: truncated lddw"))?;
             if next.code != 0 || next.dst != 0 || next.src != 0 || next.off != 0 {
                 return Err(format!("bpf pc {pc}: bad lddw"));
             }
@@ -137,7 +139,7 @@ fn wide_slots(insns: &[Insn]) -> Result<Vec<bool>, String> {
     let mut pc = 0;
     while pc < insns.len() {
         let insn = insns[pc];
-        if insn.class() == CLASS_LD && insn.size() == SIZE_DW && insn.mode() == MODE_IMM {
+        if is_lddw(insn) {
             if pc + 1 >= insns.len() {
                 return Err(format!("bpf pc {pc}: truncated lddw"));
             }
@@ -367,8 +369,12 @@ fn load_mem(mem: &[u8], addr: u64, size: u8) -> Result<u64, String> {
 fn store_mem(mem: &mut [u8], addr: u64, value: u64, size: u8) -> Result<(), String> {
     let n = size_bytes(size)?;
     let at = usize::try_from(addr).map_err(|_| format!("store {addr:#x}"))?;
-    let end = at.checked_add(n).ok_or_else(|| format!("store {addr:#x}"))?;
-    let slot = mem.get_mut(at..end).ok_or_else(|| format!("store {addr:#x}"))?;
+    let end = at
+        .checked_add(n)
+        .ok_or_else(|| format!("store {addr:#x}"))?;
+    let slot = mem
+        .get_mut(at..end)
+        .ok_or_else(|| format!("store {addr:#x}"))?;
     slot.copy_from_slice(&value.to_le_bytes()[..n]);
     Ok(())
 }

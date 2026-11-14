@@ -19,7 +19,11 @@ pub fn write_map(
     storage: u32,
 ) -> Result<(), String> {
     let at = at as usize;
-    if at.checked_add(24).map(|end| end > mem.len()).unwrap_or(true) {
+    if at
+        .checked_add(24)
+        .map(|end| end > mem.len())
+        .unwrap_or(true)
+    {
         return Err("map descriptor does not fit".into());
     }
     put_u32(mem, at, MAP_MAGIC);
@@ -50,7 +54,10 @@ fn lookup(mem: &mut [u8], map: u32, key: u32) -> Option<u32> {
             if index >= desc.max_entries {
                 return Some(0);
             }
-            Some(desc.storage.wrapping_add(index.wrapping_mul(desc.value_size)))
+            Some(
+                desc.storage
+                    .wrapping_add(index.wrapping_mul(desc.value_size)),
+            )
         }
         KIND_HASH => {
             let slot = find_hash(mem, &desc, key, false)?;
@@ -68,7 +75,9 @@ fn update(mem: &mut [u8], map: u32, key: u32, value: u32) -> Option<u32> {
             if index >= desc.max_entries {
                 return Some(u32::MAX);
             }
-            let dst = desc.storage.wrapping_add(index.wrapping_mul(desc.value_size));
+            let dst = desc
+                .storage
+                .wrapping_add(index.wrapping_mul(desc.value_size));
             copy_bytes(mem, value, dst, desc.value_size)?;
             Some(0)
         }
@@ -93,7 +102,11 @@ fn delete(mem: &mut [u8], map: u32, key: u32) -> Option<u32> {
     let key_size = desc.key_size as usize;
     for i in 0..desc.max_entries {
         let slot = desc.storage.wrapping_add(i.wrapping_mul(stride as u32)) as usize;
-        if slot.checked_add(4 + key_size).map(|e| e > mem.len()).unwrap_or(true) {
+        if slot
+            .checked_add(4 + key_size)
+            .map(|e| e > mem.len())
+            .unwrap_or(true)
+        {
             return None;
         }
         if get_u32(mem, slot as u32)? == 0 {
@@ -132,7 +145,11 @@ fn find_hash(mem: &mut [u8], desc: &Desc, key: u32, insert: bool) -> Option<u32>
     let stride = hash_stride(desc)? as u32;
     let key_size = desc.key_size as usize;
     let key_at = key as usize;
-    if key_at.checked_add(key_size).map(|e| e > mem.len()).unwrap_or(true) {
+    if key_at
+        .checked_add(key_size)
+        .map(|e| e > mem.len())
+        .unwrap_or(true)
+    {
         return None;
     }
     let mut empty: Option<u32> = None;

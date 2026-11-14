@@ -2,7 +2,7 @@
 //! opcode. It does not record whether the differential test has run.
 
 use std::collections::HashMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use crate::bpf::*;
 use crate::compile::{self, JitError};

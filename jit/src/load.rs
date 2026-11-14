@@ -141,7 +141,7 @@ fn load_elf(bytes: &[u8], want: Option<&str>) -> Result<Source, LoadError> {
     };
     let text = section_payload(bytes, elf64, shoff, shentsize, idx)?;
     let insns = bpf::decode_insns(&text).map_err(LoadError)?;
-    let symbols = relocations(bytes, elf64, shoff, shentsize, shnum, idx)?;
+    let symbols = bind_relocs(bytes, elf64, shoff, shentsize, shnum, idx, &insns)?;
     Ok(Source {
         insns,
         symbols,
@@ -149,27 +149,70 @@ fn load_elf(bytes: &[u8], want: Option<&str>) -> Result<Source, LoadError> {
     })
 }
 
-fn relocations(
+const SHT_SYMTAB: u32 = 2;
+const SHT_RELA: u32 = 4;
+const SHT_REL: u32 = 9;
+const R_BPF_64_64: u32 = 1;
+
+#[derive(Clone, Copy)]
+enum RelocTarget {
+    Program,
+    OtherSection,
+}
+
+#[derive(Clone, Copy)]
+enum Slot {
+    LddwHead,
+    LddwHigh,
+    TruncatedHead,
+    Other,
+}
+
+fn bind_relocs(
     bytes: &[u8],
     elf64: bool,
     shoff: usize,
     shentsize: usize,
     shnum: usize,
-    text: usize,
+    program: usize,
+    insns: &[Insn],
 ) -> Result<HashMap<u64, String>, LoadError> {
+    let slots = classify(insns);
+    let program_bytes = insns
+        .len()
+        .checked_mul(8)
+        .ok_or_else(|| LoadError("program is too large to relocate".into()))?;
     let mut out = HashMap::new();
     for i in 0..shnum {
         let (_name, ty, _flags, off, size) = shdr(bytes, elf64, shoff, shentsize, i)?;
-        // SHT_RELA = 4, SHT_REL = 9. sh_info is the target section.
-        if ty != 4 && ty != 9 {
+        if ty != SHT_RELA && ty != SHT_REL {
             continue;
         }
         let info = sh_info(bytes, elf64, shoff, shentsize, i)?;
-        if info as usize != text {
-            continue;
+        match reloc_target(info, shnum, program)? {
+            RelocTarget::OtherSection => continue,
+            RelocTarget::Program => {}
         }
         let symtab = sh_link(bytes, elf64, shoff, shentsize, i)? as usize;
-        let rela = ty == 4;
+        if symtab >= shnum {
+            return Err(LoadError(format!(
+                "relocation sh_link {symtab} is outside {shnum} sections"
+            )));
+        }
+        let (_sym_name, sym_ty, _sym_flags, _sym_off, sym_size) =
+            shdr(bytes, elf64, shoff, shentsize, symtab)?;
+        if sym_ty != SHT_SYMTAB {
+            return Err(LoadError(format!(
+                "relocation sh_link {symtab} is not a symbol table"
+            )));
+        }
+        let sym_ent = if elf64 { 24 } else { 16 };
+        if sym_size % sym_ent != 0 {
+            return Err(LoadError(format!(
+                "symbol table size {sym_size} is not a multiple of {sym_ent}"
+            )));
+        }
+        let rela = ty == SHT_RELA;
         let ent = if elf64 {
             if rela {
                 24
@@ -181,14 +224,14 @@ fn relocations(
         } else {
             8
         };
-        if ent == 0 || size % ent != 0 {
+        if size % ent != 0 {
             return Err(LoadError(format!(
                 "relocation section size {size} is not a multiple of {ent}"
             )));
         }
-        let end = off.checked_add(size).ok_or_else(|| {
-            LoadError("relocation section end overflows".into())
-        })?;
+        let end = off
+            .checked_add(size)
+            .ok_or_else(|| LoadError("relocation section end overflows".into()))?;
         if end > bytes.len() {
             return Err(LoadError(format!(
                 "relocation section extends to {end}, file is {}",
@@ -211,53 +254,133 @@ fn relocations(
             } else {
                 ((r_info >> 8) as usize, (r_info & 0xff) as u32)
             };
-            if r_type != 1 {
+            if r_type != R_BPF_64_64 {
                 return Err(LoadError(format!(
                     "relocation type {r_type} is not R_BPF_64_64"
                 )));
             }
-            if let Some(name) = symbol_name(bytes, elf64, shoff, shentsize, symtab, sym_idx)? {
-                if !name.is_empty() {
-                    out.insert(r_off, name);
+            if r_off >= program_bytes as u64 {
+                return Err(LoadError(format!(
+                    "relocation offset {r_off} is outside the program"
+                )));
+            }
+            if r_off % 8 != 0 {
+                return Err(LoadError(format!(
+                    "relocation offset {r_off} is not instruction-aligned"
+                )));
+            }
+            match slots[(r_off / 8) as usize] {
+                Slot::LddwHead => {}
+                Slot::LddwHigh => {
+                    return Err(LoadError(format!(
+                        "relocation offset {r_off} is the second word of an lddw"
+                    )));
+                }
+                Slot::TruncatedHead => {
+                    return Err(LoadError(format!(
+                        "relocation offset {r_off} is a truncated lddw"
+                    )));
+                }
+                Slot::Other => {
+                    return Err(LoadError(format!(
+                        "relocation offset {r_off} is not an lddw"
+                    )));
                 }
             }
+            let name = require_symbol(bytes, elf64, shoff, shentsize, shnum, symtab, sym_idx)?;
+            if out.contains_key(&r_off) {
+                return Err(LoadError(format!("two relocations at offset {r_off}")));
+            }
+            out.insert(r_off, name);
         }
     }
     Ok(out)
 }
 
-fn symbol_name(
+fn reloc_target(info: u32, shnum: usize, program: usize) -> Result<RelocTarget, LoadError> {
+    let info = info as usize;
+    if info >= shnum {
+        return Err(LoadError(format!(
+            "relocation sh_info {info} is outside {shnum} sections"
+        )));
+    }
+    if info == program {
+        Ok(RelocTarget::Program)
+    } else {
+        Ok(RelocTarget::OtherSection)
+    }
+}
+
+fn classify(insns: &[Insn]) -> Vec<Slot> {
+    let mut slots = vec![Slot::Other; insns.len()];
+    let mut i = 0;
+    while i < insns.len() {
+        if bpf::is_lddw(insns[i]) && i + 1 < insns.len() {
+            slots[i] = Slot::LddwHead;
+            slots[i + 1] = Slot::LddwHigh;
+            i += 2;
+        } else if bpf::is_lddw(insns[i]) {
+            slots[i] = Slot::TruncatedHead;
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    slots
+}
+
+fn require_symbol(
     bytes: &[u8],
     elf64: bool,
     shoff: usize,
     shentsize: usize,
+    shnum: usize,
     symtab: usize,
     sym_idx: usize,
-) -> Result<Option<String>, LoadError> {
-    let (_n, ty, _f, off, size) = shdr(bytes, elf64, shoff, shentsize, symtab)?;
-    if ty != 2 {
-        return Ok(None);
-    }
+) -> Result<String, LoadError> {
+    let (_n, _ty, _f, off, size) = shdr(bytes, elf64, shoff, shentsize, symtab)?;
     let ent = if elf64 { 24 } else { 16 };
-    let step = match sym_idx.checked_mul(ent) {
-        Some(step) => step,
-        None => return Ok(None),
-    };
-    let at = match off.checked_add(step) {
-        Some(at) => at,
-        None => return Ok(None),
-    };
-    let sym_end = match at.checked_add(ent) {
-        Some(end) => end,
-        None => return Ok(None),
-    };
-    if sym_end > off + size || at + 4 > bytes.len() {
-        return Ok(None);
+    let step = sym_idx
+        .checked_mul(ent)
+        .ok_or_else(|| LoadError(format!("symbol index {sym_idx} overflows")))?;
+    let at = off
+        .checked_add(step)
+        .ok_or_else(|| LoadError(format!("symbol index {sym_idx} overflows")))?;
+    let sym_end = at
+        .checked_add(ent)
+        .ok_or_else(|| LoadError(format!("symbol index {sym_idx} overflows")))?;
+    let table_end = off
+        .checked_add(size)
+        .ok_or_else(|| LoadError("symbol table end overflows".into()))?;
+    if sym_end > table_end {
+        return Err(LoadError(format!(
+            "symbol index {sym_idx} is outside the symbol table"
+        )));
     }
     let name_off = u32_at(bytes, at)? as usize;
-    let strtab = sh_link(bytes, elf64, shoff, shentsize, symtab)? as usize;
-    let strings = section_payload(bytes, elf64, shoff, shentsize, strtab)?;
-    Ok(cstr(&strings, name_off).map(str::to_string))
+    let str_idx = sh_link(bytes, elf64, shoff, shentsize, symtab)? as usize;
+    if str_idx >= shnum {
+        return Err(LoadError(format!(
+            "symbol string section {str_idx} is outside {shnum} sections"
+        )));
+    }
+    let strings = section_payload(bytes, elf64, shoff, shentsize, str_idx)?;
+    if name_off >= strings.len() {
+        return Err(LoadError(format!(
+            "symbol name offset {name_off} is outside the string table"
+        )));
+    }
+    // `cstr` keeps a tail that has no NUL. A symbol name has to end inside this table.
+    let tail = &strings[name_off..];
+    let Some(end) = tail.iter().position(|b| *b == 0) else {
+        return Err(LoadError("symbol name is not NUL-terminated".into()));
+    };
+    let name = std::str::from_utf8(&tail[..end])
+        .map_err(|_| LoadError("symbol name is not UTF-8".into()))?;
+    if name.is_empty() {
+        return Err(LoadError("relocation symbol name is empty".into()));
+    }
+    Ok(name.to_string())
 }
 
 fn section_payload(
@@ -402,8 +525,11 @@ mod tests {
         let elf = sample_elf();
         let src = load_elf(&elf, None).unwrap();
         assert_eq!(src.section, "xdp");
-        assert_eq!(src.insns.len(), 1);
-        assert_eq!(src.insns[0].imm, 1);
+        assert_eq!(src.insns.len(), 2);
+        assert_eq!(src.insns[0].code, 0x18);
+        assert_eq!(src.insns[0].src, 0);
+        assert_eq!(src.insns[0].imm, 0x1111_1111);
+        assert_eq!(src.insns[1].imm, 0x2222_2222);
         assert_eq!(src.symbols.get(&0).map(String::as_str), Some("map_counter"));
     }
 
@@ -881,11 +1007,12 @@ mod tests {
     }
 
     fn sample_elf() -> Vec<u8> {
-        // mov64 r0, 1
-        let text = [0xb7u8, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00];
+        let mut text = [0u8; 16];
+        text[0] = 0x18;
+        text[4..8].copy_from_slice(&0x1111_1111u32.to_le_bytes());
+        text[12..16].copy_from_slice(&0x2222_2222u32.to_le_bytes());
         let shstr = b"\0xdp\0.relxdp\0.symtab\0.strtab\0.shstrtab\0";
         let strtab = b"\0map_counter\0";
-        // offsets: ehdr 64, text 8, rel 16, sym 48, strtab, shstr, then shdrs
         let text_off = 64usize;
         let rel_off = text_off + text.len();
         let sym_off = rel_off + 16;

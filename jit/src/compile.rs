@@ -297,10 +297,6 @@ fn check_reg(pc: usize, reg: u8) -> Result<(), JitError> {
     }
 }
 
-fn is_lddw(insn: Insn) -> bool {
-    insn.class() == CLASS_LD && insn.size() == SIZE_DW && insn.mode() == MODE_IMM
-}
-
 /// RFC 9669 wide encoding: the second word keeps opcode, regs, and offset at zero.
 fn check_lddw_second(pc: usize, next: Insn) -> Result<(), JitError> {
     if next.code == 0 && next.dst == 0 && next.src == 0 && next.off == 0 {
@@ -315,7 +311,10 @@ fn wide_high_slots(insns: &[Insn]) -> Result<Vec<bool>, JitError> {
     let mut pc = 0;
     while pc < insns.len() {
         if is_lddw(insns[pc]) {
-            let next = insns.get(pc + 1).copied().ok_or(JitError::TruncatedLddw { pc })?;
+            let next = insns
+                .get(pc + 1)
+                .copied()
+                .ok_or(JitError::TruncatedLddw { pc })?;
             check_lddw_second(pc, next)?;
             hi[pc + 1] = true;
             pc += 2;
@@ -380,7 +379,7 @@ fn emit_insn(ctx: &mut Ctx<'_>, insns: &[Insn], pc: usize) -> Result<usize, JitE
     match class {
         CLASS_ALU | CLASS_ALU64 => emit_alu(ctx, insn, pc, class == CLASS_ALU64),
         CLASS_JMP | CLASS_JMP32 => emit_jmp(ctx, insns, insn, pc, class == CLASS_JMP),
-        CLASS_LD if insn.size() == SIZE_DW && insn.mode() == MODE_IMM => emit_lddw(ctx, insns, pc),
+        CLASS_LD if is_lddw(insn) => emit_lddw(ctx, insns, pc),
         CLASS_LDX if insn.mode() == MODE_MEM => emit_mem(ctx, insn, pc, false),
         CLASS_ST | CLASS_STX if insn.code == NOSPEC => Ok(1),
         CLASS_ST | CLASS_STX if insn.mode() == MODE_MEM => emit_mem(ctx, insn, pc, true),
@@ -400,7 +399,10 @@ fn emit_insn(ctx: &mut Ctx<'_>, insns: &[Insn], pc: usize) -> Result<usize, JitE
 fn emit_lddw(ctx: &mut Ctx<'_>, insns: &[Insn], pc: usize) -> Result<usize, JitError> {
     let insn = insns[pc];
     check_reg(pc, insn.dst)?;
-    let next = insns.get(pc + 1).copied().ok_or(JitError::TruncatedLddw { pc })?;
+    let next = insns
+        .get(pc + 1)
+        .copied()
+        .ok_or(JitError::TruncatedLddw { pc })?;
     check_lddw_second(pc, next)?;
     let dst = bpf_slot(insn.dst);
     let live = get64(&mut ctx.code, dst, TMP1);
@@ -780,7 +782,13 @@ fn emit_arsh64_var(code: &mut Vec<u32>, rd: Live, rs: Live) {
     code[jal_at] = jal(ZERO, (done as i32 - jal_at as i32) * 4);
 }
 
-fn emit_alu64_imm(code: &mut Vec<u32>, rd: Live, imm: i32, op: u8, pc: usize) -> Result<(), JitError> {
+fn emit_alu64_imm(
+    code: &mut Vec<u32>,
+    rd: Live,
+    imm: i32,
+    op: u8,
+    pc: usize,
+) -> Result<(), JitError> {
     match op {
         ALU_MOV => emit_imm32(code, rd, imm),
         ALU_AND => {
@@ -876,7 +884,13 @@ fn emit_div32(code: &mut Vec<u32>, rd: u8, rs: u8, signed: bool, is_mod: bool) {
     }
 }
 
-fn emit_alu32_imm(code: &mut Vec<u32>, rd: u8, imm: i32, op: u8, pc: usize) -> Result<(), JitError> {
+fn emit_alu32_imm(
+    code: &mut Vec<u32>,
+    rd: u8,
+    imm: i32,
+    op: u8,
+    pc: usize,
+) -> Result<(), JitError> {
     let sh = (imm as u32) & 31;
     match op {
         ALU_MOV => emit_imm(code, rd, imm),
@@ -934,7 +948,13 @@ fn emit_alu32_imm(code: &mut Vec<u32>, rd: u8, imm: i32, op: u8, pc: usize) -> R
     Ok(())
 }
 
-fn emit_end(code: &mut Vec<u32>, dst: Slot, imm: i32, from_be: bool, pc: usize) -> Result<(), JitError> {
+fn emit_end(
+    code: &mut Vec<u32>,
+    dst: Slot,
+    imm: i32,
+    from_be: bool,
+    pc: usize,
+) -> Result<(), JitError> {
     let rd = get64(code, dst, TMP1);
     match (from_be, imm) {
         (false, 16) => {
@@ -1408,14 +1428,21 @@ pub fn link(image: &Image, input: &LinkIn<'_>) -> Result<Vec<u32>, JitError> {
             }
             RelocKind::Call => patch_call(&mut code, reloc.rv_off, input.helper)?,
             RelocKind::Lddw => {
-                let name = reloc.symbol.as_deref().ok_or_else(|| JitError::Unresolved {
-                    what: "lddw",
-                    detail: format!("bpf pc {} has no symbol", reloc.bpf_pc),
-                })?;
-                let addr = input.maps.get(name).copied().ok_or_else(|| JitError::Unresolved {
-                    what: "map",
-                    detail: name.to_string(),
-                })?;
+                let name = reloc
+                    .symbol
+                    .as_deref()
+                    .ok_or_else(|| JitError::Unresolved {
+                        what: "lddw",
+                        detail: format!("bpf pc {} has no symbol", reloc.bpf_pc),
+                    })?;
+                let addr = input
+                    .maps
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| JitError::Unresolved {
+                        what: "map",
+                        detail: name.to_string(),
+                    })?;
                 if addr == 0 {
                     return Err(JitError::Unresolved {
                         what: "map",
@@ -1454,9 +1481,18 @@ fn patch_lddw(code: &mut [u32], rv_off: u32, addr: u32) -> Result<(), JitError> 
     // for the high half, each addi reading the register its lui wrote.
     let shape = [
         ((code[at] & 0x7f) as u8, ((code[at] >> 7) & 31) as u8),
-        ((code[at + 1] & 0x7f) as u8, ((code[at + 1] >> 7) & 31) as u8),
-        ((code[at + 2] & 0x7f) as u8, ((code[at + 2] >> 7) & 31) as u8),
-        ((code[at + 3] & 0x7f) as u8, ((code[at + 3] >> 7) & 31) as u8),
+        (
+            (code[at + 1] & 0x7f) as u8,
+            ((code[at + 1] >> 7) & 31) as u8,
+        ),
+        (
+            (code[at + 2] & 0x7f) as u8,
+            ((code[at + 2] >> 7) & 31) as u8,
+        ),
+        (
+            (code[at + 3] & 0x7f) as u8,
+            ((code[at + 3] >> 7) & 31) as u8,
+        ),
     ];
     let addi_rs1 = |word: u32| ((word >> 15) & 31) as u8;
     let ok = shape[0].0 == 0x37
@@ -1492,7 +1528,11 @@ fn word_at(code: &[u32], rv_off: u32, n: usize) -> Result<usize, JitError> {
         });
     }
     let at = (rv_off / 4) as usize;
-    if at.checked_add(n).map(|end| end > code.len()).unwrap_or(true) {
+    if at
+        .checked_add(n)
+        .map(|end| end > code.len())
+        .unwrap_or(true)
+    {
         return Err(JitError::Unresolved {
             what: "reloc",
             detail: format!("offset {rv_off:#x} is past the image"),

@@ -19,11 +19,7 @@ pub struct Report {
     pub relocs: usize,
 }
 
-pub fn check_packet(
-    insns: &[Insn],
-    symbols: &HashMap<u64, String>,
-    packet: &[u8],
-) -> Report {
+pub fn check_packet(insns: &[Insn], symbols: &HashMap<u64, String>, packet: &[u8]) -> Report {
     let mut mem = vec![0u8; 0x4_0000];
     let data = 0x1000usize;
     let ctx = 0x1800usize;
@@ -112,7 +108,11 @@ pub fn compare(
     };
     let mut bpf_mem = mem.to_vec();
     let bpf = bpf_vm::execute(insns, symbols, maps, &mut bpf_mem, u64::from(r1));
-    let helper = if relocs == 0 { None } else { Some(host_abi::HELPER) };
+    let helper = if relocs == 0 {
+        None
+    } else {
+        Some(host_abi::HELPER)
+    };
     let rv = rv_vm::run(&code, r1, mem.to_vec(), helper);
     let (bpf_r0, rv) = match (bpf, rv) {
         (Err(bpf_err), Err(rv_err)) => {
