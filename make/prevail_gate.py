@@ -38,7 +38,7 @@ def prevail_bin() -> Path:
     return ROOT / "prevail" / "bin" / "prevail"
 
 
-def _select_program(listing: str) -> ProgramRef:
+def select_program(listing: str) -> ProgramRef:
     """Keep programs whose section is xdp or xdp1. Require exactly one."""
     found: list[ProgramRef] = []
     for line in listing.splitlines():
@@ -70,13 +70,12 @@ def _run_prevail(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return proc
 
 
-def accept(obj: Path, stamp: Path) -> None:
-    """Unlink the stamp, select the program, and publish the witness only on exit 0."""
-    stamp.unlink(missing_ok=True)
+def examine(obj: Path) -> ProgramRef:
+    """List, select the one xdp or xdp1 program, and run the checker. No stamp I/O."""
     listed = _run_prevail([str(prevail_bin()), "-l", str(obj)])
     if listed.returncode != 0:
         raise SystemExit(1)
-    program = _select_program(listed.stdout)
+    program = select_program(listed.stdout)
     checked = _run_prevail(
         [
             str(prevail_bin()),
@@ -91,6 +90,11 @@ def accept(obj: Path, stamp: Path) -> None:
     )
     if checked.returncode != 0:
         raise SystemExit(1)
+    return program
+
+
+def write_stamp(stamp: Path, obj: Path, program: ProgramRef) -> None:
+    """Write the witness. Temp file, then os.replace."""
     body = (
         f"section={program.section}\n"
         f"function={program.function}\n"
@@ -99,6 +103,12 @@ def accept(obj: Path, stamp: Path) -> None:
     tmp = stamp.with_name(stamp.name + ".tmp")
     tmp.write_text(body)
     os.replace(tmp, stamp)
+
+
+def accept(obj: Path, stamp: Path) -> None:
+    """AOT rule only. Unlink, examine, write_stamp."""
+    stamp.unlink(missing_ok=True)
+    write_stamp(stamp, obj, examine(obj))
 
 
 def main() -> None:
