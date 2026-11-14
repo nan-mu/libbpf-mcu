@@ -23,11 +23,18 @@ pub enum RelocKind {
 }
 
 impl RelocKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             RelocKind::Call => "call",
             RelocKind::Func => "func",
             RelocKind::Lddw => "lddw",
+        }
+    }
+
+    pub fn patch_words(self) -> usize {
+        match self {
+            RelocKind::Call | RelocKind::Func => 2,
+            RelocKind::Lddw => 4,
         }
     }
 }
@@ -94,6 +101,19 @@ pub enum JitError {
         pc: usize,
         target: i32,
     },
+    /// Second word of `lddw` is not the reserved zero word from RFC 9669.
+    BadLddw {
+        pc: usize,
+    },
+    /// A branch lands on the second word of an `lddw`.
+    LddwMiddle {
+        pc: usize,
+        target: usize,
+    },
+    Unresolved {
+        what: &'static str,
+        detail: String,
+    },
     Unsupported {
         pc: usize,
         code: u8,
@@ -116,6 +136,18 @@ impl fmt::Display for JitError {
                     f,
                     "bpf pc {pc}: branch target {target} is outside the program"
                 )
+            }
+            JitError::BadLddw { pc } => {
+                write!(f, "bpf pc {pc}: lddw second word is not reserved-zero")
+            }
+            JitError::LddwMiddle { pc, target } => {
+                write!(
+                    f,
+                    "bpf pc {pc}: branch target {target} is the second word of lddw"
+                )
+            }
+            JitError::Unresolved { what, detail } => {
+                write!(f, "unresolved {what}: {detail}")
             }
             JitError::Unsupported { pc, code, what } => {
                 write!(f, "bpf pc {pc}: unsupported {what} (opcode {code:#x})")
@@ -152,17 +184,25 @@ struct Ctx<'a> {
     fixups: Vec<Fixup>,
     relocs: Vec<Reloc>,
     symbols: &'a HashMap<u64, String>,
+    /// True when this eBPF slot is the second word of an `lddw`.
+    wide_hi: Vec<bool>,
+}
+
+pub fn frame_bytes() -> u32 {
+    stack_adjust() as u32
 }
 
 pub fn compile(insns: &[Insn], symbols: &HashMap<u64, String>) -> Result<Image, JitError> {
     if insns.is_empty() {
         return Err(JitError::Empty);
     }
+    let wide_hi = wide_high_slots(insns)?;
     let mut ctx = Ctx {
         code: Vec::with_capacity(insns.len() * 8),
         fixups: Vec::new(),
         relocs: Vec::new(),
         symbols,
+        wide_hi,
     };
     emit_prologue(&mut ctx.code);
     let mut rv_at = vec![0usize; insns.len() + 1];
@@ -257,6 +297,55 @@ fn check_reg(pc: usize, reg: u8) -> Result<(), JitError> {
     }
 }
 
+fn is_lddw(insn: Insn) -> bool {
+    insn.class() == CLASS_LD && insn.size() == SIZE_DW && insn.mode() == MODE_IMM
+}
+
+/// RFC 9669 wide encoding: the second word keeps opcode, regs, and offset at zero.
+fn check_lddw_second(pc: usize, next: Insn) -> Result<(), JitError> {
+    if next.code == 0 && next.dst == 0 && next.src == 0 && next.off == 0 {
+        Ok(())
+    } else {
+        Err(JitError::BadLddw { pc })
+    }
+}
+
+fn wide_high_slots(insns: &[Insn]) -> Result<Vec<bool>, JitError> {
+    let mut hi = vec![false; insns.len()];
+    let mut pc = 0;
+    while pc < insns.len() {
+        if is_lddw(insns[pc]) {
+            let next = insns.get(pc + 1).copied().ok_or(JitError::TruncatedLddw { pc })?;
+            check_lddw_second(pc, next)?;
+            hi[pc + 1] = true;
+            pc += 2;
+        } else {
+            pc += 1;
+        }
+    }
+    Ok(hi)
+}
+
+fn known_alu(op: u8) -> bool {
+    matches!(
+        op,
+        ALU_ADD
+            | ALU_SUB
+            | ALU_MUL
+            | ALU_DIV
+            | ALU_OR
+            | ALU_AND
+            | ALU_LSH
+            | ALU_RSH
+            | ALU_NEG
+            | ALU_MOD
+            | ALU_XOR
+            | ALU_MOV
+            | ALU_ARSH
+            | ALU_END
+    )
+}
+
 fn emit_prologue(code: &mut Vec<u32>) {
     let adj = stack_adjust();
     code.push(addi(T6, ZERO, MAX_TAIL_CALLS));
@@ -311,10 +400,15 @@ fn emit_insn(ctx: &mut Ctx<'_>, insns: &[Insn], pc: usize) -> Result<usize, JitE
 fn emit_lddw(ctx: &mut Ctx<'_>, insns: &[Insn], pc: usize) -> Result<usize, JitError> {
     let insn = insns[pc];
     check_reg(pc, insn.dst)?;
-    let next = insns.get(pc + 1).ok_or(JitError::TruncatedLddw { pc })?;
+    let next = insns.get(pc + 1).copied().ok_or(JitError::TruncatedLddw { pc })?;
+    check_lddw_second(pc, next)?;
     let dst = bpf_slot(insn.dst);
     let live = get64(&mut ctx.code, dst, TMP1);
-    if insn.src == 0 {
+    let symbol = ctx.symbols.get(&(pc as u64 * 8)).cloned();
+    // Clang leaves src_reg at 0 and names the map only in the ELF relocation,
+    // so the relocation is the identity. Testing src_reg alone turned every
+    // map load into the constant 0 and each lookup then missed.
+    if insn.src == 0 && symbol.is_none() {
         emit_imm(&mut ctx.code, live.lo, insn.imm);
         emit_imm(&mut ctx.code, live.hi, next.imm);
     } else {
@@ -328,7 +422,7 @@ fn emit_lddw(ctx: &mut Ctx<'_>, insns: &[Insn], pc: usize) -> Result<usize, JitE
             bpf_pc: pc as u32,
             src_reg: insn.src,
             imm: insn.imm,
-            symbol: ctx.symbols.get(&(pc as u64 * 8)).cloned(),
+            symbol,
         });
     }
     put64(&mut ctx.code, dst, live);
@@ -360,12 +454,20 @@ fn emit_alu(ctx: &mut Ctx<'_>, insn: Insn, pc: usize, is64: bool) -> Result<usiz
             bpf_slot(insn.dst),
             insn.imm,
             insn.src_is_reg(),
+            pc,
         )?;
         return Ok(1);
     }
     check_reg(pc, insn.dst)?;
     if insn.src_is_reg() {
         check_reg(pc, insn.src)?;
+    }
+    if !known_alu(op) {
+        return Err(JitError::Unsupported {
+            pc,
+            code: insn.code,
+            what: "alu op",
+        });
     }
     if is64 && matches!(op, ALU_DIV | ALU_MOD) {
         return Err(JitError::Unsupported {
@@ -446,11 +548,11 @@ fn emit_alu(ctx: &mut Ctx<'_>, insn: Insn, pc: usize, is64: bool) -> Result<usiz
     }
     if is64 {
         let rd = get64(&mut ctx.code, dst, TMP1);
-        emit_alu64_imm(&mut ctx.code, rd, insn.imm, op)?;
+        emit_alu64_imm(&mut ctx.code, rd, insn.imm, op, pc)?;
         put64(&mut ctx.code, dst, rd);
     } else {
         let rd_lo = get32(&mut ctx.code, dst, TMP1.lo);
-        emit_alu32_imm(&mut ctx.code, rd_lo, insn.imm, op)?;
+        emit_alu32_imm(&mut ctx.code, rd_lo, insn.imm, op, pc)?;
         put32(&mut ctx.code, dst, rd_lo);
     }
     Ok(1)
@@ -678,7 +780,7 @@ fn emit_arsh64_var(code: &mut Vec<u32>, rd: Live, rs: Live) {
     code[jal_at] = jal(ZERO, (done as i32 - jal_at as i32) * 4);
 }
 
-fn emit_alu64_imm(code: &mut Vec<u32>, rd: Live, imm: i32, op: u8) -> Result<(), JitError> {
+fn emit_alu64_imm(code: &mut Vec<u32>, rd: Live, imm: i32, op: u8, pc: usize) -> Result<(), JitError> {
     match op {
         ALU_MOV => emit_imm32(code, rd, imm),
         ALU_AND => {
@@ -716,7 +818,7 @@ fn emit_alu64_imm(code: &mut Vec<u32>, rd: Live, imm: i32, op: u8) -> Result<(),
         }
         _ => {
             return Err(JitError::Unsupported {
-                pc: 0,
+                pc,
                 code: op,
                 what: "alu64 immediate",
             });
@@ -774,7 +876,7 @@ fn emit_div32(code: &mut Vec<u32>, rd: u8, rs: u8, signed: bool, is_mod: bool) {
     }
 }
 
-fn emit_alu32_imm(code: &mut Vec<u32>, rd: u8, imm: i32, op: u8) -> Result<(), JitError> {
+fn emit_alu32_imm(code: &mut Vec<u32>, rd: u8, imm: i32, op: u8, pc: usize) -> Result<(), JitError> {
     let sh = (imm as u32) & 31;
     match op {
         ALU_MOV => emit_imm(code, rd, imm),
@@ -823,7 +925,7 @@ fn emit_alu32_imm(code: &mut Vec<u32>, rd: u8, imm: i32, op: u8) -> Result<(), J
         ALU_ARSH => code.push(srai(rd, rd, sh)),
         _ => {
             return Err(JitError::Unsupported {
-                pc: 0,
+                pc,
                 code: op,
                 what: "alu32 immediate",
             });
@@ -832,7 +934,7 @@ fn emit_alu32_imm(code: &mut Vec<u32>, rd: u8, imm: i32, op: u8) -> Result<(), J
     Ok(())
 }
 
-fn emit_end(code: &mut Vec<u32>, dst: Slot, imm: i32, from_be: bool) -> Result<(), JitError> {
+fn emit_end(code: &mut Vec<u32>, dst: Slot, imm: i32, from_be: bool, pc: usize) -> Result<(), JitError> {
     let rd = get64(code, dst, TMP1);
     match (from_be, imm) {
         (false, 16) => {
@@ -841,6 +943,8 @@ fn emit_end(code: &mut Vec<u32>, dst: Slot, imm: i32, from_be: bool) -> Result<(
             code.push(addi(rd.hi, ZERO, 0));
         }
         (false, 32) => code.push(addi(rd.hi, ZERO, 0)),
+        // `{END, LE, ALU}` with 64 is the identity of the whole 64-bit value
+        // on a little-endian host, not a truncation to 32 bits.
         (false, 64) => {}
         (true, 16) => {
             emit_rev16(code, rd.lo);
@@ -859,7 +963,7 @@ fn emit_end(code: &mut Vec<u32>, dst: Slot, imm: i32, from_be: bool) -> Result<(
         }
         _ => {
             return Err(JitError::Unsupported {
-                pc: 0,
+                pc,
                 code: ALU_END,
                 what: "bswap width",
             });
@@ -907,7 +1011,7 @@ fn emit_jmp(
     }
     match op {
         JMP_JA => {
-            let target = branch_target(pc, insn.off, insns.len())?;
+            let target = branch_target(pc, insn.off, insns.len(), &ctx.wide_hi)?;
             ctx.emit_jump(ZERO, target);
         }
         JMP_EXIT => {
@@ -915,11 +1019,11 @@ fn emit_jmp(
                 ctx.emit_jump(ZERO, insns.len());
             }
         }
-        JMP_CALL => emit_call(ctx, insn, pc),
+        JMP_CALL => emit_call(ctx, insn, pc)?,
         JMP_JEQ | JMP_JNE | JMP_JGT | JMP_JGE | JMP_JLT | JMP_JLE | JMP_JSGT | JMP_JSGE
         | JMP_JSLT | JMP_JSLE | JMP_JSET => {
             check_reg(pc, insn.dst)?;
-            let target = branch_target(pc, insn.off, insns.len())?;
+            let target = branch_target(pc, insn.off, insns.len(), &ctx.wide_hi)?;
             let dst = bpf_slot(insn.dst);
             if is64 {
                 let rs = if insn.src_is_reg() {
@@ -930,7 +1034,7 @@ fn emit_jmp(
                     TMP2
                 };
                 let rd = get64(&mut ctx.code, dst, TMP1);
-                emit_bcc64(ctx, op, rd, rs, target)?;
+                emit_bcc64(ctx, op, rd, rs, target, pc)?;
             } else {
                 let rs = if insn.src_is_reg() {
                     check_reg(pc, insn.src)?;
@@ -940,7 +1044,7 @@ fn emit_jmp(
                     TMP2.lo
                 };
                 let rd = get32(&mut ctx.code, dst, TMP1.lo);
-                emit_bcc32(ctx, op, rd, rs, target)?;
+                emit_bcc32(ctx, op, rd, rs, target, pc)?;
             }
         }
         _ => {
@@ -954,33 +1058,55 @@ fn emit_jmp(
     Ok(1)
 }
 
-fn branch_target(pc: usize, off: i16, len: usize) -> Result<usize, JitError> {
+fn branch_target(pc: usize, off: i16, len: usize, wide_hi: &[bool]) -> Result<usize, JitError> {
     let target = pc as i32 + 1 + i32::from(off);
     if target < 0 || target > len as i32 {
-        Err(JitError::BadTarget { pc, target })
-    } else {
-        Ok(target as usize)
+        return Err(JitError::BadTarget { pc, target });
     }
+    let target = target as usize;
+    if target < wide_hi.len() && wide_hi[target] {
+        return Err(JitError::LddwMiddle { pc, target });
+    }
+    Ok(target)
 }
 
-fn emit_call(ctx: &mut Ctx<'_>, insn: Insn, pc: usize) {
+fn emit_call(ctx: &mut Ctx<'_>, insn: Insn, pc: usize) -> Result<(), JitError> {
+    if insn.src == PSEUDO_CALL {
+        return Err(JitError::Unsupported {
+            pc,
+            code: insn.code,
+            what: "bpf-to-bpf call",
+        });
+    }
+    if insn.src != 0 {
+        return Err(JitError::Unsupported {
+            pc,
+            code: insn.code,
+            what: "call src",
+        });
+    }
     let r5 = bpf_slot(5);
     let r0 = bpf_slot(0);
-    // R1–R4 already sit in a0–a7 as pairs. R5 goes to the outgoing stack slot.
-    ctx.code.push(addi(SP, SP, -16));
-    ctx.code.push(sw(r5.lo as u8, 0, SP));
-    ctx.code.push(sw(r5.hi as u8, 4, SP));
+    // helper_dispatcher(idx, a1..a5) takes the low 32 bits of R1..R5.
+    // Those lows currently sit in a0, a2, a4, a6, and s3. Copy them before a0
+    // becomes the helper id. The address itself stays a relocation.
+    ctx.code.push(addi(T0, A0, 0));
+    ctx.code.push(addi(T2, A2, 0));
+    ctx.code.push(addi(T3, A4, 0));
+    ctx.code.push(addi(T4, A6, 0));
+    ctx.code.push(addi(T5, r5.lo as u8, 0));
+    emit_imm(&mut ctx.code, A0, insn.imm);
+    ctx.code.push(addi(A1, T0, 0));
+    ctx.code.push(addi(A2, T2, 0));
+    ctx.code.push(addi(A3, T3, 0));
+    ctx.code.push(addi(A4, T4, 0));
+    ctx.code.push(addi(A5, T5, 0));
     ctx.code.push(addi(S7, T6, 0));
     let at = ctx.code.len();
     ctx.code.push(lui(T1, 0));
     ctx.code.push(jalr(RA, T1, 0));
-    let kind = if insn.src == PSEUDO_CALL {
-        RelocKind::Func
-    } else {
-        RelocKind::Call
-    };
     ctx.relocs.push(Reloc {
-        kind,
+        kind: RelocKind::Call,
         rv_off: (at * 4) as u32,
         bpf_pc: pc as u32,
         src_reg: insn.src,
@@ -989,8 +1115,8 @@ fn emit_call(ctx: &mut Ctx<'_>, insn: Insn, pc: usize) {
     });
     ctx.code.push(addi(T6, S7, 0));
     ctx.code.push(addi(r0.lo as u8, A0, 0));
-    ctx.code.push(addi(r0.hi as u8, A1, 0));
-    ctx.code.push(addi(SP, SP, 16));
+    ctx.code.push(addi(r0.hi as u8, ZERO, 0));
+    Ok(())
 }
 
 impl Ctx<'_> {
@@ -1002,18 +1128,25 @@ impl Ctx<'_> {
     }
 }
 
-fn emit_bcc32(ctx: &mut Ctx<'_>, op: u8, a: u8, b: u8, target: usize) -> Result<(), JitError> {
+fn emit_bcc32(
+    ctx: &mut Ctx<'_>,
+    op: u8,
+    a: u8,
+    b: u8,
+    target: usize,
+    pc: usize,
+) -> Result<(), JitError> {
     if op == JMP_JSET {
         ctx.code.push(and(T0, a, b));
         ctx.code.push(beq(T0, ZERO, 12));
     } else {
-        ctx.code.push(invert32(op, a, b, 12)?);
+        ctx.code.push(invert32(op, a, b, 12, pc)?);
     }
     ctx.emit_jump(ZERO, target);
     Ok(())
 }
 
-fn invert32(op: u8, a: u8, b: u8, off: i32) -> Result<u32, JitError> {
+fn invert32(op: u8, a: u8, b: u8, off: i32, pc: usize) -> Result<u32, JitError> {
     Ok(match op {
         JMP_JEQ => bne(a, b, off),
         JMP_JNE => beq(a, b, off),
@@ -1027,7 +1160,7 @@ fn invert32(op: u8, a: u8, b: u8, off: i32) -> Result<u32, JitError> {
         JMP_JSGE => blt(a, b, off),
         _ => {
             return Err(JitError::Unsupported {
-                pc: 0,
+                pc,
                 code: op,
                 what: "condition",
             });
@@ -1035,7 +1168,14 @@ fn invert32(op: u8, a: u8, b: u8, off: i32) -> Result<u32, JitError> {
     })
 }
 
-fn emit_bcc64(ctx: &mut Ctx<'_>, op: u8, a: Live, b: Live, target: usize) -> Result<(), JitError> {
+fn emit_bcc64(
+    ctx: &mut Ctx<'_>,
+    op: u8,
+    a: Live,
+    b: Live,
+    target: usize,
+    pc: usize,
+) -> Result<(), JitError> {
     match op {
         JMP_JEQ => {
             ctx.code.push(bne(a.hi, b.hi, 16));
@@ -1093,7 +1233,7 @@ fn emit_bcc64(ctx: &mut Ctx<'_>, op: u8, a: Live, b: Live, target: usize) -> Res
         }
         _ => {
             return Err(JitError::Unsupported {
-                pc: 0,
+                pc,
                 code: op,
                 what: "condition",
             });
@@ -1134,17 +1274,19 @@ fn emit_mem(ctx: &mut Ctx<'_>, insn: Insn, pc: usize, store: bool) -> Result<usi
                 ctx.code.push(lbu(rd.lo, 0, T0));
                 ctx.code.push(addi(rd.hi, ZERO, 0));
             }
+            // eBPF allows an unaligned address. A half or word `lhu`/`lw` is
+            // not defined there: packet fields often sit at 2-mod-4.
             SIZE_H => {
-                ctx.code.push(lhu(rd.lo, 0, T0));
+                emit_load_le(&mut ctx.code, rd.lo, T0, 2, 0);
                 ctx.code.push(addi(rd.hi, ZERO, 0));
             }
             SIZE_W => {
-                ctx.code.push(lw(rd.lo, 0, T0));
+                emit_load_le(&mut ctx.code, rd.lo, T0, 4, 0);
                 ctx.code.push(addi(rd.hi, ZERO, 0));
             }
             SIZE_DW => {
-                ctx.code.push(lw(rd.lo, 0, T0));
-                ctx.code.push(lw(rd.hi, 4, T0));
+                emit_load_le(&mut ctx.code, rd.lo, T0, 4, 0);
+                emit_load_le(&mut ctx.code, rd.hi, T0, 4, 4);
             }
             _ => unreachable!(),
         }
@@ -1158,13 +1300,36 @@ fn emit_store(code: &mut Vec<u32>, base: Live, val: Live, off: i16, size: u8) {
     code.push(add(T0, T0, base.lo));
     match size {
         SIZE_B => code.push(sb(val.lo, 0, T0)),
-        SIZE_H => code.push(sh(val.lo, 0, T0)),
-        SIZE_W => code.push(sw(val.lo, 0, T0)),
+        SIZE_H => emit_store_le(code, T0, val.lo, 2, 0),
+        SIZE_W => emit_store_le(code, T0, val.lo, 4, 0),
         SIZE_DW => {
-            code.push(sw(val.lo, 0, T0));
-            code.push(sw(val.hi, 4, T0));
+            emit_store_le(code, T0, val.lo, 4, 0);
+            emit_store_le(code, T0, val.hi, 4, 4);
         }
         _ => unreachable!(),
+    }
+}
+
+fn emit_load_le(code: &mut Vec<u32>, dst: u8, addr: u8, n: u8, disp: i32) {
+    code.push(addi(dst, ZERO, 0));
+    for i in 0..n {
+        code.push(lbu(T1, disp + i32::from(i), addr));
+        if i != 0 {
+            code.push(slli(T1, T1, u32::from(i) * 8));
+        }
+        code.push(or(dst, dst, T1));
+    }
+}
+
+fn emit_store_le(code: &mut Vec<u32>, addr: u8, src: u8, n: u8, disp: i32) {
+    for i in 0..n {
+        if i == 0 {
+            code.push(andi(T1, src, 0xff));
+        } else {
+            code.push(srli(T1, src, u32::from(i) * 8));
+            code.push(andi(T1, T1, 0xff));
+        }
+        code.push(sb(T1, disp + i32::from(i), addr));
     }
 }
 
@@ -1213,4 +1378,125 @@ fn put32(code: &mut Vec<u32>, dst: Slot, src_lo: u8) {
     } else {
         code.push(addi(dst.hi as u8, ZERO, 0));
     }
+}
+
+/// Addresses that close every relocation. A zero address is refused.
+pub struct LinkIn<'a> {
+    pub helper: u32,
+    /// ELF symbol name to the map's VMR address. Not the value storage.
+    pub maps: &'a HashMap<String, u32>,
+}
+
+pub fn link(image: &Image, input: &LinkIn<'_>) -> Result<Vec<u32>, JitError> {
+    if image.relocs.is_empty() {
+        return Ok(image.code.clone());
+    }
+    if input.helper == 0 {
+        return Err(JitError::Unresolved {
+            what: "helper",
+            detail: "address is 0".into(),
+        });
+    }
+    let mut code = image.code.clone();
+    for reloc in &image.relocs {
+        match reloc.kind {
+            RelocKind::Func => {
+                return Err(JitError::Unresolved {
+                    what: "bpf-to-bpf call",
+                    detail: format!("bpf pc {}", reloc.bpf_pc),
+                });
+            }
+            RelocKind::Call => patch_call(&mut code, reloc.rv_off, input.helper)?,
+            RelocKind::Lddw => {
+                let name = reloc.symbol.as_deref().ok_or_else(|| JitError::Unresolved {
+                    what: "lddw",
+                    detail: format!("bpf pc {} has no symbol", reloc.bpf_pc),
+                })?;
+                let addr = input.maps.get(name).copied().ok_or_else(|| JitError::Unresolved {
+                    what: "map",
+                    detail: name.to_string(),
+                })?;
+                if addr == 0 {
+                    return Err(JitError::Unresolved {
+                        what: "map",
+                        detail: format!("{name} address is 0"),
+                    });
+                }
+                patch_lddw(&mut code, reloc.rv_off, addr)?;
+            }
+        }
+    }
+    Ok(code)
+}
+
+fn abs_pair(rd: u8, addr: u32) -> [u32; 2] {
+    let (hi, lo) = split_pc_rel(addr as i32);
+    [lui(rd, hi), addi(rd, rd, lo)]
+}
+
+fn patch_call(code: &mut [u32], rv_off: u32, helper: u32) -> Result<(), JitError> {
+    let at = word_at(code, rv_off, 2)?;
+    if code[at + 1] != jalr(RA, T1, 0) {
+        return Err(JitError::Unresolved {
+            what: "call",
+            detail: format!("offset {rv_off:#x} is not an unlinked jalr"),
+        });
+    }
+    let (hi, lo) = split_pc_rel(helper as i32);
+    code[at] = lui(T1, hi);
+    code[at + 1] = jalr(RA, T1, lo);
+    Ok(())
+}
+
+fn patch_lddw(code: &mut [u32], rv_off: u32, addr: u32) -> Result<(), JitError> {
+    let at = word_at(code, rv_off, 4)?;
+    // The unlinked sequence is lui/addi for the low half, then the same pair
+    // for the high half, each addi reading the register its lui wrote.
+    let shape = [
+        ((code[at] & 0x7f) as u8, ((code[at] >> 7) & 31) as u8),
+        ((code[at + 1] & 0x7f) as u8, ((code[at + 1] >> 7) & 31) as u8),
+        ((code[at + 2] & 0x7f) as u8, ((code[at + 2] >> 7) & 31) as u8),
+        ((code[at + 3] & 0x7f) as u8, ((code[at + 3] >> 7) & 31) as u8),
+    ];
+    let addi_rs1 = |word: u32| ((word >> 15) & 31) as u8;
+    let ok = shape[0].0 == 0x37
+        && shape[1].0 == 0x13
+        && shape[1].1 == addi_rs1(code[at + 1])
+        && shape[2].0 == 0x37
+        && shape[3].0 == 0x13
+        && shape[3].1 == addi_rs1(code[at + 3])
+        && shape[1].1 == shape[0].1
+        && shape[3].1 == shape[2].1
+        && shape[0].1 != 0
+        && shape[2].1 != 0;
+    if !ok {
+        return Err(JitError::Unresolved {
+            what: "lddw",
+            detail: format!("offset {rv_off:#x} is not the unlinked four-word pair"),
+        });
+    }
+    let lo = abs_pair(shape[0].1, addr);
+    let hi = abs_pair(shape[2].1, 0);
+    code[at] = lo[0];
+    code[at + 1] = lo[1];
+    code[at + 2] = hi[0];
+    code[at + 3] = hi[1];
+    Ok(())
+}
+
+fn word_at(code: &[u32], rv_off: u32, n: usize) -> Result<usize, JitError> {
+    if rv_off % 4 != 0 {
+        return Err(JitError::Unresolved {
+            what: "reloc",
+            detail: format!("offset {rv_off:#x} is not aligned"),
+        });
+    }
+    let at = (rv_off / 4) as usize;
+    if at.checked_add(n).map(|end| end > code.len()).unwrap_or(true) {
+        return Err(JitError::Unresolved {
+            what: "reloc",
+            detail: format!("offset {rv_off:#x} is past the image"),
+        });
+    }
+    Ok(at)
 }

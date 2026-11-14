@@ -1,16 +1,13 @@
-//! Execute the JIT output on a tiny RV32 interpreter and compare with eBPF.
+//! Run the JIT image and check the register result.
 //!
-//! The interpreter decodes instruction bits itself. Encoder pins live in
-//! `rv.rs`. A branch test fails if those two disagree.
+//! The RV32 interpreter lives in the library. These expected values are the
+//! eBPF results, not a second copy of the lowering.
 
 use std::collections::HashMap;
 
 use xpost_jit::isa::*;
-use xpost_jit::{compile, disassemble, Insn};
-
-const SENTINEL: u32 = 0xffff_fff0;
+use xpost_jit::{compile, disassemble, link, Insn, LinkIn, RelocKind, HELPER, KIND_ARRAY};
 const MEM: usize = 0x4_0000;
-const SP: u32 = 0x3_0000;
 
 fn i(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> Insn {
     Insn {
@@ -24,222 +21,12 @@ fn i(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> Insn {
 
 fn run(insns: &[Insn], a0: u32) -> Result<(u32, u32), String> {
     let image = compile(insns, &HashMap::new()).map_err(|e| e.to_string())?;
-    exec(&image.code, a0).map_err(|e| format!("{e}\n{}", disassemble(&image.code)))
+    exec(&image.code, a0).map_err(|e| format!("{e}\n{}", disassemble(&image.code, 0)))
 }
 
 fn exec(code: &[u32], a0: u32) -> Result<(u32, u32), String> {
-    let mut x = [0u32; 32];
-    x[1] = SENTINEL;
-    x[2] = SP;
-    x[10] = a0;
-    let mut mem = vec![0u8; MEM];
-    let mut pc: i32 = 0;
-    for _ in 0..200_000 {
-        if pc < 0 || pc as usize / 4 >= code.len() || (pc as u32) & 3 != 0 {
-            return Err(format!("pc {pc:#x} left the image"));
-        }
-        let inst = code[pc as usize / 4];
-        let next = step(&mut x, &mut mem, pc, inst)?;
-        if next == SENTINEL as i32 {
-            return Ok((x[10], x[11]));
-        }
-        pc = next;
-    }
-    Err("step limit".into())
-}
-
-fn step(x: &mut [u32; 32], mem: &mut [u8], pc: i32, inst: u32) -> Result<i32, String> {
-    let op = inst & 0x7f;
-    let rd = ((inst >> 7) & 31) as usize;
-    let f3 = (inst >> 12) & 7;
-    let rs1 = ((inst >> 15) & 31) as usize;
-    let rs2 = ((inst >> 20) & 31) as usize;
-    let f7 = inst >> 25;
-    let i_imm = ((inst as i32) >> 20) as u32;
-    let mut next = pc + 4;
-    match op {
-        0x13 => {
-            let sh = rs2 as u32;
-            let v = match f3 {
-                0 => x[rs1].wrapping_add(i_imm),
-                1 if f7 == 0 => x[rs1] << sh,
-                4 => x[rs1] ^ i_imm,
-                5 if f7 == 0 => x[rs1] >> sh,
-                5 if f7 == 0x20 => ((x[rs1] as i32) >> sh) as u32,
-                6 => x[rs1] | i_imm,
-                7 => x[rs1] & i_imm,
-                _ => return Err(format!("op-imm {inst:#x}")),
-            };
-            write(x, rd, v);
-        }
-        0x33 => {
-            let a = x[rs1];
-            let b = x[rs2];
-            let v = match (f7, f3) {
-                (0, 0) => a.wrapping_add(b),
-                (0x20, 0) => a.wrapping_sub(b),
-                (0, 1) => a << (b & 31),
-                (0, 3) => u32::from(a < b),
-                (0, 4) => a ^ b,
-                (0, 5) => a >> (b & 31),
-                (0x20, 5) => ((a as i32) >> (b & 31)) as u32,
-                (0, 6) => a | b,
-                (0, 7) => a & b,
-                (1, 0) => a.wrapping_mul(b),
-                (1, 3) => ((u64::from(a) * u64::from(b)) >> 32) as u32,
-                (1, 4) => signed_div(a, b),
-                (1, 5) => {
-                    if b == 0 {
-                        u32::MAX
-                    } else {
-                        a / b
-                    }
-                }
-                (1, 6) => {
-                    if b == 0 {
-                        a
-                    } else {
-                        (a as i32).wrapping_rem(b as i32) as u32
-                    }
-                }
-                (1, 7) => {
-                    if b == 0 {
-                        a
-                    } else {
-                        a % b
-                    }
-                }
-                _ => return Err(format!("op {inst:#x}")),
-            };
-            write(x, rd, v);
-        }
-        0x37 => write(x, rd, inst & !0xfff),
-        0x17 => write(x, rd, (pc as u32).wrapping_add(inst & !0xfff)),
-        0x6f => {
-            let off = j_off(inst);
-            if rd != 0 {
-                write(x, rd, (pc as u32).wrapping_add(4));
-            }
-            next = pc.wrapping_add(off);
-        }
-        0x67 => {
-            let target = x[rs1].wrapping_add(i_imm) & !1;
-            if rd != 0 {
-                write(x, rd, (pc as u32).wrapping_add(4));
-            }
-            if target == SENTINEL {
-                return Ok(SENTINEL as i32);
-            }
-            next = target as i32;
-        }
-        0x63 => {
-            let a = x[rs1];
-            let b = x[rs2];
-            let take = match f3 {
-                0 => a == b,
-                1 => a != b,
-                4 => (a as i32) < (b as i32),
-                5 => (a as i32) >= (b as i32),
-                6 => a < b,
-                7 => a >= b,
-                _ => return Err(format!("branch {inst:#x}")),
-            };
-            if take {
-                next = pc.wrapping_add(b_off(inst));
-            }
-        }
-        0x03 => {
-            let addr = x[rs1].wrapping_add(i_imm);
-            let v = match f3 {
-                0 => i32::from(load(mem, addr, 1)?[0] as i8) as u32,
-                1 => i32::from(u16::from_le_bytes(load(mem, addr, 2)?.try_into().unwrap()) as i16)
-                    as u32,
-                2 => u32::from_le_bytes(load(mem, addr, 4)?.try_into().unwrap()),
-                4 => u32::from(load(mem, addr, 1)?[0]),
-                5 => u32::from(u16::from_le_bytes(load(mem, addr, 2)?.try_into().unwrap())),
-                _ => return Err(format!("load {inst:#x}")),
-            };
-            write(x, rd, v);
-        }
-        0x23 => {
-            let imm = s_off(inst) as u32;
-            let addr = x[rs1].wrapping_add(imm);
-            let v = x[rs2];
-            match f3 {
-                0 => store(mem, addr, &v.to_le_bytes()[..1])?,
-                1 => store(mem, addr, &v.to_le_bytes()[..2])?,
-                2 => store(mem, addr, &v.to_le_bytes())?,
-                _ => return Err(format!("store {inst:#x}")),
-            }
-        }
-        _ => return Err(format!("opcode {inst:#x}")),
-    }
-    x[0] = 0;
-    Ok(next)
-}
-
-fn signed_div(a: u32, b: u32) -> u32 {
-    if b == 0 {
-        return u32::MAX;
-    }
-    if a == 0x8000_0000 && b == 0xffff_ffff {
-        return a;
-    }
-    (a as i32).wrapping_div(b as i32) as u32
-}
-
-fn write(x: &mut [u32; 32], rd: usize, v: u32) {
-    if rd != 0 {
-        x[rd] = v;
-    }
-}
-
-fn load(mem: &[u8], addr: u32, n: usize) -> Result<&[u8], String> {
-    let a = addr as usize;
-    if a + n > mem.len() {
-        return Err(format!("load {addr:#x} len {n}"));
-    }
-    if a % n != 0 {
-        return Err(format!("misaligned load {addr:#x}"));
-    }
-    Ok(&mem[a..a + n])
-}
-
-fn store(mem: &mut [u8], addr: u32, bytes: &[u8]) -> Result<(), String> {
-    let a = addr as usize;
-    if a + bytes.len() > mem.len() {
-        return Err(format!("store {addr:#x}"));
-    }
-    if a % bytes.len() != 0 {
-        return Err(format!("misaligned store {addr:#x}"));
-    }
-    mem[a..a + bytes.len()].copy_from_slice(bytes);
-    Ok(())
-}
-
-fn b_off(inst: u32) -> i32 {
-    let b12 = (inst >> 31) & 1;
-    let b11 = (inst >> 7) & 1;
-    let b10_5 = (inst >> 25) & 0x3f;
-    let b4_1 = (inst >> 8) & 0xf;
-    let imm = (b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1);
-    ((imm << 19) as i32) >> 19
-}
-
-fn j_off(inst: u32) -> i32 {
-    let b20 = (inst >> 31) & 1;
-    let b10_1 = (inst >> 21) & 0x3ff;
-    let b11 = (inst >> 20) & 1;
-    let b19_12 = (inst >> 12) & 0xff;
-    let imm = (b20 << 20) | (b19_12 << 12) | (b11 << 11) | (b10_1 << 1);
-    ((imm << 11) as i32) >> 11
-}
-
-fn s_off(inst: u32) -> i32 {
-    let hi = (inst >> 25) & 0x7f;
-    let lo = (inst >> 7) & 0x1f;
-    let imm = (hi << 5) | lo;
-    ((imm << 20) as i32) >> 20
+    let stop = xpost_jit::run_rv(code, a0, vec![0; MEM], None)?;
+    Ok((stop.a0, stop.a1))
 }
 
 fn alu64(op: u8, src: u8) -> u8 {
@@ -432,4 +219,91 @@ fn rejects_alu64_div() {
     let err = compile(&p, &HashMap::new()).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("alu64 div"), "{msg}");
+}
+
+#[test]
+fn rejects_bad_lddw_and_a_branch_into_it() {
+    let bad = [
+        i(CLASS_LD | SIZE_DW | MODE_IMM, 0, 0, 0, 1),
+        i(alu64(ALU_MOV, SRC_K), 0, 0, 0, 1),
+        i(jmp64(JMP_EXIT, 0), 0, 0, 0, 0),
+    ];
+    let msg = compile(&bad, &HashMap::new()).unwrap_err().to_string();
+    assert!(msg.contains("second word"), "{msg}");
+
+    let into = [
+        i(CLASS_LD | SIZE_DW | MODE_IMM, 1, 0, 0, 1),
+        i(0, 0, 0, 0, 0),
+        i(jmp64(JMP_JA, 0), 0, 0, -2, 0),
+        i(jmp64(JMP_EXIT, 0), 0, 0, 0, 0),
+    ];
+    let msg = compile(&into, &HashMap::new()).unwrap_err().to_string();
+    assert!(msg.contains("second word of lddw"), "{msg}");
+}
+
+#[test]
+fn unknown_alu_and_bad_reg_are_errors() {
+    let bad_op = [
+        i(0xe7, 0, 0, 0, 1),
+        i(jmp64(JMP_EXIT, 0), 0, 0, 0, 0),
+    ];
+    let caught = std::panic::catch_unwind(|| compile(&bad_op, &HashMap::new()));
+    let err = caught.expect("compile panicked").unwrap_err();
+    assert!(err.to_string().contains("unsupported"), "{err}");
+
+    let bad_reg = [
+        i(alu64(ALU_MOV, SRC_K), 15, 0, 0, 1),
+        i(jmp64(JMP_EXIT, 0), 0, 0, 0, 0),
+    ];
+    let msg = compile(&bad_reg, &HashMap::new()).unwrap_err().to_string();
+    assert!(msg.contains("register"), "{msg}");
+}
+
+#[test]
+fn bpf_to_bpf_call_is_refused() {
+    let p = [
+        i(jmp64(JMP_CALL, SRC_X), 0, 1, 0, 1),
+        i(jmp64(JMP_EXIT, 0), 0, 0, 0, 0),
+    ];
+    let msg = compile(&p, &HashMap::new()).unwrap_err().to_string();
+    assert!(msg.contains("bpf-to-bpf"), "{msg}");
+}
+
+/// Clang leaves `src_reg` at 0 on a map `lddw` and names the map only in the
+/// ELF relocation. Keying off `src_reg` alone loaded the constant 0, so the
+/// helper received map 0 and every lookup missed while both engines agreed.
+#[test]
+fn clang_map_lddw_resolves_through_the_relocation() {
+    let mut symbols = HashMap::new();
+    symbols.insert(0u64, "counter".to_string());
+    let p = [
+        i(CLASS_LD | SIZE_DW | MODE_IMM, 1, 0, 0, 0),
+        i(0, 0, 0, 0, 0),
+        i(CLASS_ST | SIZE_W | MODE_MEM, REG_FP, 0, -4, 0),
+        i(alu64(ALU_MOV, SRC_X), 2, REG_FP, 0, 0),
+        i(alu64(ALU_ADD, SRC_K), 2, 0, 0, -4),
+        i(jmp64(JMP_CALL, 0), 0, 0, 0, 1),
+        i(alu64(ALU_MOV, SRC_X), 1, 0, 0, 0),
+        i(alu64(ALU_MOV, SRC_K), 0, 0, 0, 0),
+        i(jmp64(JMP_JEQ, SRC_K), 1, 0, 1, 0),
+        i(alu64(ALU_MOV, SRC_K), 0, 0, 0, 1),
+        i(jmp64(JMP_EXIT, 0), 0, 0, 0, 0),
+    ];
+    let image = compile(&p, &symbols).expect("compile");
+    assert!(
+        image
+            .relocs
+            .iter()
+            .any(|r| r.kind == RelocKind::Lddw && r.symbol.as_deref() == Some("counter")),
+        "the map reference must be recorded as a relocation: {:?}",
+        image.relocs
+    );
+
+    let mut maps = HashMap::new();
+    maps.insert("counter".to_string(), 0x3000u32);
+    let code = link(&image, &LinkIn { helper: HELPER, maps: &maps }).expect("link");
+    let mut mem = vec![0u8; MEM];
+    xpost_jit::write_map(&mut mem, 0x3000, KIND_ARRAY, 4, 8, 256, 0x8000).expect("map descriptor");
+    let stop = xpost_jit::run_rv(&code, 0, mem, Some(HELPER)).expect("run");
+    assert_eq!(stop.a0, 1, "lookup of array slot 0 must return its storage address");
 }

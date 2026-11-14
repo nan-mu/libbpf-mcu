@@ -41,6 +41,43 @@ const BRANCH: u32 = 0x63;
 const LOAD: u32 = 0x03;
 const STORE: u32 = 0x23;
 
+/// Reject anything the ESP32-C3 slot must not receive: RVC halfwords, the F/D
+/// and A extensions, and RV64-only widths. The encoder emits RV32IM by
+/// construction, so this is a gate on the artifact rather than on the encoder.
+pub fn check_rv32im(code: &[u32]) -> Result<(), String> {
+    for (i, &inst) in code.iter().enumerate() {
+        let at = format!("word {i} ({:#x})", i * 4);
+        if inst & 3 != 3 {
+            return Err(format!("{at}: {inst:#010x} is not a 32-bit instruction"));
+        }
+        let funct3 = (inst >> 12) & 7;
+        let funct7 = inst >> 25;
+        match inst & 0x7f {
+            LUI | AUIPC | JAL | JALR | BRANCH => {}
+            LOAD if matches!(funct3, 0 | 1 | 2 | 4 | 5) => {}
+            STORE if matches!(funct3, 0 | 1 | 2) => {}
+            OP if matches!(funct7, 0 | 0x20 | 1) => {}
+            OP_IMM => match funct3 {
+                1 if funct7 != 0 => {
+                    return Err(format!("{at}: slli shamt is not RV32 ({funct7:#x})"));
+                }
+                5 if !matches!(funct7, 0 | 0x20) => {
+                    return Err(format!("{at}: shift funct7 is not RV32 ({funct7:#x})"));
+                }
+                _ => {}
+            },
+            0x0f => {}
+            _ => {
+                return Err(format!(
+                    "{at}: opcode {:#04x} is outside RV32IM",
+                    inst & 0x7f
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn fits_i12(imm: i32) -> bool {
     (-2048..2048).contains(&imm)
 }
@@ -254,16 +291,8 @@ pub fn lbu(rd: u8, imm: i32, rs1: u8) -> u32 {
     i_type(imm, rs1, 4, rd, LOAD)
 }
 
-pub fn lhu(rd: u8, imm: i32, rs1: u8) -> u32 {
-    i_type(imm, rs1, 5, rd, LOAD)
-}
-
 pub fn sb(rs2: u8, imm: i32, rs1: u8) -> u32 {
     s_type(imm, rs2, rs1, 0)
-}
-
-pub fn sh(rs2: u8, imm: i32, rs1: u8) -> u32 {
-    s_type(imm, rs2, rs1, 1)
 }
 
 pub fn sw(rs2: u8, imm: i32, rs1: u8) -> u32 {
@@ -305,10 +334,12 @@ fn sext(val: u32, bits: u32) -> i32 {
     ((val << shift) as i32) >> shift
 }
 
-pub fn disassemble(code: &[u32]) -> String {
+/// Address of word 0 is `base`. Each line is `{addr:08x}: {word:08x} {mnemonic}`.
+pub fn disassemble(code: &[u32], base: u32) -> String {
     let mut out = String::new();
     for (i, inst) in code.iter().copied().enumerate() {
-        out.push_str(&format!("{:04x}: {}\n", i * 4, mnemonic(inst)));
+        let addr = base.wrapping_add((i as u32).wrapping_mul(4));
+        out.push_str(&format!("{addr:08x}: {inst:08x} {}\n", mnemonic(inst)));
     }
     out
 }
@@ -440,6 +471,20 @@ mod tests {
             let word = beq(A0, A1, off);
             assert_eq!(b_off(word), off, "{word:#x}");
         }
+    }
+
+    #[test]
+    fn disassemble_prints_address_word_and_mnemonic() {
+        let nop = addi(ZERO, ZERO, 0);
+        assert_eq!(nop, 0x0000_0013);
+        assert_eq!(
+            disassemble(&[nop], 0),
+            "00000000: 00000013 addi zero, zero, 0\n"
+        );
+        assert_eq!(
+            disassemble(&[nop], 0x4038_0200),
+            "40380200: 00000013 addi zero, zero, 0\n"
+        );
     }
 
     #[test]

@@ -46,6 +46,10 @@ rule pack
     command = @TOOL_BIN@ pack --image $image --bpf-toml $bpf_toml --name $name --slot-address $slot --helper-address $helper --machine $machine $engine_flags -o $out && @PYTHON@ @MAKE@/stamp_elf_size.py --report $report --elf $out
     description = pack $out
 
+rule jit_publish
+    command = @PYTHON@ @MAKE@/jit_publish.py --src $src --obj $obj --bpf-toml $bpf_toml --firmware $firmware --stem $stem --name $name --out-dir $out_dir --tool $tool
+    description = jit $out
+
 @EDGES@
 
 default @DEFAULT@

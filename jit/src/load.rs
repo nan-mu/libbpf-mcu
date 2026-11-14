@@ -64,6 +64,12 @@ fn load_elf(bytes: &[u8], want: Option<&str>) -> Result<Source, LoadError> {
         return Err(LoadError(format!("ELF class {class} is not 32 or 64")));
     }
     let elf64 = class == 2;
+    let machine = u16_at(bytes, 18)?;
+    if machine != 247 {
+        return Err(LoadError(format!(
+            "ELF machine {machine} is not EM_BPF (247)"
+        )));
+    }
     let (shoff, shentsize, shnum, shstrndx) = if elf64 {
         (
             u64_at(bytes, 40)? as usize,
@@ -79,32 +85,60 @@ fn load_elf(bytes: &[u8], want: Option<&str>) -> Result<Source, LoadError> {
             u16_at(bytes, 50)? as usize,
         )
     };
-    if shentsize == 0 || shnum == 0 {
-        return Err(LoadError("ELF has no section headers".into()));
+    let min_shentsize = if elf64 { 64 } else { 40 };
+    if shentsize < min_shentsize || shnum == 0 {
+        return Err(LoadError(format!(
+            "ELF section headers are absent or shorter than {min_shentsize}"
+        )));
+    }
+    if shstrndx >= shnum {
+        return Err(LoadError(format!(
+            "e_shstrndx {shstrndx} is outside {shnum} sections"
+        )));
     }
     let shstr = section_payload(bytes, elf64, shoff, shentsize, shstrndx)?;
     let mut names = Vec::with_capacity(shnum);
-    let mut chosen: Option<usize> = None;
+    let mut named: Option<usize> = None;
+    let mut xdp: Option<usize> = None;
+    let mut fallback: Option<usize> = None;
     for i in 0..shnum {
-        let (name_off, ty, flags, off, size) = shdr(bytes, elf64, shoff, shentsize, i)?;
+        let (name_off, ty, flags, _off, size) = shdr(bytes, elf64, shoff, shentsize, i)?;
         let name = cstr(&shstr, name_off).unwrap_or("").to_string();
         let exec = flags & 4 != 0;
         let progbits = ty == 1;
         if want == Some(name.as_str()) {
-            chosen = Some(i);
-        } else if want.is_none() && chosen.is_none() && progbits && exec {
-            chosen = Some(i);
+            named = Some(i);
+        }
+        // Clang leaves an empty executable `.text` ahead of `xdp` / `xdp1`.
+        // A zero-length section is not a program. Prefer the XDP section.
+        if progbits && exec && size > 0 {
+            if name == "xdp" || name == "xdp1" {
+                if xdp.is_some() {
+                    return Err(LoadError("ELF has more than one xdp section".into()));
+                }
+                xdp = Some(i);
+            } else if fallback.is_none() {
+                fallback = Some(i);
+            }
         }
         names.push(name);
-        let _ = (off, size);
     }
-    let idx = chosen.ok_or_else(|| {
-        LoadError(format!(
-            "no eBPF section (want {}, have {})",
-            want.unwrap_or("<exec PROGBITS>"),
-            names.join(", ")
-        ))
-    })?;
+    let idx = if want.is_some() {
+        named.ok_or_else(|| {
+            LoadError(format!(
+                "no eBPF section (want {}, have {})",
+                want.unwrap_or("<exec PROGBITS>"),
+                names.join(", ")
+            ))
+        })?
+    } else {
+        xdp.or(fallback).ok_or_else(|| {
+            LoadError(format!(
+                "no eBPF section (want <xdp or nonempty exec>, have {})",
+                names.join(", ")
+            ))
+        })?
+    };
     let text = section_payload(bytes, elf64, shoff, shentsize, idx)?;
     let insns = bpf::decode_insns(&text).map_err(LoadError)?;
     let symbols = relocations(bytes, elf64, shoff, shentsize, shnum, idx)?;
@@ -152,6 +186,15 @@ fn relocations(
                 "relocation section size {size} is not a multiple of {ent}"
             )));
         }
+        let end = off.checked_add(size).ok_or_else(|| {
+            LoadError("relocation section end overflows".into())
+        })?;
+        if end > bytes.len() {
+            return Err(LoadError(format!(
+                "relocation section extends to {end}, file is {}",
+                bytes.len()
+            )));
+        }
         let n = size / ent;
         for k in 0..n {
             let at = off + k * ent;
@@ -163,11 +206,16 @@ fn relocations(
                     u64::from(u32_at(bytes, at + 4)?),
                 )
             };
-            let sym_idx = if elf64 {
-                (r_info >> 32) as usize
+            let (sym_idx, r_type) = if elf64 {
+                ((r_info >> 32) as usize, (r_info & 0xffff_ffff) as u32)
             } else {
-                (r_info >> 8) as usize
+                ((r_info >> 8) as usize, (r_info & 0xff) as u32)
             };
+            if r_type != 1 {
+                return Err(LoadError(format!(
+                    "relocation type {r_type} is not R_BPF_64_64"
+                )));
+            }
             if let Some(name) = symbol_name(bytes, elf64, shoff, shentsize, symtab, sym_idx)? {
                 if !name.is_empty() {
                     out.insert(r_off, name);
@@ -191,8 +239,19 @@ fn symbol_name(
         return Ok(None);
     }
     let ent = if elf64 { 24 } else { 16 };
-    let at = off + sym_idx * ent;
-    if at + ent > off + size || at + 4 > bytes.len() {
+    let step = match sym_idx.checked_mul(ent) {
+        Some(step) => step,
+        None => return Ok(None),
+    };
+    let at = match off.checked_add(step) {
+        Some(at) => at,
+        None => return Ok(None),
+    };
+    let sym_end = match at.checked_add(ent) {
+        Some(end) => end,
+        None => return Ok(None),
+    };
+    if sym_end > off + size || at + 4 > bytes.len() {
         return Ok(None);
     }
     let name_off = u32_at(bytes, at)? as usize;
@@ -221,6 +280,31 @@ fn section_payload(
     Ok(bytes[off..end].to_vec())
 }
 
+fn sh_at(
+    bytes: &[u8],
+    shoff: usize,
+    shentsize: usize,
+    idx: usize,
+    min: usize,
+) -> Result<usize, LoadError> {
+    let step = shentsize
+        .checked_mul(idx)
+        .ok_or_else(|| LoadError("section header index overflows".into()))?;
+    let at = shoff
+        .checked_add(step)
+        .ok_or_else(|| LoadError("section header offset overflows".into()))?;
+    let end = at
+        .checked_add(min)
+        .ok_or_else(|| LoadError("section header end overflows".into()))?;
+    if end > bytes.len() {
+        return Err(LoadError(format!(
+            "section header {idx} extends to {end}, file is {}",
+            bytes.len()
+        )));
+    }
+    Ok(at)
+}
+
 fn shdr(
     bytes: &[u8],
     elf64: bool,
@@ -228,7 +312,7 @@ fn shdr(
     shentsize: usize,
     idx: usize,
 ) -> Result<(usize, u32, u64, usize, usize), LoadError> {
-    let at = shoff + idx * shentsize;
+    let at = sh_at(bytes, shoff, shentsize, idx, if elf64 { 64 } else { 40 })?;
     if elf64 {
         Ok((
             u32_at(bytes, at)? as usize,
@@ -255,7 +339,7 @@ fn sh_link(
     shentsize: usize,
     idx: usize,
 ) -> Result<u32, LoadError> {
-    let at = shoff + idx * shentsize;
+    let at = sh_at(bytes, shoff, shentsize, idx, if elf64 { 44 } else { 28 })?;
     if elf64 {
         u32_at(bytes, at + 40)
     } else {
@@ -270,7 +354,7 @@ fn sh_info(
     shentsize: usize,
     idx: usize,
 ) -> Result<u32, LoadError> {
-    let at = shoff + idx * shentsize;
+    let at = sh_at(bytes, shoff, shentsize, idx, if elf64 { 48 } else { 32 })?;
     if elf64 {
         u32_at(bytes, at + 44)
     } else {

@@ -1,0 +1,20 @@
+[package]
+name = "xpost-jit-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Differential test of xpost-jit against the independent rbpf interpreter"
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+xpost-jit = { path = ".." }
+# The sibling symlink lives one level above the worktree, so three ".." from
+# this manifest reach it. "../../xpost" does not resolve.
+rbpf = { path = "../../../xpost/rbpf", features = ["mcu"] }
+
+[profile.test]
+opt-level = 2

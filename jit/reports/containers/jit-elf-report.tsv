@@ -1,0 +1,9 @@
+program	prevail	elf	image_bytes	container_bytes	detail
+div2	pass	pass	556	852	name=div2 slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=556 image_len=556 container_bytes=852 relocs=0 maps=[]
+xdp_drop	pass	pass	580	912	name=xdp_drop slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=564 image_len=580 container_bytes=912 relocs=2 maps=[("blocklist", 1077412916)]
+case_mark	pass	pass	2544	2872	name=case_mark slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=2528 image_len=2544 container_bytes=2872 relocs=2 maps=[("rxcnt", 1077414880)]
+just_drop	pass	pass	1028	1356	name=just_drop slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=1012 image_len=1028 container_bytes=1356 relocs=2 maps=[("counter", 1077413364)]
+just_tx	pass	pass	1768	2092	name=just_tx slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=1752 image_len=1768 container_bytes=2092 relocs=2 maps=[("rxcnt", 1077414104)]
+firewall	pass	pass	684	1016	name=firewall slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=668 image_len=684 container_bytes=1016 relocs=2 maps=[("blacklist", 1077413020)]
+bitswap	pass	pass	1268	1604	name=bitswap slot=0x40380200 slot_len=3584 helper=0x40380000 code_bytes=1252 image_len=1268 container_bytes=1604 relocs=0 maps=[("workload", 1077413604)]
+bsort	pass	fail	-	-	xpost-mcu-elf: image is 12956 bytes but slot 0x40380200 holds 3584; refusing to truncate

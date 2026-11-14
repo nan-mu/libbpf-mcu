@@ -19,7 +19,7 @@ use xpost_jit::{compile, disassemble, load_bpf};
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("xpost-jit: {e}");
             ExitCode::from(1)
@@ -27,9 +27,16 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<u8, String> {
     let mut args = env::args().skip(1);
     let cmd = args.next().ok_or_else(usage)?;
+    if cmd == "matrix" {
+        print!("{}", xpost_jit::support_json());
+        return Ok(0);
+    }
+    if cmd == "check" {
+        return check_cmd(args);
+    }
     if cmd != "compile" {
         return Err(usage());
     }
@@ -109,14 +116,68 @@ fn run() -> Result<(), String> {
         max
     );
     if disasm {
-        print!("{}", disassemble(&image.code));
+        print!("{}", disassemble(&image.code, 0));
     }
     fs::write(&output, image.bytes()).map_err(|e| format!("write {}: {e}", output.display()))?;
     let reloc = output.with_extension("reloc");
     fs::write(&reloc, image.reloc_text()).map_err(|e| format!("write {}: {e}", reloc.display()))?;
-    Ok(())
+    Ok(0)
+}
+
+fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
+    let mut input: Option<PathBuf> = None;
+    let mut section: Option<String> = None;
+    let mut packet = vec![0u8; 64];
+    let mut rest = args.peekable();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--section" => {
+                section = Some(rest.next().ok_or_else(|| "missing value for --section".to_string())?);
+            }
+            "--packet" => {
+                let hex = rest.next().ok_or_else(|| "missing value for --packet".to_string())?;
+                packet = parse_hex(&hex)?;
+            }
+            other if other.starts_with('-') => return Err(format!("unknown flag {other}")),
+            other => {
+                if input.is_some() {
+                    return Err(format!("unexpected argument {other}"));
+                }
+                input = Some(PathBuf::from(other));
+            }
+        }
+    }
+    let input = input.ok_or_else(|| "missing input path".to_string())?;
+    let src = load_bpf(&input, section.as_deref()).map_err(|e| e.to_string())?;
+    let report = xpost_jit::check_packet(&src.insns, &src.symbols, &packet);
+    println!(
+        "status={} section={} bpf_insns={} rv_bytes={} relocs={} r0={} detail={}",
+        report.status,
+        src.section,
+        src.insns.len(),
+        report.rv_bytes,
+        report.relocs,
+        report.r0.map(|v| format!("{v:#x}")).unwrap_or_else(|| "-".into()),
+        report.detail
+    );
+    match report.status {
+        "pass" => Ok(0),
+        "unsupported" | "inconclusive" => Ok(2),
+        _ => Ok(1),
+    }
+}
+
+fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
+    let text: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if text.len() % 2 != 0 {
+        return Err("packet hex has an odd length".into());
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
 }
 
 fn usage() -> String {
-    "usage: xpost-jit compile <in> -o <out.rv32> [--section name] [--repeat n] [--disasm]".into()
+    "usage: xpost-jit compile <in> -o <out.rv32> [--section name] [--repeat n] [--disasm]\n       xpost-jit check <bpf.o> [--section name] [--packet hex]\n       xpost-jit matrix".into()
 }
