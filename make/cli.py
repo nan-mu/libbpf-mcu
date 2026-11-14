@@ -218,6 +218,7 @@ def main():
             [sys.executable, str(Path(__file__).parent / "test_xpost_elf.py")],
             [sys.executable, str(Path(__file__).parent / "test_xpost_mem.py")],
             [sys.executable, str(Path(__file__).parent / "test_compact_elf_parity.py")],
+            [sys.executable, str(Path(__file__).parent / "test_jit_build.py")],
         ]
         for cmd in tests:
             info(f"→ {' '.join(cmd)}")
