@@ -1,5 +1,3 @@
-"""Publish one JIT stem. The only writer of the four public files."""
-
 from __future__ import annotations
 
 import argparse
@@ -14,11 +12,6 @@ from prevail_gate import ProgramRef, examine, write_stamp
 
 @dataclass(frozen=True)
 class JitDeliverables:
-    """Reviewer-facing files for one stem. The only writer is commit().
-
-    bpf.o and bpf.toml are not members. A rejected object may keep them.
-    """
-
     jit_bin: Path
     jit_toml: Path
     container: Path
@@ -35,16 +28,15 @@ class JitDeliverables:
         )
 
     def outputs(self) -> tuple[Path, Path, Path, Path]:
-        """The ninja output list. Derived from this object, not a second tuple."""
         return (self.jit_bin, self.jit_toml, self.container, self.stamp)
 
     def retract(self) -> None:
-        """Unlink all four. Idempotent. Does not touch bpf.o or bpf.toml."""
         for path in self.outputs():
             path.unlink(missing_ok=True)
 
     def commit(self, stage: Path, program: ProgramRef, obj: Path) -> None:
-        """Rename the stage onto the public paths. The stamp is last."""
+        # The stamp is written after the three files. A stamp with no image
+        # would look like this build succeeded.
         if stage.name != ".jit-stage":
             _die(f"refusing to publish from {stage}")
         try:
@@ -67,11 +59,6 @@ def publish(
     out_dir: Path,
     tool: Path,
 ) -> None:
-    """Retract, examine, pack into `.jit-stage`, then commit.
-
-    PREVAIL and the packer leave jit.bin, jit.toml, the container, and
-    prevail.ok absent. bpf.o and bpf.toml may remain.
-    """
     deliver = JitDeliverables.for_stem(out_dir.parent, stem, name)
     if deliver.jit_bin.parent.resolve() != out_dir.resolve():
         _die(f"deliverables for {stem} are not in {out_dir}")

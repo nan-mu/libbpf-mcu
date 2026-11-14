@@ -3,9 +3,6 @@
 //! The device does no relocation and parses no sections: it copies one flat span
 //! to the slot and jumps to its base. So every address is closed here, and the
 //! map placeholders live inside that span at the addresses the code uses.
-//!
-//! `LinkedImage` owns the linked words. `JitArtifact::write_stage` is the only
-//! writer, and it writes only inside a directory named `.jit-stage`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -159,7 +156,7 @@ impl JitArtifact {
             .enumerate()
             .map(|(i, n)| (n.clone(), 0x1000 + i as u32 * MAP_PLACEHOLDER))
             .collect();
-        let probe_doc = with_vmas(&text, &provisional)?;
+        let probe_doc = without_aot_addr(&text, &provisional)?;
         let probe_text = toml::to_string(&probe_doc).context("serialize map probe")?;
         let probe = metadata_from_toml_text(&probe_text, "bpf.toml", name, slot, helper, 1)?;
         let eligible: Vec<String> = probe
@@ -229,7 +226,7 @@ impl JitArtifact {
             );
         }
 
-        let maps_doc = with_vmas(&text, &vmas)?;
+        let maps_doc = without_aot_addr(&text, &vmas)?;
         let meta_text = toml::to_string(&maps_doc).context("serialize map metadata")?;
         let meta = metadata_from_toml_text(&meta_text, "bpf.toml", name, slot, helper, 1)?;
         let blob = build_container(&bytes, &meta, Some(slot_len))
@@ -390,7 +387,9 @@ fn map_names(text: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn with_vmas(text: &str, vmas: &HashMap<String, u32>) -> Result<Value> {
+// A JIT VMR is not the AOT link address. map_descriptor bails when both are set
+// and they differ, so the AOT address has to go before the VMR is written.
+fn without_aot_addr(text: &str, vmas: &HashMap<String, u32>) -> Result<Value> {
     let mut root: Value = toml::from_str(text).context("parse bpf.toml")?;
     if let Some(Value::Table(maps)) = root.get_mut("maps") {
         for (name, item) in maps.iter_mut() {

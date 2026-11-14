@@ -143,9 +143,7 @@ def main():
             if args.firmware is None:
                 error("jit 需要 --firmware <firmware.elf>（含 .xpost.mem / XPM1）")
                 sys.exit(1)
-        elif args.firmware is not None and normalized == "bpf":
-            pass
-        elif args.firmware is not None and normalized not in (None, "esp32c3"):
+        elif args.firmware is not None and normalized not in (None, "bpf", "esp32c3"):
             print(
                 f"error: --firmware 仅用于 bpf/esp32c3 全量或 esp32c3，不能与 target={target} 一起用",
                 file=sys.stderr,

@@ -105,8 +105,7 @@ def write_stamp(stamp: Path, obj: Path, program: ProgramRef) -> None:
     os.replace(tmp, stamp)
 
 
-def accept(obj: Path, stamp: Path) -> None:
-    """AOT rule only. Unlink, examine, write_stamp."""
+def stamp_aot(obj: Path, stamp: Path) -> None:
     stamp.unlink(missing_ok=True)
     write_stamp(stamp, obj, examine(obj))
 
@@ -116,7 +115,7 @@ def main() -> None:
     parser.add_argument("--obj", type=Path, required=True)
     parser.add_argument("--stamp", type=Path, required=True)
     args = parser.parse_args()
-    accept(args.obj, args.stamp)
+    stamp_aot(args.obj, args.stamp)
 
 
 if __name__ == "__main__":
