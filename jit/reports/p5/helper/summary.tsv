@@ -1,4 +1,0 @@
-arm	n	min_us	median_us	max_us	diag_bench_ns	counters_ok	output_match
-aot	100	85	100.0	183	33576	True	True
-jit	100	90	105.0	188	38626	True	True
-rbpf	100	461	496.0	634	122486	False	True

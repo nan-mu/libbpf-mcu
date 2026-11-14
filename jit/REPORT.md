@@ -127,15 +127,13 @@ than inferred.
 
 ```sh
 # Host: C -> eBPF -> PREVAIL -> RV32IM -> Compact ELF V0
-CLANG=/opt/homebrew/opt/llvm/bin/clang \
-OBJDUMP=/opt/homebrew/opt/llvm/bin/llvm-objdump \
-FIRMWARE=<firmware.elf> sh jit/scripts/build-elf.sh
+pixi run build jit
 
 # Independent differential oracle
 cargo test --manifest-path jit/oracle/Cargo.toml --release
 
 # Device RX
-python3 jit/scripts/p4_drive.py run jit_just_drop just_drop --packets 30
+pixi run build jit
 ```
 
 `pack-jit` reads the firmware's `.xpost.mem`, links at the slot base, places map
