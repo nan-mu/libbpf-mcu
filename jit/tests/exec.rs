@@ -21,7 +21,7 @@ fn i(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> Insn {
 
 fn run(insns: &[Insn], a0: u32) -> Result<(u32, u32), String> {
     let image = compile(insns, &HashMap::new()).map_err(|e| e.to_string())?;
-    exec(&image.code, a0).map_err(|e| format!("{e}\n{}", disassemble(&image.code)))
+    exec(&image.code, a0).map_err(|e| format!("{e}\n{}", disassemble(&image.code, 0)))
 }
 
 fn exec(code: &[u32], a0: u32) -> Result<(u32, u32), String> {

@@ -334,10 +334,12 @@ fn sext(val: u32, bits: u32) -> i32 {
     ((val << shift) as i32) >> shift
 }
 
-pub fn disassemble(code: &[u32]) -> String {
+/// Address of word 0 is `base`. Each line is `{addr:08x}: {word:08x} {mnemonic}`.
+pub fn disassemble(code: &[u32], base: u32) -> String {
     let mut out = String::new();
     for (i, inst) in code.iter().copied().enumerate() {
-        out.push_str(&format!("{:04x}: {}\n", i * 4, mnemonic(inst)));
+        let addr = base.wrapping_add((i as u32).wrapping_mul(4));
+        out.push_str(&format!("{addr:08x}: {inst:08x} {}\n", mnemonic(inst)));
     }
     out
 }
@@ -469,6 +471,20 @@ mod tests {
             let word = beq(A0, A1, off);
             assert_eq!(b_off(word), off, "{word:#x}");
         }
+    }
+
+    #[test]
+    fn disassemble_prints_address_word_and_mnemonic() {
+        let nop = addi(ZERO, ZERO, 0);
+        assert_eq!(nop, 0x0000_0013);
+        assert_eq!(
+            disassemble(&[nop], 0),
+            "00000000: 00000013 addi zero, zero, 0\n"
+        );
+        assert_eq!(
+            disassemble(&[nop], 0x4038_0200),
+            "40380200: 00000013 addi zero, zero, 0\n"
+        );
     }
 
     #[test]

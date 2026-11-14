@@ -37,7 +37,7 @@ fn main() {
     println!("maps: {maps:?}");
     let code = xpost_jit::link(&image, &xpost_jit::LinkIn { helper: xpost_jit::HELPER, maps: &maps }).unwrap();
     println!("--- linked RV32 ({} words) ---", code.len());
-    for (i, line) in xpost_jit::disassemble(&code).lines().enumerate() {
+    for (i, line) in xpost_jit::disassemble(&code, 0).lines().enumerate() {
         println!("{i:4} {line}");
     }
     let o = run::check_program(&src.insns, &src.symbols, &packet);

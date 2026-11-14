@@ -116,7 +116,7 @@ fn run() -> Result<u8, String> {
         max
     );
     if disasm {
-        print!("{}", disassemble(&image.code));
+        print!("{}", disassemble(&image.code, 0));
     }
     fs::write(&output, image.bytes()).map_err(|e| format!("write {}: {e}", output.display()))?;
     let reloc = output.with_extension("reloc");
