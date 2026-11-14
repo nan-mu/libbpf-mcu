@@ -23,11 +23,18 @@ pub enum RelocKind {
 }
 
 impl RelocKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             RelocKind::Call => "call",
             RelocKind::Func => "func",
             RelocKind::Lddw => "lddw",
+        }
+    }
+
+    pub fn patch_words(self) -> usize {
+        match self {
+            RelocKind::Call | RelocKind::Func => 2,
+            RelocKind::Lddw => 4,
         }
     }
 }
