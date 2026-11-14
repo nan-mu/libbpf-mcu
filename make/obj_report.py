@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from prevail_gate import published_path
+
 SECTION_LINE = re.compile(
     r"^\s*(\d+)\s+(\S+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s*(.*?)\s*$"
 )
@@ -327,7 +329,7 @@ def main() -> None:
 
     write_report(
         obj=obj,
-        source=args.src.resolve(),
+        source=published_path(args.src),
         out=out,
         objdump=objdump,
         with_content=not args.no_content,

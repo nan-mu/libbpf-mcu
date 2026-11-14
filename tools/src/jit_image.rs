@@ -116,6 +116,7 @@ struct JitReport {
     maps: Vec<MapRecord>,
     jit_bin_sha256: [u8; 32],
     container_sha256: [u8; 32],
+    bpf_o_sha256: [u8; 32],
 }
 
 /// Content of one successful pack, before any public path exists.
@@ -145,6 +146,8 @@ impl JitArtifact {
             .map_err(|e| anyhow::anyhow!("decode {SECTION_NAME}: {e:?}"))?;
         let (slot, slot_len, helper) = (mem.slot_addr, mem.slot_len, mem.helper_addr);
 
+        let obj_bytes = fs::read(obj).with_context(|| format!("read {}", obj.display()))?;
+        let bpf_o_sha256 = sha256(&obj_bytes);
         let loaded = load_bpf(obj, None).map_err(|e| anyhow::anyhow!("{e}"))?;
         let image = compile(&loaded.insns, &loaded.symbols).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -300,6 +303,7 @@ impl JitArtifact {
             maps,
             jit_bin_sha256: sha256(&bytes),
             container_sha256: sha256(&container),
+            bpf_o_sha256,
         };
         Ok(JitArtifact {
             image: linked,
@@ -414,11 +418,46 @@ fn serialize_toml(maps_doc: &Value, report: &JitReport) -> Result<String> {
     toml::to_string(&root).context("serialize jit toml")
 }
 
+/// A published report is copied off this machine. A repo file stays relative
+/// to the repo root. A file outside the repo is only its name.
+fn published_path(path: &Path) -> String {
+    if !path.is_absolute() {
+        return path.to_string_lossy().replace('\\', "/");
+    }
+    if let Some(rel) = repo_relative(path) {
+        return rel;
+    }
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".to_string())
+}
+
+fn repo_relative(path: &Path) -> Option<String> {
+    let mut dir = path.parent()?.to_path_buf();
+    loop {
+        if dir.join("pixi.toml").is_file() {
+            let rel = path.strip_prefix(&dir).ok()?;
+            let text = rel
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if text.is_empty() {
+                return None;
+            }
+            return Some(text);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
 fn jit_table(report: &JitReport) -> Value {
     let mut table = toml::map::Map::new();
     table.insert(
         "source".into(),
-        Value::String(report.source.display().to_string()),
+        Value::String(published_path(&report.source)),
     );
     table.insert("section".into(), Value::String(report.section.clone()));
     table.insert("isa".into(), Value::String(report.isa.to_string()));
@@ -456,6 +495,10 @@ fn jit_table(report: &JitReport) -> Value {
     table.insert(
         "container_sha256".into(),
         Value::String(hex_bytes(&report.container_sha256)),
+    );
+    table.insert(
+        "bpf_o_sha256".into(),
+        Value::String(hex_bytes(&report.bpf_o_sha256)),
     );
     table.insert(
         "disassembly".into(),
@@ -549,6 +592,7 @@ mod tests {
             maps: Vec::new(),
             jit_bin_sha256: hash,
             container_sha256: sha256(&[]),
+            bpf_o_sha256: sha256(&[]),
         };
         JitArtifact {
             image,

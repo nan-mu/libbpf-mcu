@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import shutil
 import struct
 import subprocess
@@ -22,6 +24,7 @@ from xpost_mem import MAGIC, WIRE_SIZE  # noqa: E402
 HELPER = 0x40380000
 SLOT = 0x40380200
 SLOT_LEN = 0xE00
+_ABSOLUTE = re.compile(r"(?:^|[=\s\"'])(/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+)")
 
 
 def xpm1_record() -> bytes:
@@ -247,6 +250,26 @@ class JitBuildTests(unittest.TestCase):
         text = (self.rbpf_dir / ".ninja" / "build.ninja").read_text()
         self.assertIn("--map-index", text)
         self.assertNotIn(": jit_publish ", text)
+
+    def test_reports_omit_absolute_paths_and_hash_bpf_o(self) -> None:
+        deliver = JitDeliverables.for_stem(self.jit_dir, "firewall", "firewall")
+        bpf_o = self.jit_dir / "firewall" / "bpf.o"
+        bpf_toml = bpf_o.with_suffix(".toml")
+        texts = {
+            "jit.toml": deliver.jit_toml.read_text(),
+            "prevail.ok": deliver.stamp.read_text(),
+            "bpf.toml": bpf_toml.read_text(),
+        }
+        for name, text in texts.items():
+            match = _ABSOLUTE.search(text)
+            self.assertIsNone(match, f"{name} contains {match.group(0) if match else ''}")
+        self.assertIn("bpf_o=bpf.o\n", texts["prevail.ok"])
+        digest = hashlib.sha256(bpf_o.read_bytes()).hexdigest()
+        doc = tomllib.loads(texts["jit.toml"])
+        self.assertEqual(doc["jit"]["bpf_o_sha256"], digest)
+        self.assertEqual(doc["jit"]["source"], "tests/xdp/firewall.c")
+        bpf_doc = tomllib.loads(texts["bpf.toml"])
+        self.assertEqual(bpf_doc["source"], "tests/xdp/firewall.c")
 
 
 if __name__ == "__main__":
