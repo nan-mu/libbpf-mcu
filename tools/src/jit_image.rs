@@ -273,7 +273,7 @@ impl JitArtifact {
             bail!("container binds {got:#x?} but the code references {want:#x?}");
         }
 
-        let relocs = reloc_records(&image.relocs, linked.words(), helper, &vmas)?;
+        let relocs = reloc_records(&image.relocs, linked.words(), linked.helper, &vmas)?;
         let maps = eligible
             .iter()
             .enumerate()
@@ -293,12 +293,12 @@ impl JitArtifact {
             ebpf_insns: u32::try_from(loaded.insns.len()).context("eBPF program is too long")?,
             rv_insns: u32::try_from(linked.words().len()).context("RV program is too long")?,
             code_len: linked.code_len(),
-            slot,
-            helper,
+            slot: linked.slot,
+            helper: linked.helper,
             image_len,
             container_len: u32::try_from(container.len()).context("container is too long")?,
             frame_size: frame_bytes(),
-            disassembly: disassemble(linked.words(), slot),
+            disassembly: disassemble(linked.words(), linked.slot),
             relocs,
             maps,
             jit_bin_sha256: sha256(&bytes),
