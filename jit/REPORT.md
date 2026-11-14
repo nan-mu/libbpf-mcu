@@ -21,10 +21,10 @@ RX stimulus: UDP from this Mac (`192.168.110.96`) to the board (`192.168.110.106
 | JIT unit + integration | `cargo test --release` in `jit/` | 34 pass (5 lib, 11 diff, 18 exec), 0 fail |
 | C→eBPF→JIT check | `jit/scripts/check-xdp.sh` | 8 programs, PREVAIL pass, 8 JIT pass |
 | Independent oracle | `cargo test --manifest-path jit/oracle/Cargo.toml --release` | 8727 cases: 8199 pass, 27 failures, 501 unsupported, 0 inconclusive. **111 of these are engine-vs-engine disagreements** (27 failures + 84 inside unsupported), all attributed to rbpf and spec-confirmed in §3 |
-| C→eBPF→JIT→ELF V0 | `jit/scripts/build-elf.sh` | 7 containers accepted, `bsort` refused over capacity |
-| Device RX (P4) | `jit/scripts/p4_drive.py` | 6 programs × AOT control + JIT, all OBSERVED, safety counters clean |
-| Device hot-switch | `jit/scripts/p4_switch.py` | 2 switches, `ok=1 rollback=0 severe=0` |
-| Device perf (P5) | `jit/scripts/p5_drive.py matrix` | 80 matrix records, 0 errors, every output byte-correct |
+| C→eBPF→JIT→ELF V0 | `pixi run build jit -c <stem> --firmware <elf>` | host build; see `make/test_jit_build.py` |
+| Device RX (P4) | removed with `jit/scripts/p4_drive.py` | not reproducible from this tree |
+| Device hot-switch | removed with `jit/scripts/p4_switch.py` | not reproducible from this tree |
+| Device perf (P5) | removed with `jit/scripts/p5_drive.py` | not reproducible from this tree |
 
 The oracle suite is **red by design**: 27 cases diverge and are attributed, not hidden.
 See section 3.
@@ -127,14 +127,13 @@ than inferred.
 
 ```sh
 # Host: C -> eBPF -> PREVAIL -> RV32IM -> Compact ELF V0
-pixi run build jit
+pixi run build jit -c firewall --firmware <firmware.elf>
 
 # Independent differential oracle
 cargo test --manifest-path jit/oracle/Cargo.toml --release
-
-# Device RX
-pixi run build jit
 ```
+
+Device RX, hot-switch, and the perf matrix are not commands in this tree. Their scripts and report files were removed. `pixi run build jit` does not talk to a board.
 
 `pack-jit` reads the firmware's `.xpost.mem`, links at the slot base, places map
 placeholders inside the flat image, and encodes with `xpost_elf::build_container`. It then
@@ -180,7 +179,7 @@ establishes the packer is deterministic. The readback is what ties the board to 
 activated 0→1, staged JIT `case_mark` into slot 0, activated 1→0. Both switches
 `ok=1 rollback=0 severe=0`. This proves the JIT image participates in the existing
 lease/stage/activate state machine. It does **not** prove a packet executed correctly
-through a slot after a switch: `p4_switch.py` sends no stimulus, and all four steps complete
+through a slot after a switch: the removed `p4_switch.py` sent no stimulus, and all four steps completed
 inside 103 ms of control-plane traffic. Post-switch datapath execution is **not verified**,
 which matters because F7 shows the cold sibling of this path is broken for interpreter images.
 
