@@ -418,8 +418,6 @@ fn serialize_toml(maps_doc: &Value, report: &JitReport) -> Result<String> {
     toml::to_string(&root).context("serialize jit toml")
 }
 
-/// A published report is copied off this machine. A repo file stays relative
-/// to the repo root. A file outside the repo is only its name.
 fn published_path(path: &Path) -> String {
     if !path.is_absolute() {
         return path.to_string_lossy().replace('\\', "/");

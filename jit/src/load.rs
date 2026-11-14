@@ -370,7 +370,6 @@ fn require_symbol(
             "symbol name offset {name_off} is outside the string table"
         )));
     }
-    // `cstr` keeps a tail that has no NUL. A symbol name has to end inside this table.
     let tail = &strings[name_off..];
     let Some(end) = tail.iter().position(|b| *b == 0) else {
         return Err(LoadError("symbol name is not NUL-terminated".into()));

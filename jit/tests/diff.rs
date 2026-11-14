@@ -225,8 +225,6 @@ fn alu32_bswap_widths() {
             run(&prog);
         }
     }
-    // The 64-bit swap must not truncate. lddw takes the low word first, so
-    // 0x1234_5678_9abc_def0 reverses to 0xf0de_bc9a_7856_3412.
     let prog = [
         insn(
             CLASS_LD | SIZE_DW | MODE_IMM,

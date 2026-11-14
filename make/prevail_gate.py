@@ -94,11 +94,6 @@ def examine(obj: Path) -> ProgramRef:
 
 
 def published_path(path: Path) -> str:
-    """Text for a path that ships in a report. Never a machine absolute path.
-
-    A path already inside this repo stays relative to the repo root. Anything
-    else, including a file in the build directory, is the file name only.
-    """
     path = Path(path)
     if not path.is_absolute():
         return path.as_posix()
@@ -109,7 +104,6 @@ def published_path(path: Path) -> str:
 
 
 def write_stamp(stamp: Path, obj: Path, program: ProgramRef) -> None:
-    """Write the witness. Temp file, then os.replace."""
     body = (
         f"section={program.section}\n"
         f"function={program.function}\n"

@@ -1477,8 +1477,6 @@ fn patch_call(code: &mut [u32], rv_off: u32, helper: u32) -> Result<(), JitError
 
 fn patch_lddw(code: &mut [u32], rv_off: u32, addr: u32) -> Result<(), JitError> {
     let at = word_at(code, rv_off, 4)?;
-    // The unlinked sequence is lui/addi for the low half, then the same pair
-    // for the high half, each addi reading the register its lui wrote.
     let shape = [
         ((code[at] & 0x7f) as u8, ((code[at] >> 7) & 31) as u8),
         (
