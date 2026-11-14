@@ -394,6 +394,8 @@ fn u64_at(bytes: &[u8], at: usize) -> Result<u64, LoadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::{compile, RelocKind};
+    use std::collections::HashMap;
 
     #[test]
     fn reads_exec_section_and_symbol() {
@@ -403,6 +405,479 @@ mod tests {
         assert_eq!(src.insns.len(), 1);
         assert_eq!(src.insns[0].imm, 1);
         assert_eq!(src.symbols.get(&0).map(String::as_str), Some("map_counter"));
+    }
+
+    #[test]
+    fn constant_lddw_without_reloc_emits_immediates() {
+        let spec = lddw_spec();
+        let src = load_elf(&elf_with(&spec), None).unwrap();
+        assert!(src.symbols.is_empty());
+        assert_eq!(src.insns[0].imm, 0x1111_1111);
+        assert_eq!(src.insns[1].imm, 0x2222_2222);
+        let image = compile(&src.insns, &src.symbols).unwrap();
+        assert!(image.relocs.iter().all(|r| r.kind != RelocKind::Lddw));
+        let bare = compile(&src.insns, &HashMap::new()).unwrap();
+        assert_eq!(image.code, bare.code);
+    }
+
+    #[test]
+    fn map_lddw_src0_keeps_name_and_placeholder() {
+        let mut spec = lddw_spec();
+        spec.prog = prog_recs(vec![rec(0, 1, 1)]);
+        let src = load_elf(&elf_with(&spec), None).unwrap();
+        assert_eq!(src.symbols.get(&0).map(String::as_str), Some("map_counter"));
+        let image = compile(&src.insns, &src.symbols).unwrap();
+        let lddw: Vec<_> = image
+            .relocs
+            .iter()
+            .filter(|r| r.kind == RelocKind::Lddw)
+            .collect();
+        assert_eq!(lddw.len(), 1);
+        assert_eq!(lddw[0].symbol.as_deref(), Some("map_counter"));
+        let bare = compile(&src.insns, &HashMap::new()).unwrap();
+        assert_ne!(image.code, bare.code);
+    }
+
+    #[test]
+    fn symbol_index_out_of_range_is_err() {
+        let mut spec = lddw_spec();
+        spec.prog = prog_recs(vec![rec(0, 99, 1)]);
+        assert_loader_err(&elf_with(&spec), "symbol index");
+    }
+
+    #[test]
+    fn symbol_table_link_must_be_a_symtab() {
+        let mut spec = lddw_spec();
+        spec.prog = prog_recs(vec![rec(0, 1, 1)]);
+        spec.symtab_type = 1;
+        assert_loader_err(&elf_with(&spec), "sh_link type");
+
+        spec.symtab_type = 2;
+        spec.prog = Some(ProgRel {
+            recs: vec![rec(0, 1, 1)],
+            info: None,
+            link: Some(99),
+        });
+        assert_loader_err(&elf_with(&spec), "sh_link index");
+    }
+
+    #[test]
+    fn string_table_must_yield_a_name() {
+        let cases: &[(&[u8], u32, &str)] = &[
+            (b"\0map\0", 100, "st_name past the string table"),
+            (b"map_counter", 0, "no NUL"),
+            (b"\0\xff\0", 1, "not UTF-8"),
+            (b"\0", 0, "empty name"),
+        ];
+        for (strtab, st_name, case) in cases {
+            let mut spec = lddw_spec();
+            spec.names.clear();
+            spec.strtab = Some(strtab.to_vec());
+            spec.st_name = Some(*st_name);
+            spec.prog = prog_recs(vec![rec(0, 1, 1)]);
+            assert_loader_err(&elf_with(&spec), case);
+        }
+    }
+
+    #[test]
+    fn reloc_offset_past_program_is_err() {
+        let mut spec = lddw_spec();
+        spec.prog = prog_recs(vec![rec(16, 1, 1)]);
+        assert_loader_err(&elf_with(&spec), "offset past program");
+    }
+
+    #[test]
+    fn reloc_offset_unaligned_is_err() {
+        let mut spec = lddw_spec();
+        spec.prog = prog_recs(vec![rec(4, 1, 1)]);
+        assert_loader_err(&elf_with(&spec), "unaligned offset");
+    }
+
+    #[test]
+    fn reloc_on_second_lddw_word_is_err() {
+        let mut spec = lddw_spec();
+        spec.prog = prog_recs(vec![rec(8, 1, 1)]);
+        assert_loader_err(&elf_with(&spec), "second lddw word");
+    }
+
+    #[test]
+    fn second_reloc_at_the_same_offset_is_err() {
+        let mut spec = lddw_spec();
+        spec.prog = prog_recs(vec![rec(0, 1, 1), rec(0, 1, 1)]);
+        assert_loader_err(&elf_with(&spec), "same name");
+
+        spec.names = vec![b"one".to_vec(), b"two".to_vec()];
+        spec.prog = prog_recs(vec![rec(0, 1, 1), rec(0, 2, 1)]);
+        assert_loader_err(&elf_with(&spec), "different names");
+    }
+
+    #[test]
+    fn unsupported_type_on_the_program_is_err() {
+        let mut spec = lddw_spec();
+        spec.prog = prog_recs(vec![rec(0, 1, 2)]);
+        assert_loader_err(&elf_with(&spec), "r_type");
+    }
+
+    #[test]
+    fn bad_map_reloc_does_not_become_immediates() {
+        let mut spec = lddw_spec();
+        spec.prog = prog_recs(vec![rec(0, 99, 1)]);
+        assert_loader_err(&elf_with(&spec), "bad map reloc");
+    }
+
+    #[test]
+    fn other_section_keeps_foreign_reloc_types() {
+        let mut spec = lddw_spec();
+        spec.foreign = Some(ForeignRel {
+            recs: vec![rec(0, 1, 2), rec(0, 1, 3), rec(0, 1, 4)],
+            size: None,
+            info: None,
+        });
+        let src = load_elf(&elf_with(&spec), None).unwrap();
+        assert_eq!(src.section, "xdp");
+        assert!(src.symbols.is_empty());
+        assert_eq!(src.insns[0].imm, 0x1111_1111);
+    }
+
+    #[test]
+    fn sh_info_out_of_range_is_err() {
+        let mut spec = lddw_spec();
+        spec.prog = Some(ProgRel {
+            recs: vec![rec(0, 1, 1)],
+            info: Some(99),
+            link: None,
+        });
+        assert_loader_err(&elf_with(&spec), "sh_info");
+    }
+
+    #[test]
+    fn helper_call_without_a_symbol_stays_a_call() {
+        let spec = Spec {
+            text: call_text(1),
+            ..lddw_spec()
+        };
+        let src = load_elf(&elf_with(&spec), None).unwrap();
+        assert!(src.symbols.is_empty());
+        assert_eq!(src.insns.len(), 1);
+        assert_eq!(src.insns[0].code, 0x85);
+        let image = compile(&src.insns, &src.symbols).unwrap();
+        assert_eq!(image.relocs.len(), 1);
+        assert_eq!(image.relocs[0].kind, RelocKind::Call);
+        assert_eq!(image.relocs[0].symbol, None);
+        assert!(image.relocs.iter().all(|r| r.kind != RelocKind::Lddw));
+    }
+
+    #[test]
+    fn other_section_truncated_record_is_ok() {
+        let mut spec = lddw_spec();
+        spec.foreign = Some(ForeignRel {
+            recs: vec![rec(0, 1, 2), rec(0, 1, 3), rec(8, 1, 4)],
+            size: Some(40),
+            info: None,
+        });
+        let src = load_elf(&elf_with(&spec), None).unwrap();
+        assert!(src.symbols.is_empty());
+
+        spec.foreign = Some(ForeignRel {
+            recs: vec![rec(0, 1, 2), rec(0, 1, 3), rec(0, 1, 4)],
+            size: Some(1 << 28),
+            info: None,
+        });
+        let src = load_elf(&elf_with(&spec), None).unwrap();
+        assert_eq!(src.section, "xdp");
+        assert!(src.symbols.is_empty());
+    }
+
+    #[test]
+    fn symbol_string_section_out_of_range_is_err() {
+        let mut spec = lddw_spec();
+        spec.prog = prog_recs(vec![rec(0, 1, 1)]);
+        spec.sym_str_oor = true;
+        assert_loader_err(&elf_with(&spec), "string section index");
+    }
+
+    fn assert_loader_err(bytes: &[u8], case: &str) {
+        if load_elf(bytes, None).is_ok() {
+            panic!("loader returned Ok ({case})");
+        }
+    }
+
+    fn lddw_text() -> Vec<u8> {
+        let mut text = [0u8; 16];
+        text[0] = 0x18;
+        text[1] = 0;
+        text[4..8].copy_from_slice(&0x1111_1111u32.to_le_bytes());
+        text[12..16].copy_from_slice(&0x2222_2222u32.to_le_bytes());
+        text.to_vec()
+    }
+
+    fn call_text(imm: i32) -> Vec<u8> {
+        let mut text = [0u8; 8];
+        text[0] = 0x85;
+        text[4..8].copy_from_slice(&imm.to_le_bytes());
+        text.to_vec()
+    }
+
+    struct Rec {
+        offset: u64,
+        sym: u32,
+        ty: u32,
+    }
+
+    struct ProgRel {
+        recs: Vec<Rec>,
+        info: Option<u32>,
+        link: Option<u32>,
+    }
+
+    struct ForeignRel {
+        recs: Vec<Rec>,
+        size: Option<usize>,
+        info: Option<u32>,
+    }
+
+    struct Spec {
+        text: Vec<u8>,
+        prog: Option<ProgRel>,
+        names: Vec<Vec<u8>>,
+        strtab: Option<Vec<u8>>,
+        st_name: Option<u32>,
+        sym_count: usize,
+        symtab_type: u32,
+        foreign: Option<ForeignRel>,
+        sym_str_oor: bool,
+    }
+
+    fn rec(offset: u64, sym: u32, ty: u32) -> Rec {
+        Rec { offset, sym, ty }
+    }
+
+    fn prog_recs(recs: Vec<Rec>) -> Option<ProgRel> {
+        Some(ProgRel {
+            recs,
+            info: None,
+            link: None,
+        })
+    }
+
+    fn lddw_spec() -> Spec {
+        Spec {
+            text: lddw_text(),
+            prog: None,
+            names: vec![b"map_counter".to_vec()],
+            strtab: None,
+            st_name: None,
+            sym_count: 2,
+            symtab_type: 2,
+            foreign: None,
+            sym_str_oor: false,
+        }
+    }
+
+    fn c_name(buf: &mut Vec<u8>, name: &str) -> u32 {
+        let off = buf.len() as u32;
+        buf.extend_from_slice(name.as_bytes());
+        buf.push(0);
+        off
+    }
+
+    fn elf_with(spec: &Spec) -> Vec<u8> {
+        let mut shstr = vec![0u8];
+        let name_xdp = c_name(&mut shstr, "xdp");
+        let name_other = c_name(&mut shstr, ".other");
+        let name_rel = c_name(&mut shstr, ".relxdp");
+        let name_foreign = c_name(&mut shstr, ".relother");
+        let name_sym = c_name(&mut shstr, ".symtab");
+        let name_str = c_name(&mut shstr, ".strtab");
+        let name_shstr = c_name(&mut shstr, ".shstrtab");
+
+        let mut computed = vec![0u32];
+        let mut raw = vec![0u8];
+        for name in &spec.names {
+            computed.push(raw.len() as u32);
+            raw.extend_from_slice(name);
+            raw.push(0);
+        }
+        let strtab = spec.strtab.clone().unwrap_or(raw);
+        let sym_count = spec.sym_count.max(computed.len());
+
+        let prog_idx = 1usize;
+        let other_idx = 2usize;
+        let mut next = 3usize;
+        let rel_idx = if spec.prog.is_some() {
+            let i = next;
+            next += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let foreign_idx = if spec.foreign.is_some() {
+            let i = next;
+            next += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let sym_idx = next;
+        next += 1;
+        let str_idx = next;
+        next += 1;
+        let shstr_idx = next;
+        next += 1;
+        let shnum = next;
+
+        let text_off = 64usize;
+        let other_off = text_off + spec.text.len();
+        let mut cursor = other_off + 1;
+        let rel_off = cursor;
+        if let Some(prog) = &spec.prog {
+            cursor += prog.recs.len() * 16;
+        }
+        let foreign_off = cursor;
+        if let Some(foreign) = &spec.foreign {
+            cursor += foreign.recs.len() * 16;
+        }
+        let sym_off = cursor;
+        cursor += sym_count * 24;
+        let str_off = cursor;
+        cursor += strtab.len();
+        let shstr_off = cursor;
+        cursor += shstr.len();
+        let shoff = (cursor + 7) & !7;
+
+        let mut slots = shnum;
+        if let Some(link) = spec.prog.as_ref().and_then(|p| p.link) {
+            slots = slots.max(link as usize + 1);
+        }
+        if spec.sym_str_oor {
+            slots = slots.max(shnum + 1);
+        }
+        let mut buf = vec![0u8; shoff + slots * 64];
+        buf[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        buf[4] = 2;
+        buf[5] = 1;
+        buf[6] = 1;
+        put_u16(&mut buf, 16, 1);
+        put_u16(&mut buf, 18, 247);
+        put_u32(&mut buf, 20, 1);
+        put_u64(&mut buf, 40, shoff as u64);
+        put_u16(&mut buf, 52, 64);
+        put_u16(&mut buf, 58, 64);
+        put_u16(&mut buf, 60, shnum as u16);
+        put_u16(&mut buf, 62, shstr_idx as u16);
+
+        buf[text_off..text_off + spec.text.len()].copy_from_slice(&spec.text);
+        if let Some(prog) = &spec.prog {
+            write_rels(&mut buf, rel_off, &prog.recs);
+        }
+        if let Some(foreign) = &spec.foreign {
+            write_rels(&mut buf, foreign_off, &foreign.recs);
+        }
+        for i in 1..sym_count {
+            let off = if i == 1 {
+                spec.st_name
+                    .unwrap_or_else(|| computed.get(i).copied().unwrap_or(0))
+            } else {
+                computed.get(i).copied().unwrap_or(0)
+            };
+            put_u32(&mut buf, sym_off + i * 24, off);
+        }
+        buf[str_off..str_off + strtab.len()].copy_from_slice(&strtab);
+        buf[shstr_off..shstr_off + shstr.len()].copy_from_slice(&shstr);
+
+        write_shdr64(
+            &mut buf,
+            shoff,
+            prog_idx,
+            name_xdp,
+            1,
+            6,
+            text_off,
+            spec.text.len(),
+            0,
+            0,
+        );
+        write_shdr64(
+            &mut buf, shoff, other_idx, name_other, 1, 0, other_off, 1, 0, 0,
+        );
+        if let Some(prog) = &spec.prog {
+            write_shdr64(
+                &mut buf,
+                shoff,
+                rel_idx.unwrap(),
+                name_rel,
+                9,
+                0,
+                rel_off,
+                prog.recs.len() * 16,
+                prog.link.unwrap_or(sym_idx as u32),
+                prog.info.unwrap_or(prog_idx as u32),
+            );
+        }
+        if let Some(foreign) = &spec.foreign {
+            write_shdr64(
+                &mut buf,
+                shoff,
+                foreign_idx.unwrap(),
+                name_foreign,
+                9,
+                0,
+                foreign_off,
+                foreign.size.unwrap_or(foreign.recs.len() * 16),
+                sym_idx as u32,
+                foreign.info.unwrap_or(other_idx as u32),
+            );
+        }
+        let str_link = if spec.sym_str_oor {
+            shnum as u32
+        } else {
+            str_idx as u32
+        };
+        write_shdr64(
+            &mut buf,
+            shoff,
+            sym_idx,
+            name_sym,
+            spec.symtab_type,
+            0,
+            sym_off,
+            sym_count * 24,
+            str_link,
+            0,
+        );
+        write_shdr64(
+            &mut buf,
+            shoff,
+            str_idx,
+            name_str,
+            3,
+            0,
+            str_off,
+            strtab.len(),
+            0,
+            0,
+        );
+        write_shdr64(
+            &mut buf,
+            shoff,
+            shstr_idx,
+            name_shstr,
+            3,
+            0,
+            shstr_off,
+            shstr.len(),
+            0,
+            0,
+        );
+        buf
+    }
+
+    fn write_rels(buf: &mut [u8], at: usize, recs: &[Rec]) {
+        for (k, rec) in recs.iter().enumerate() {
+            let pos = at + k * 16;
+            put_u64(buf, pos, rec.offset);
+            put_u64(buf, pos + 8, (u64::from(rec.sym) << 32) | u64::from(rec.ty));
+        }
     }
 
     fn sample_elf() -> Vec<u8> {
