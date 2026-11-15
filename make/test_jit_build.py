@@ -124,13 +124,15 @@ class JitBuildTests(unittest.TestCase):
         cls.tmp.cleanup()
 
     def test_firewall_lands_in_the_requested_dir(self) -> None:
-        stem = self.jit_dir / "firewall"
-        for name in ("bpf.o", "bpf.toml"):
-            self.assertTrue((stem / name).is_file(), name)
+        bpf = self.jit_dir / "firewall" / "bpf"
+        self.assertTrue((bpf / "firewall_bpf.o").is_file())
+        self.assertTrue((bpf / "report.toml").is_file())
         deliver = JitDeliverables.for_stem(self.jit_dir, "firewall", "firewall")
-        for path in deliver.outputs():
+        for path in (deliver.jit_bin, deliver.container, deliver.jit_toml):
             self.assertTrue(path.is_file(), path)
             self.assertTrue(path.is_relative_to(self.jit_dir), path)
+        self.assertFalse((self.jit_dir / "firewall" / "firewall.elf").exists())
+        self.assertFalse((self.jit_dir / "firewall" / "jit.bin").exists())
 
     def test_disassembly_and_blacklist_match_jit_bin(self) -> None:
         deliver = JitDeliverables.for_stem(self.jit_dir, "firewall", "firewall")
@@ -199,8 +201,8 @@ class JitBuildTests(unittest.TestCase):
     def test_prevail_failure_removes_planted_deliverables(self) -> None:
         self.oob_dir.mkdir(parents=True, exist_ok=True)
         deliver = JitDeliverables.for_stem(self.oob_dir, "xdp_oob_packet", "xdp_oob_packet")
-        deliver.jit_bin.parent.mkdir(parents=True, exist_ok=True)
         for path in deliver.outputs():
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"stale")
         proc = run_build(
             "jit",
@@ -212,9 +214,13 @@ class JitBuildTests(unittest.TestCase):
             str(self.oob_dir),
         )
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
-        for path in deliver.outputs():
-            self.assertFalse(path.exists(), path)
+        self.assertFalse(deliver.jit_bin.exists(), deliver.jit_bin)
+        self.assertFalse(deliver.container.exists(), deliver.container)
+        self.assertFalse(deliver.stamp.exists(), deliver.stamp)
         self.assertFalse((deliver.jit_bin.parent / ".jit-stage").exists())
+        if deliver.jit_toml.is_file():
+            failed = tomllib.loads(deliver.jit_toml.read_text())
+            self.assertNotEqual(failed.get("status"), "success")
 
     def test_esp32c3_does_not_emit_jit_bin(self) -> None:
         proc = run_build(
@@ -227,9 +233,9 @@ class JitBuildTests(unittest.TestCase):
             str(self.mcu_dir),
         )
         self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
-        stem = self.mcu_dir / "firewall"
-        self.assertTrue((stem / "esp32c3.o").is_file())
-        self.assertFalse((stem / "jit.bin").exists())
+        rv32 = self.mcu_dir / "firewall" / "rv32"
+        self.assertTrue((rv32 / "firewall_rv32.o").is_file())
+        self.assertFalse((self.mcu_dir / "firewall" / "jit" / "firewall_jit.bin").exists())
         text = (self.mcu_dir / ".ninja" / "build.ninja").read_text()
         self.assertIn(": mcu_cc ", text)
         self.assertNotIn(": jit_publish ", text)
@@ -246,30 +252,33 @@ class JitBuildTests(unittest.TestCase):
             str(self.rbpf_dir),
         )
         self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
-        self.assertFalse((self.rbpf_dir / "firewall" / "jit.bin").exists())
+        self.assertFalse((self.rbpf_dir / "firewall" / "jit" / "firewall_jit.bin").exists())
+        self.assertTrue((self.rbpf_dir / "firewall" / "bpf-xpost" / "firewall_bpf-xpost.elf").is_file())
         text = (self.rbpf_dir / ".ninja" / "build.ninja").read_text()
         self.assertIn("--map-index", text)
         self.assertNotIn(": jit_publish ", text)
 
     def test_reports_omit_absolute_paths_and_hash_bpf_o(self) -> None:
         deliver = JitDeliverables.for_stem(self.jit_dir, "firewall", "firewall")
-        bpf_o = self.jit_dir / "firewall" / "bpf.o"
-        bpf_toml = bpf_o.with_suffix(".toml")
+        bpf_o = self.jit_dir / "firewall" / "bpf" / "firewall_bpf.o"
+        bpf_report = self.jit_dir / "firewall" / "bpf" / "report.toml"
         texts = {
-            "jit.toml": deliver.jit_toml.read_text(),
+            "jit report": deliver.jit_toml.read_text(),
             "prevail.ok": deliver.stamp.read_text(),
-            "bpf.toml": bpf_toml.read_text(),
+            "bpf report": bpf_report.read_text(),
         }
         for name, text in texts.items():
             match = _ABSOLUTE.search(text)
             self.assertIsNone(match, f"{name} contains {match.group(0) if match else ''}")
-        self.assertIn("bpf_o=bpf.o\n", texts["prevail.ok"])
         digest = hashlib.sha256(bpf_o.read_bytes()).hexdigest()
-        doc = tomllib.loads(texts["jit.toml"])
+        self.assertIn(f"bpf_sha256={digest}\n", texts["prevail.ok"])
+        self.assertIn("verifier_id=", texts["prevail.ok"])
+        doc = tomllib.loads(texts["jit report"])
         self.assertEqual(doc["jit"]["bpf_o_sha256"], digest)
         self.assertEqual(doc["jit"]["source"], "tests/xdp/firewall.c")
-        bpf_doc = tomllib.loads(texts["bpf.toml"])
-        self.assertEqual(bpf_doc["source"], "tests/xdp/firewall.c")
+        bpf_doc = tomllib.loads(texts["bpf report"])
+        self.assertEqual(bpf_doc["source"]["path"], "tests/xdp/firewall.c")
+        self.assertNotIn("aot_addr", texts["bpf report"])
 
 
 if __name__ == "__main__":

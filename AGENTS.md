@@ -18,18 +18,24 @@ pixi run clean
   `tests/unused/`.
 - `-c <stem>` → only matching `tests/**/<stem>.c` (also excludes `unused/`).
 
-Artifacts land in `../build/<stem>/`:
+Artifacts land in `--build-dir` (default `../build`, outside the repo):
 
-| File | Role |
+| Path | Role |
 |------|------|
-| `bpf.o` | Host BPF object |
-| `bpf.toml` | BPF report / map metadata (`aot_addr` merged after MCU link) |
-| `<stem>.elf` | **XDP ELF** V0 (aka `xdp.elf`; cold-region image, flash separately from firmware) |
-| `esp32c3.toml` | MCU report; includes `elf_size_kb` (XDP ELF bytes / 1024) |
+| `<p>/bpf/<p>_bpf.o` | Raw Clang eBPF ELF. AOT and JIT must not rewrite it. |
+| `<p>/bpf/report.toml` | BPF report and map definitions. No `aot_addr`. |
+| `<p>/bpf/prevail.ok` | PREVAIL stamp for that BPF object. Absent when the gate did not run. |
+| `<p>/rv32/<p>_rv32.o` | C to RV32 AOT relocatable object. Not produced by compiling `bpf.o`. |
+| `<p>/rv32/<p>_rv32.debug.elf` | AOT linked debug ELF. |
+| `<p>/rv32/<p>_rv32.bin` | AOT raw image. |
+| `<p>/rv32/<p>_rv32.elf` | AOT XPOST Compact ELF V0 container. |
+| `<p>/jit/<p>_jit.bin` | Host JIT RV32IM raw image. There is no `<p>_jit.o`. |
+| `<p>/jit/<p>_jit.elf` | JIT XPOST Compact ELF V0 container. |
+| `<p>/bpf-xpost/<p>_bpf-xpost.elf` | rBPF XPOST Compact ELF V0 container. Not a raw BPF ELF. |
 
-Intermediate: `esp32c3.o`, `esp32c3.elf`, `esp32c3.bin`. Do not embed `.bin` into
-firmware. `layout.toml` is not a compile input. Do not confuse `esp32c3.elf`
-(AOT debug ELF) with XDP ELF (`<stem>.elf` / `xdp.elf`).
+Do not choose an engine from the `.elf` suffix. Read `role` and `format` in the mode `report.toml`. `--image-name` does not change these file names. `--output` is rejected. Old names are a copy from `artifacts export-legacy` into a different directory. See `docs/artifacts.md`.
+
+Ninja files, depfiles, the linker script, and `.stage` are internal. Do not commit a build directory.
 
 ## Pipeline
 
@@ -38,8 +44,7 @@ the host tool, read XPM1, write one ninja graph. Ninja executes:
 
 1. `cargo build` → `tools/target/<host>/release/xpost-mcu-elf` (restat; rebuild when
    `tools/` or `xpost-elf` inputs change)
-2. clang compiles `bpf.o`. When the build includes ESP32-C3, ninja runs PREVAIL on
-   that `bpf.o` and writes `prevail.ok` before the ESP32-C3 cc edge.
+2. clang compiles `<p>/bpf/<p>_bpf.o`. When the build includes ESP32-C3 or JIT, ninja runs PREVAIL on that object and writes `<p>/bpf/prevail.ok` before the later edge.
 3. clang link / bin / report
 4. `xpost-mcu-elf pack` (direct binary call, never `cargo run`) + stamp `elf_size_kb`
 

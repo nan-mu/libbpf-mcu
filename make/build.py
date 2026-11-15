@@ -12,8 +12,9 @@ from pathlib import Path
 
 from llvm_tools import resolve_llvm_tool
 from jit_publish import JitDeliverables
+from layout import mode_dir, report_path, spec_path, stamp_path
 from prevail_gate import prevail_bin
-from tiny_log import error, info, warning
+from tiny_log import error, info
 
 MAKE_DIR = Path(__file__).resolve().parent
 ROOT = MAKE_DIR.parent
@@ -29,7 +30,6 @@ XPOST_ELF_MANIFEST = WORKSPACE_ROOT / "xpost" / "xpost-elf" / "Cargo.toml"
 CLANG = resolve_llvm_tool("clang", prefer_homebrew=True)
 DEFAULT_OBJDUMP = resolve_llvm_tool("llvm-objdump")
 DEFAULT_OBJCOPY = resolve_llvm_tool("llvm-objcopy")
-REPORT_SCRIPTS = (MAKE_DIR / "obj_report.py", MAKE_DIR / "btf.py")
 SLOT_LD_TMPL = LINKER_DIR / "esp32c3-slot.ld.tmpl"
 XPOST_ESP32_C3_ARCH = 1
 
@@ -50,11 +50,15 @@ class McuLink:
     mem: MemMapV0
     linker: Path
     tool_bin: Path
+    firmware: Path
     compact_elf: bool
     image_name: str | None = None
-    # What the container carries. "aot" is the linked machine code; "rbpf" is the
-    # eBPF bytecode, which needs its map references turned into indices.
+    slot_symbol: str | None = None
     engine: str = "aot"
+
+    def __post_init__(self) -> None:
+        if self.engine not in {"aot", "rbpf"}:
+            raise ValueError(f"engine must be aot or rbpf, got {self.engine!r}")
 
 
 @dataclass(frozen=True)
@@ -63,19 +67,20 @@ class JitLink:
 
     firmware: Path
     tool_bin: Path
+    mem: MemMapV0
     image_name: str | None = None
 
 
 @dataclass(frozen=True)
 class PrevailStamp:
-    """<build>/<stem>/prevail.ok. Absence is the refusal."""
+    """Absence is the refusal."""
 
     stem: str
     build_dir: Path
 
     @property
     def path(self) -> Path:
-        return self.build_dir / self.stem / "prevail.ok"
+        return stamp_path(self.build_dir, self.stem)
 
 
 @dataclass(frozen=True)
@@ -134,10 +139,11 @@ def _default_inputs(crate: str | None = None):
 def _derive_default_outputs(inputs, target, build_dir: Path):
     outputs = []
     seen = {}
-    artifact = "bpf.o" if target == "jit" else f"{target}.o"
+    mode = "rv32" if target == "esp32c3" else "bpf"
+    suffix = "_rv32.o" if target == "esp32c3" else "_bpf.o"
     for input_path in inputs:
         stem = Path(input_path).stem
-        output_path = build_dir / stem / artifact
+        output_path = build_dir / stem / mode / f"{stem}{suffix}"
         if stem in seen:
             error(
                 f"默认输出冲突: {seen[stem]} 与 {input_path} 都映射到 {output_path}"
@@ -165,15 +171,12 @@ def check_build_args(target, inputs, outputs, crate: str | None = None, build_di
         error("不能同时指定 -c 与 --inputs/-i")
         sys.exit(1)
 
-    if input_items is None and output_items is not None:
-        warning(
-            "不能只指定 --output/-o；默认输入会包含多个测试文件，请同时指定 --inputs/-i"
+    if output_items is not None:
+        error(
+            "--output 不再选择产物路径。文件名由程序名和模式决定，目录由 --build-dir 决定。"
+            "旧布局用 artifacts export-legacy 导出到另一个目录。"
         )
-        sys.exit(1)
-
-    if output_items is not None and len(targets) > 1:
-        error("构建多个 target 时不能指定 --output/-o")
-        sys.exit(1)
+        sys.exit(2)
 
     raw_inputs = (
         _default_inputs(crate)
@@ -220,17 +223,6 @@ def check_build_fs(paths):
         checked_outputs.append(resolved_output)
 
     return BuildPaths(checked_inputs, checked_outputs)
-
-
-def _report_flags(target: str, release: bool, has_linker: bool = False) -> str:
-    flags: list[str] = []
-    if target == "bpf":
-        flags.append("--btf")
-    elif has_linker:
-        flags.append("--merge-aot-addrs")
-    if release:
-        flags.append("--no-content")
-    return " ".join(flags)
 
 
 def _host_triple() -> str:
@@ -377,19 +369,6 @@ def mcu_cc_edge(src: Path, obj: Path, stamp: PrevailStamp, depfile: Path) -> str
     return f"build {obj}: mcu_cc {src} | {stamp.path}\n  depfile = {depfile}"
 
 
-def _report_edge(
-    obj: Path, src: Path, out: Path, flags: str, extra_inputs: str = ""
-) -> str:
-    implicit = " ".join(str(path) for path in REPORT_SCRIPTS)
-    if extra_inputs:
-        implicit = f"{implicit} {extra_inputs}"
-    return (
-        f"build {out}: report {obj} | {implicit}\n"
-        f"  src = {src}\n"
-        f"  report_flags = {flags}"
-    )
-
-
 def compact_name(plan: GraphPlan, stem: str) -> str:
     """Container name. A second link of the same source passes `--image-name`."""
     backend = plan.backend
@@ -399,20 +378,196 @@ def compact_name(plan: GraphPlan, stem: str) -> str:
 
 
 def _defaults_for_stem(src: Path, plan: GraphPlan) -> list[Path]:
-    base = plan.build_dir / src.stem
+    stem = src.stem
+    root = plan.build_dir
+    paths = [report_path(root, stem, "bpf")]
     backend = plan.backend
-    if backend is None:
-        return [base / "bpf.toml"]
     if isinstance(backend, JitLink):
-        return list(
+        paths.extend(
             JitDeliverables.for_stem(
-                plan.build_dir, src.stem, compact_name(plan, src.stem)
+                root, stem, compact_name(plan, stem)
             ).outputs()
         )
-    outputs = [base / "esp32c3.bin", base / "esp32c3.toml"]
-    if backend.compact_elf:
-        outputs.append(base / f"{compact_name(plan, src.stem)}.elf")
-    return outputs
+    elif isinstance(backend, McuLink):
+        paths.append(report_path(root, stem, "rv32"))
+        if backend.engine == "aot" and backend.compact_elf:
+            paths.append(spec_path(root, stem, "rv32", "xpost_container"))
+        if backend.engine == "rbpf":
+            paths.append(report_path(root, stem, "bpf-xpost"))
+    return paths
+
+
+def _publish_inputs() -> str:
+    names = (
+        "layout.py",
+        "obj_report.py",
+        "btf.py",
+        "prevail_gate.py",
+        "jit_publish.py",
+        "xdp_section.py",
+        "llvm_tools.py",
+    )
+    return " ".join(str(MAKE_DIR / name) for name in names)
+
+
+def edges_for_stem(src: Path, plan: GraphPlan) -> str:
+    """Emit one stem. plan.backend is the MCU cone, the jit edge, or neither."""
+    stem = src.stem
+    root = plan.build_dir
+    bpf_dir = mode_dir(root, stem, "bpf")
+    bpf_o = bpf_dir / f"{stem}_bpf.o"
+    dep = bpf_dir / f"{stem}_bpf.d"
+    bpf_report = report_path(root, stem, "bpf")
+    release = "1" if plan.release else "0"
+    scripts = _publish_inputs()
+    lines = [
+        f"build {bpf_o}: bpf_cc {src}\n  depfile = {dep}",
+        (
+            f"build {bpf_report}: commit_bpf {bpf_o} | {scripts}\n"
+            f"  program = {stem}\n"
+            f"  src = {src}\n"
+            f"  build_dir = {root}\n"
+            f"  headers = {dep}\n"
+            f"  release = {release}"
+        ),
+    ]
+    backend = plan.backend
+    if backend is None:
+        return "\n".join(lines)
+    if isinstance(backend, JitLink):
+        deliver = JitDeliverables.for_stem(root, stem, compact_name(plan, stem))
+        outs = " ".join(str(path) for path in deliver.outputs())
+        lines.append(
+            f"build {outs}: jit_publish {bpf_o} | "
+            f"{backend.tool_bin} {backend.firmware} {bpf_report} {scripts}\n"
+            f"  src = {src}\n"
+            f"  obj = {bpf_o}\n"
+            f"  bpf_toml = {bpf_report}\n"
+            f"  firmware = {backend.firmware}\n"
+            f"  stem = {stem}\n"
+            f"  name = {compact_name(plan, stem)}\n"
+            f"  out_dir = {deliver.jit_bin.parent}\n"
+            f"  tool = {backend.tool_bin}\n"
+            f"  build_dir = {root}\n"
+            f"  release = {release}"
+        )
+        return "\n".join(lines)
+
+    stamp = PrevailStamp(stem, root)
+    rv = mode_dir(root, stem, "rv32")
+    mcu_o = rv / f"{stem}_rv32.o"
+    mcu_dep = rv / f"{stem}_rv32.d"
+    debug = rv / f"{stem}_rv32.debug.elf"
+    image = rv / f"{stem}_rv32.bin"
+    body = rv / ".stage" / "body.toml"
+    rv_report = report_path(root, stem, "rv32")
+    mem = backend.mem
+    content = " --no-content" if plan.release else ""
+    lines.append(
+        f"build {stamp.path}: prevail {bpf_o} | {bpf_report} {prevail_bin()} {scripts}\n"
+        f"  build_dir = {root}\n"
+        f"  program = {stem}"
+    )
+    lines.append(mcu_cc_edge(src, mcu_o, stamp, mcu_dep))
+    lines.append(f"build {debug}: link {mcu_o} | {backend.linker}")
+    lines.append(f"build {image}: bin {debug}")
+    lines.append(
+        f"build {body}: report {debug} | {bpf_report} {scripts}\n"
+        f"  src = {src}\n"
+        f"  report_flags = --body-only --maps-from {bpf_report} --merge-aot-addrs{content}"
+    )
+    image_name = compact_name(plan, stem)
+    container_arg = ""
+    pack_out: Path | None = None
+    pack_image: Path | None = None
+    export_flags = ""
+    extra_pack_out = ""
+    if backend.engine == "rbpf":
+        xdir = mode_dir(root, stem, "bpf-xpost")
+        section = xdir / ".stage" / "section.bin"
+        patched = spec_path(root, stem, "bpf-xpost", "image")
+        pack_out = spec_path(root, stem, "bpf-xpost", "xpost_container")
+        lines.append(
+            f"build {section}: section {bpf_o} | {MAKE_DIR / 'xdp_section.py'} {MAKE_DIR / 'llvm_tools.py'}\n"
+            f"  obj = {bpf_o}\n"
+            f"  sec_out = {section}"
+        )
+        pack_image = section
+        export_flags = f"--export-image {patched}"
+        extra_pack_out = f" {patched}"
+    elif backend.compact_elf:
+        pack_image = image
+        pack_out = spec_path(root, stem, "rv32", "xpost_container")
+        container_arg = f"--container {pack_out}"
+    if pack_out is not None and pack_image is not None:
+        lines.append(
+            f"build {pack_out}{extra_pack_out}: pack {pack_image} | "
+            f"{backend.tool_bin} {bpf_report} {body}\n"
+            f"  image = {pack_image}\n"
+            f"  bpf_toml = {bpf_report}\n"
+            f"  addr_toml = {body}\n"
+            f"  name = {image_name}\n"
+            f"  slot = {mem.slot_addr:#x}\n"
+            f"  helper = {mem.helper_addr:#x}\n"
+            f"  machine = {XPOST_ESP32_C3_ARCH}\n"
+            f"  engine_flags = {engine_flags(backend.engine, bpf_o)}\n"
+            f"  export_flags = {export_flags}\n"
+            f"  out_file = {pack_out}"
+        )
+    commit_inputs = f"{mcu_o} {debug} {image} {body}"
+    if backend.engine == "aot" and pack_out is not None:
+        commit_inputs = f"{commit_inputs} {pack_out}"
+    slot_symbol = backend.slot_symbol or ""
+    lines.append(
+        f"build {rv_report}: commit_rv32 {commit_inputs} | "
+        f"{stamp.path} {bpf_o} {backend.linker} {scripts}\n"
+        f"  program = {stem}\n"
+        f"  src = {src}\n"
+        f"  build_dir = {root}\n"
+        f"  object = {mcu_o}\n"
+        f"  debug = {debug}\n"
+        f"  image = {image}\n"
+        f"  body = {body}\n"
+        f"  container_arg = {container_arg}\n"
+        f"  bpf_object = {bpf_o}\n"
+        f"  stamp = {stamp.path}\n"
+        f"  linker = {backend.linker}\n"
+        f"  firmware = {backend.firmware}\n"
+        f"  release = {release}\n"
+        f"  engine = {backend.engine}\n"
+        f"  image_arg = {('--image-name ' + image_name) if backend.image_name else ''}\n"
+        f"  slot_arg = {('--slot-symbol ' + slot_symbol) if slot_symbol else ''}\n"
+        f"  headers = {mcu_dep}\n"
+        f"  helper = {mem.helper_addr:#x}\n"
+        f"  slot = {mem.slot_addr:#x}\n"
+        f"  slot_len = {mem.slot_len:#x}\n"
+        f"  table = {mem.table_addr:#x}\n"
+        f"  table_len = {mem.table_len:#x}"
+    )
+    if backend.engine == "rbpf" and pack_out is not None:
+        xreport = report_path(root, stem, "bpf-xpost")
+        patched = spec_path(root, stem, "bpf-xpost", "image")
+        lines.append(
+            f"build {xreport}: commit_xpost {patched} {pack_out} | "
+            f"{rv_report} {bpf_o} {stamp.path} {scripts}\n"
+            f"  program = {stem}\n"
+            f"  src = {src}\n"
+            f"  build_dir = {root}\n"
+            f"  image = {patched}\n"
+            f"  container = {pack_out}\n"
+            f"  bpf_object = {bpf_o}\n"
+            f"  addr_report = {rv_report}\n"
+            f"  stamp = {stamp.path}\n"
+            f"  firmware = {backend.firmware}\n"
+            f"  release = {release}\n"
+            f"  image_arg = {('--image-name ' + image_name) if backend.image_name else ''}\n"
+            f"  helper = {mem.helper_addr:#x}\n"
+            f"  slot = {mem.slot_addr:#x}\n"
+            f"  slot_len = {mem.slot_len:#x}\n"
+            f"  table = {mem.table_addr:#x}\n"
+            f"  table_len = {mem.table_len:#x}"
+        )
+    return "\n".join(lines)
 
 
 def _tool_inputs() -> list[Path]:
@@ -424,94 +579,6 @@ def _tool_inputs() -> list[Path]:
     paths.extend(sorted((TOOLS_DIR / "src").glob("*.rs")))
     paths.extend(sorted((ROOT / "jit" / "src").glob("*.rs")))
     return [path for path in paths if path.is_file()]
-
-
-def edges_for_stem(src: Path, plan: GraphPlan) -> str:
-    """Emit one stem. plan.backend is the MCU cone, the jit edge, or neither."""
-    stem = src.stem
-    base = plan.build_dir / stem
-    bpf_o = base / "bpf.o"
-    bpf_toml = bpf_o.with_suffix(".toml")
-    lines = [
-        f"build {bpf_o}: bpf_cc {src}\n  depfile = {bpf_o.with_suffix('.d')}",
-        _report_edge(
-            bpf_o,
-            src,
-            bpf_toml,
-            _report_flags("bpf", plan.release, has_linker=False),
-        ),
-    ]
-    backend = plan.backend
-    if backend is None:
-        return "\n".join(lines)
-    if isinstance(backend, JitLink):
-        deliver = JitDeliverables.for_stem(plan.build_dir, stem, compact_name(plan, stem))
-        outs = " ".join(str(path) for path in deliver.outputs())
-        lines.append(
-            f"build {outs}: jit_publish {bpf_o} | "
-            f"{backend.tool_bin} {backend.firmware} {bpf_toml} "
-            f"{MAKE_DIR / 'jit_publish.py'} {MAKE_DIR / 'prevail_gate.py'}\n"
-            f"  src = {src}\n"
-            f"  obj = {bpf_o}\n"
-            f"  bpf_toml = {bpf_toml}\n"
-            f"  firmware = {backend.firmware}\n"
-            f"  stem = {stem}\n"
-            f"  name = {compact_name(plan, stem)}\n"
-            f"  out_dir = {base}\n"
-            f"  tool = {backend.tool_bin}"
-        )
-        return "\n".join(lines)
-
-    stamp = PrevailStamp(stem, plan.build_dir)
-    mcu_o = base / "esp32c3.o"
-    linked = mcu_o.with_suffix(".elf")
-    bin_path = mcu_o.with_suffix(".bin")
-    report_path = mcu_o.with_suffix(".toml")
-    lines.append(
-        f"build {stamp.path}: prevail {bpf_o} | {prevail_bin()} {MAKE_DIR / 'prevail_gate.py'}"
-    )
-    lines.append(mcu_cc_edge(src, mcu_o, stamp, mcu_o.with_suffix(".d")))
-    lines.append(f"build {linked}: link {mcu_o} | {backend.linker}")
-    lines.append(f"build {bin_path}: bin {linked}")
-    lines.append(
-        _report_edge(
-            linked,
-            src,
-            report_path,
-            _report_flags("esp32c3", plan.release, has_linker=True),
-            extra_inputs=str(bpf_toml),
-        )
-    )
-    if backend.compact_elf:
-        mem = backend.mem
-        image_name = compact_name(plan, stem)
-        compact = base / f"{image_name}.elf"
-        # A bytecode container holds the eBPF program, not the linked machine
-        # code: the interpreter cannot execute RV32IMC instructions. The section
-        # is extracted from the object so the container carries exactly the bytes
-        # the interpreter will run.
-        if backend.engine == "rbpf":
-            section = base / "xdp.bin"
-            lines.append(
-                f"build {section}: section {bpf_o} | {MAKE_DIR / 'xdp_section.py'} {MAKE_DIR / 'llvm_tools.py'}\n"
-                f"  obj = {bpf_o}\n"
-                f"  sec_out = {section}"
-            )
-            pack_image = section
-        else:
-            pack_image = bin_path
-        lines.append(
-            f"build {compact}: pack {pack_image} | {backend.tool_bin} {bpf_toml} {report_path}\n"
-            f"  image = {pack_image}\n"
-            f"  bpf_toml = {bpf_toml}\n"
-            f"  name = {image_name}\n"
-            f"  slot = {mem.slot_addr:#x}\n"
-            f"  helper = {mem.helper_addr:#x}\n"
-            f"  machine = {XPOST_ESP32_C3_ARCH}\n"
-            f"  engine_flags = {engine_flags(backend.engine, bpf_o)}\n"
-            f"  report = {report_path}"
-        )
-    return "\n".join(lines)
 
 
 def engine_flags(engine: str, bpf_o: Path) -> str:

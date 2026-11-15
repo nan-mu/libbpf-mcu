@@ -22,6 +22,7 @@ WORKSPACE = ROOT.parent
 
 # Late import so `python receipt.py` works from make/.
 sys.path.insert(0, str(MAKE_DIR))
+from layout import LayoutError, load_mode, report_path, spec_path  # noqa: E402
 from llvm_tools import resolve_llvm_tool  # noqa: E402
 from prevail_gate import prevail_bin  # noqa: E402
 
@@ -139,24 +140,28 @@ def build_receipt(
     objdump: str,
     readelf: str,
 ) -> dict:
-    bpf_o = build_dir / stem / "bpf.o"
-    bpf_toml = build_dir / stem / "bpf.toml"
-    mcu_elf = build_dir / stem / "esp32c3.elf"
-    mcu_bin = build_dir / stem / "esp32c3.bin"
-    # Some builds name the linked object esp32c3.o then objcopy to .bin/.elf
-    if not mcu_elf.is_file():
-        alt = build_dir / stem / "esp32c3.o"
-        if alt.is_file():
-            # Linked ELF may be written as esp32c3.o by ninja.
-            mcu_elf = alt
+    try:
+        load_mode(build_dir, stem, "bpf")
+        load_mode(build_dir, stem, "rv32")
+    except LayoutError as exc:
+        raise FileNotFoundError(str(exc)) from exc
+    bpf_o = spec_path(build_dir, stem, "bpf", "bpf_object")
+    bpf_toml = report_path(build_dir, stem, "bpf")
+    rv_toml = report_path(build_dir, stem, "rv32")
+    mcu_elf = spec_path(build_dir, stem, "rv32", "debug_elf")
+    mcu_bin = spec_path(build_dir, stem, "rv32", "image")
 
-    missing = [str(p) for p in (source, bpf_o, bpf_toml) if not p.is_file()]
+    missing = [str(p) for p in (source, bpf_o, bpf_toml, rv_toml) if not p.is_file()]
     if missing:
         raise FileNotFoundError(f"missing required artifacts: {missing}")
 
     prev = prevail_accept(prevail, bpf_o, section, function)
     bpf_chk = bpf_elf_checks(bpf_o, readelf, section)
     maps = parse_bpf_toml_maps(bpf_toml)
+    rv_maps = {item["name"]: item.get("aot_addr") for item in parse_bpf_toml_maps(rv_toml)}
+    for item in maps:
+        if not item.get("aot_addr"):
+            item["aot_addr"] = rv_maps.get(item["name"])
 
     mcu_chk = None
     if mcu_elf.is_file():
@@ -185,18 +190,26 @@ def build_receipt(
         if mcu_bin.is_file() and not item.get("aot_addr"):
             errors.append(f"map {item['name']}: missing aot_addr after MCU link")
 
+    def show(path: Path) -> str:
+        for base in (ROOT, build_dir):
+            try:
+                return path.resolve().relative_to(base.resolve()).as_posix()
+            except ValueError:
+                continue
+        return path.name
+
     receipt = {
         "schema": "bs.safety.receipt.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "case": stem,
         "source": {
-            "path": str(source),
+            "path": show(source),
             "sha256": sha256_file(source),
         },
         "bpf": {
-            "path": str(bpf_o),
+            "path": show(bpf_o),
             "sha256": sha256_file(bpf_o),
-            "toml_path": str(bpf_toml),
+            "toml_path": show(bpf_toml),
             "toml_sha256": sha256_file(bpf_toml),
             "section": section,
             "function": function,
@@ -204,9 +217,9 @@ def build_receipt(
             "maps": maps,
         },
         "mcu": {
-            "elf_path": str(mcu_elf) if mcu_elf.is_file() else None,
+            "elf_path": show(mcu_elf) if mcu_elf.is_file() else None,
             "elf_sha256": sha256_file(mcu_elf) if mcu_elf.is_file() else None,
-            "bin_path": str(mcu_bin) if mcu_bin.is_file() else None,
+            "bin_path": show(mcu_bin) if mcu_bin.is_file() else None,
             "bin_sha256": sha256_file(mcu_bin) if mcu_bin.is_file() else None,
             "isa": "rv32imc",
             "abi": "ilp32",
@@ -248,7 +261,7 @@ def main() -> None:
     args = parser.parse_args()
 
     source = args.source or (ROOT / "tests" / "xdp" / f"{args.stem}.c")
-    out = args.out or (args.build_dir / args.stem / "safety-receipt.json")
+    out = args.out or (args.build_dir / args.stem / "rv32" / "safety-receipt.json")
 
     try:
         receipt = build_receipt(

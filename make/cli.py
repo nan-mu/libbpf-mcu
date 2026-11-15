@@ -86,7 +86,7 @@ def main():
     build_parser.add_argument(
         "--no-compact-elf",
         action="store_true",
-        help="ESP32-C3: do not emit the parallel <stem>.elf Compact ELF container",
+        help="ESP32-C3: do not emit the <program>_rv32.elf Compact ELF container",
     )
     build_parser.add_argument(
         "--slot-symbol",
@@ -96,7 +96,7 @@ def main():
     build_parser.add_argument(
         "--image-name",
         default=None,
-        help="Compact ELF container name; default is the source stem",
+        help="Compact ELF container internal name. The file name stays <program>_<mode>.elf",
     )
     build_parser.add_argument(
         "--engine",
@@ -117,6 +117,12 @@ def main():
 
     subparsers.add_parser("clean")
     subparsers.add_parser("test")
+    artifacts = subparsers.add_parser("artifacts")
+    artifact_commands = artifacts.add_subparsers(dest="artifacts_command", required=True)
+    export = artifact_commands.add_parser("export-legacy")
+    export.add_argument("--build-dir", type=Path, required=True)
+    export.add_argument("--out", type=Path, required=True)
+    export.add_argument("--mode", required=True, choices=("rv32", "jit", "bpf-xpost"))
 
     args = parser.parse_args()
     if args.command == "build":
@@ -127,10 +133,13 @@ def main():
             if args.build_dir is not None
             else DEFAULT_BUILD_DIR
         )
+        if args.outputs is not None:
+            error(
+                "--output 不再选择产物路径。文件名由程序名和模式决定，目录由 --build-dir 决定。"
+                "旧布局用 artifacts export-legacy 导出到另一个目录。"
+            )
+            sys.exit(2)
         if normalized == "jit":
-            if args.outputs is not None:
-                error("jit 不能与 --output 一起用")
-                sys.exit(2)
             if args.no_compact_elf:
                 error("jit 不能与 --no-compact-elf 一起用")
                 sys.exit(2)
@@ -165,6 +174,7 @@ def main():
             backend = JitLink(
                 firmware=firmware,
                 tool_bin=tool_bin_path(),
+                mem=mem,
                 image_name=check_image_name(args.image_name),
             )
         elif any(item.target == "esp32c3" for item in builds):
@@ -186,8 +196,10 @@ def main():
                 mem=mem,
                 linker=linker,
                 tool_bin=tool_bin_path(),
+                firmware=Path(args.firmware).expanduser().resolve(),
                 compact_elf=not args.no_compact_elf,
                 image_name=image_name,
+                slot_symbol=args.slot_symbol,
                 engine=args.engine,
             )
         names = ", ".join(item.target for item in builds)
@@ -217,12 +229,22 @@ def main():
             [sys.executable, str(Path(__file__).parent / "test_xpost_mem.py")],
             [sys.executable, str(Path(__file__).parent / "test_compact_elf_parity.py")],
             [sys.executable, str(Path(__file__).parent / "test_jit_build.py")],
+            [sys.executable, str(Path(__file__).parent / "test_layout.py")],
         ]
         for cmd in tests:
             info(f"→ {' '.join(cmd)}")
             result = subprocess.run(cmd, cwd=str(Path(__file__).parent))
             if result.returncode != 0:
                 sys.exit(result.returncode)
+    elif args.command == "artifacts" and args.artifacts_command == "export-legacy":
+        from layout import LayoutError, export_legacy
+
+        try:
+            programs = export_legacy(args.build_dir, args.out, args.mode)
+        except LayoutError as exc:
+            error(str(exc))
+            sys.exit(2)
+        info("exported " + ", ".join(programs))
     else:
         parser.print_help()
         sys.exit(1)

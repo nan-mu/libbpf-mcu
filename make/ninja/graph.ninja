@@ -17,7 +17,7 @@ rule mcu_cc
     depfile = $depfile
 
 rule prevail
-    command = @PYTHON@ @MAKE@/prevail_gate.py --obj $in --stamp $out
+    command = @PYTHON@ @MAKE@/prevail_gate.py --obj $in --stamp $out --build-dir $build_dir --program $program
     description = PREVAIL $out
     restat = 1
 
@@ -43,11 +43,23 @@ rule section
     description = section $sec_out
 
 rule pack
-    command = @TOOL_BIN@ pack --image $image --bpf-toml $bpf_toml --name $name --slot-address $slot --helper-address $helper --machine $machine $engine_flags -o $out && @PYTHON@ @MAKE@/stamp_elf_size.py --report $report --elf $out
+    command = @TOOL_BIN@ pack --image $image --bpf-toml $bpf_toml --addr-toml $addr_toml --name $name --slot-address $slot --helper-address $helper --machine $machine $engine_flags $export_flags -o $out_file
     description = pack $out
 
+rule commit_bpf
+    command = @PYTHON@ @MAKE@/layout.py commit-bpf --build-dir $build_dir --program $program --src $src --object $in --headers $headers --objdump @OBJDUMP@ --clang @CLANG@ --release $release
+    description = publish bpf $program
+
+rule commit_rv32
+    command = @PYTHON@ @MAKE@/layout.py commit-rv32 --build-dir $build_dir --program $program --src $src --object $object --debug-elf $debug --image $image --body $body $container_arg --bpf-object $bpf_object --stamp $stamp --linker $linker --firmware $firmware --objdump @OBJDUMP@ --clang @CLANG@ --release $release --engine $engine $image_arg $slot_arg --headers $headers --helper $helper --slot $slot --slot-len $slot_len --table $table --table-len $table_len
+    description = publish rv32 $program
+
+rule commit_xpost
+    command = @PYTHON@ @MAKE@/layout.py commit-xpost --build-dir $build_dir --program $program --src $src --image $image --container $container --bpf-object $bpf_object --addr-report $addr_report --stamp $stamp --firmware $firmware --release $release $image_arg --helper $helper --slot $slot --slot-len $slot_len --table $table --table-len $table_len
+    description = publish bpf-xpost $program
+
 rule jit_publish
-    command = @PYTHON@ @MAKE@/jit_publish.py --src $src --obj $obj --bpf-toml $bpf_toml --firmware $firmware --stem $stem --name $name --out-dir $out_dir --tool $tool
+    command = @PYTHON@ @MAKE@/jit_publish.py --src $src --obj $obj --bpf-toml $bpf_toml --firmware $firmware --stem $stem --name $name --out-dir $out_dir --tool $tool --build-dir $build_dir --release $release
     description = jit $out
 
 @EDGES@

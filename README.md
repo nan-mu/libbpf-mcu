@@ -36,44 +36,42 @@ pixi run clean
 
 不写 `-c` 时，先构建 `bpf`，再构建 `esp32c3`。输入是 `tests/**/*.c`，不含 `tests/unused/`。`-c <stem>` 只构建 `tests/**/<stem>.c`，同样跳过 `unused/`。
 
-产物写到 `../build/<stem>/`。
+产物写到 `--build-dir`，默认是仓库外的 `../build`。同一份 C 源码的 BPF、RV32 AOT、JIT 和 rBPF 容器分开放。文件名带模式，不再靠最后一次构建覆盖同名 `.elf`。`--image-name` 只改容器内部名称。`--output` 不再改路径，需要旧文件名时用 `artifacts export-legacy` 写到另一个目录。字段和哈希见 `docs/artifacts.md`。
 
-| 文件 File | 作用 Role |
+| 路径 | 作用 |
 | --- | --- |
-| `bpf.o` | 主机 eBPF 对象。Host eBPF object. |
-| `bpf.toml` | BPF 报告和 map 元数据。MCU 链接后写入 `aot_addr`。BPF report and map metadata. `aot_addr` is added after the MCU link. |
-| `<stem>.elf` | XDP ELF V0，也称为 `xdp.elf`。与固件分开烧录。XDP ELF V0, also called `xdp.elf`. Flash it separately from the firmware. |
-| `esp32c3.toml` | MCU 报告，含 `elf_size_kb`。MCU report, including `elf_size_kb`. |
+| `<p>/bpf/<p>_bpf.o` | 原始 Clang eBPF ELF，保留 section、BTF 和 relocation。 |
+| `<p>/bpf/report.toml` | BPF 报告和 map 定义。AOT 地址不写进这里。 |
+| `<p>/bpf/prevail.ok` | 这次 BPF 输入的 PREVAIL 凭证。只在真正跑过门禁时存在。 |
+| `<p>/rv32/<p>_rv32.elf` | AOT 的 XPOST Compact ELF V0 容器。 |
+| `<p>/jit/<p>_jit.elf` | JIT 的 XPOST Compact ELF V0 容器。 |
+| `<p>/bpf-xpost/<p>_bpf-xpost.elf` | rBPF 的 XPOST Compact ELF V0 容器。 |
 
-中间文件有 `esp32c3.o`、`esp32c3.elf` 和 `esp32c3.bin`。不要把 `.bin` 嵌进固件。`esp32c3.elf` 是 AOT 调试 ELF，不是 XDP ELF。`layout.toml` 不是编译输入。
+`.elf` 后缀不能区分引擎。看报告里的 `role` 和 `format`。不要把 `.bin` 嵌进固件。`layout.toml` 不是编译输入。
 
-Run the commands from this repository root. `--firmware` is a linked firmware ELF that contains `.xpost.mem` in the XPM1 format. Addresses are taken from that file and used for slot linking and XDP ELF metadata. This repository does not choose which image to flash.
+Outputs go to `--build-dir`, which defaults to `../build` outside the repository. BPF, RV32 AOT, JIT, and the rBPF container from one C source stay in separate directories. File names include the mode, so a later build does not replace another mode's `.elf`. `--image-name` sets only the name inside the container. `--output` does not choose a path. For the old file names, `artifacts export-legacy` copies one mode into a different directory. Fields and hashes are in `docs/artifacts.md`.
 
-Without `-c`, the build produces `bpf` and then `esp32c3` for every `tests/**/*.c` file outside `tests/unused/`. `-c <stem>` builds only `tests/**/<stem>.c`, and it also skips `unused/`.
-
-Outputs go to `../build/<stem>/`.
-
-Intermediate files are `esp32c3.o`, `esp32c3.elf`, and `esp32c3.bin`. Do not embed the `.bin` into the firmware. `esp32c3.elf` is the AOT debug ELF, not the XDP ELF. `layout.toml` is not a compile input.
+The `.elf` suffix does not say which engine produced the file. Read `role` and `format` in the report. Do not embed a `.bin` into the firmware. `layout.toml` is not a compile input.
 
 ## 流水线
 
 `make/cli.py` 和 `make/build.py` 只排路径。它们解析输入，准备主机工具，读取 XPM1，并写出一张 ninja 图。Ninja 执行这些步骤。
 
 1. `cargo build` 生成 `tools/target/<host>/release/xpost-mcu-elf`。`tools/` 或 `xpost-elf` 的输入变化时重新构建。
-2. clang 编译 `bpf.o`。构建包含 ESP32-C3 时，ninja 先对这份 `bpf.o` 运行 PREVAIL，写出 `prevail.ok`，再进入 ESP32-C3 的编译边。
-3. clang 完成链接、bin 和报告。
-4. 直接调用 `xpost-mcu-elf pack`，并写入 `elf_size_kb`。不要用 `cargo run` 代替这次调用。
+2. clang 编译 `<p>/bpf/<p>_bpf.o`。构建包含 ESP32-C3 或 JIT 时，ninja 对这份对象运行 PREVAIL，把凭证写到 `<p>/bpf/prevail.ok`，再进入后面的编译或打包。
+3. RV32 的可重定位对象、调试 ELF、原始镜像和报告写在 `<p>/rv32/`。AOT 地址在这份报告里。
+4. 直接调用 `xpost-mcu-elf pack`。它同时读 BPF 报告和带 `aot_addr` 的后端报告，不回写 BPF 报告。
 
-`prevail/bin/prevail` 是检查器二进制。只构建 `bpf` 时不运行 PREVAIL。XDP ELF 的编解码只用 `xpost-elf`。不能写入 XDP ELF V0 的 map 不进入元数据。
+`prevail/bin/prevail` 是检查器二进制。只构建 `bpf` 时不运行 PREVAIL。构建成功不等于设备上已经跑通。XDP ELF 的编解码只用 `xpost-elf`。不能写入 Compact ELF V0 的 map 不进入元数据。
 
 `make/cli.py` and `make/build.py` only plan the route. They resolve inputs, prepare the host tool, read XPM1, and write one ninja graph. Ninja runs the steps.
 
 1. `cargo build` produces `tools/target/<host>/release/xpost-mcu-elf`. It rebuilds when `tools/` or `xpost-elf` inputs change.
-2. clang compiles `bpf.o`. When the build includes ESP32-C3, ninja runs PREVAIL on that `bpf.o`, writes `prevail.ok`, and then compiles for ESP32-C3.
-3. clang links, writes the bin, and writes the report.
-4. The build calls `xpost-mcu-elf pack` directly and records `elf_size_kb`. Do not replace that call with `cargo run`.
+2. clang compiles `<p>/bpf/<p>_bpf.o`. When the build includes ESP32-C3 or JIT, ninja runs PREVAIL on that object, writes `<p>/bpf/prevail.ok`, and only then compiles or packs.
+3. The RV32 relocatable object, debug ELF, raw image, and report are written under `<p>/rv32/`. AOT addresses live in that report.
+4. The build calls `xpost-mcu-elf pack` directly. Pack reads the BPF report and the backend report that carries `aot_addr`. It does not write the BPF report.
 
-The checker binary is `prevail/bin/prevail`. A `bpf` only build does not run PREVAIL. XDP ELF encode and decode use `xpost-elf`. Maps that cannot be stored in XDP ELF V0 stay out of the metadata.
+The checker binary is `prevail/bin/prevail`. A `bpf` only build does not run PREVAIL. A successful build does not mean the image has run on a device. XDP ELF encode and decode use `xpost-elf`. Maps that cannot be stored in Compact ELF V0 stay out of the metadata.
 
 ## 头文件
 
