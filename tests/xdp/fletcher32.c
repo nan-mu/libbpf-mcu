@@ -105,7 +105,6 @@ int fletcher32(struct xdp_md *ctx)
 		if (param == (__u32)k)
 			store_u32(payload + k, sum);
 	}
-	bpf_printk("OK finish");
 	return XDP_PASS;
 }
 

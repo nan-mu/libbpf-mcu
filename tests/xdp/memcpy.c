@@ -61,7 +61,6 @@ int memcpy_xdp(struct xdp_md *ctx)
 			continue;
 		payload[param + i] = payload[i];
 	}
-	bpf_printk("OK finish");
 	return XDP_PASS;
 }
 

@@ -79,7 +79,6 @@ int bsort(struct xdp_md *ctx)
 			}
 		}
 	}
-	bpf_printk("OK finish");
 	return XDP_PASS;
 }
 

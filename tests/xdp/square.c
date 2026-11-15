@@ -62,7 +62,6 @@ int square(struct xdp_md *ctx)
 		return XDP_ABORTED;
 	x = load_u32(payload);
 	store_u32(payload, x * x);
-	bpf_printk("OK finish");
 	return XDP_PASS;
 }
 
