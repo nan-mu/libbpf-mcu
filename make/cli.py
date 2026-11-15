@@ -6,10 +6,12 @@ from pathlib import Path
 from tiny_log import debug, error, info, set_scope
 
 from build import (
+    DEFAULT_BUILD_DIR,
     DEFAULT_OBJCOPY,
     DEFAULT_OBJDUMP,
     BuildPaths,
     GraphPlan,
+    JitLink,
     McuLink,
     _linker_script,
     check_build_args,
@@ -46,7 +48,7 @@ def main():
         "target",
         nargs="?",
         default=None,
-        help="构建目标；省略则先 bpf 再 esp32c3（需 --firmware）",
+        help="构建目标。省略则先 bpf 再 esp32c3（需 --firmware）。jit 必须显式指定",
     )
     build_parser.add_argument("--inputs", "-i")
     build_parser.add_argument("--output", "--outputs", "-o", dest="outputs")
@@ -106,6 +108,12 @@ def main():
             "map index so the interpreter can resolve it at load"
         ),
     )
+    build_parser.add_argument(
+        "--build-dir",
+        type=Path,
+        default=None,
+        help="输出根目录，含 build.ninja。省略则用默认 ../build",
+    )
 
     subparsers.add_parser("clean")
     subparsers.add_parser("test")
@@ -113,21 +121,53 @@ def main():
     args = parser.parse_args()
     if args.command == "build":
         target = args.target
-        if args.firmware is not None and target is not None and target.lower() == "bpf":
-            # Explicit bpf ignores firmware addresses.
-            pass
-        elif args.firmware is not None and target is not None and target.lower() != "esp32c3":
+        normalized = target.lower() if target is not None else None
+        build_dir = (
+            Path(args.build_dir).expanduser().resolve()
+            if args.build_dir is not None
+            else DEFAULT_BUILD_DIR
+        )
+        if normalized == "jit":
+            if args.outputs is not None:
+                error("jit 不能与 --output 一起用")
+                sys.exit(2)
+            if args.no_compact_elf:
+                error("jit 不能与 --no-compact-elf 一起用")
+                sys.exit(2)
+            if args.slot_symbol:
+                error("jit 不能与 --slot-symbol 一起用")
+                sys.exit(2)
+            if args.engine != "aot":
+                error("jit 不能与 --engine rbpf 一起用")
+                sys.exit(2)
+            if args.firmware is None:
+                error("jit 需要 --firmware <firmware.elf>（含 .xpost.mem / XPM1）")
+                sys.exit(1)
+        elif args.firmware is not None and normalized not in (None, "bpf", "esp32c3"):
             print(
                 f"error: --firmware 仅用于 bpf/esp32c3 全量或 esp32c3，不能与 target={target} 一起用",
                 file=sys.stderr,
             )
             sys.exit(2)
-        # With --firmware and no target: one graph that includes esp32c3.
-        builds = check_build_args(target, args.inputs, args.outputs, crate=args.crate)
+        builds = check_build_args(
+            target, args.inputs, args.outputs, crate=args.crate, build_dir=build_dir
+        )
         checked = check_build_fs(BuildPaths(builds[0].inputs, builds[0].outputs))
-        want_mcu = any(item.target == "esp32c3" for item in builds)
-        mcu = None
-        if want_mcu:
+        backend = None
+        if normalized == "jit":
+            firmware = Path(args.firmware).expanduser().resolve()
+            tool = ensure_tool(force=args.force)
+            mem = load_mem_map_from_firmware(firmware, tool)
+            info(
+                f"XPM1 helper={mem.helper_addr:#x} slot={mem.slot_addr:#x}+{mem.slot_len:#x} "
+                f"table={mem.table_addr:#x}+{mem.table_len:#x}"
+            )
+            backend = JitLink(
+                firmware=firmware,
+                tool_bin=tool_bin_path(),
+                image_name=check_image_name(args.image_name),
+            )
+        elif any(item.target == "esp32c3" for item in builds):
             if args.firmware is None:
                 error("esp32c3 需要 --firmware <firmware.elf>（含 .xpost.mem / XPM1）")
                 sys.exit(1)
@@ -139,10 +179,10 @@ def main():
                 f"XPM1 helper={mem.helper_addr:#x} slot={mem.slot_addr:#x}+{mem.slot_len:#x} "
                 f"table={mem.table_addr:#x}+{mem.table_len:#x}"
             )
-            linker = _linker_script("esp32c3", mem)
+            linker = _linker_script("esp32c3", mem, build_dir)
             assert linker is not None
             image_name = check_image_name(args.image_name)
-            mcu = McuLink(
+            backend = McuLink(
                 mem=mem,
                 linker=linker,
                 tool_bin=tool_bin_path(),
@@ -156,11 +196,12 @@ def main():
             debug(f"输入文件: {[str(path) for path in checked.inputs]}")
         plan = GraphPlan(
             sources=tuple(checked.inputs),
-            mcu=mcu,
+            backend=backend,
             release=args.release,
             objdump=args.objdump,
+            build_dir=build_dir,
         )
-        run_ninja(write_build_ninja(plan), force=args.force)
+        run_ninja(write_build_ninja(plan), force=args.force, build_dir=build_dir)
     elif args.command == "clean":
         clean_build()
     elif args.command == "test":
@@ -175,6 +216,7 @@ def main():
             [sys.executable, str(Path(__file__).parent / "test_xpost_elf.py")],
             [sys.executable, str(Path(__file__).parent / "test_xpost_mem.py")],
             [sys.executable, str(Path(__file__).parent / "test_compact_elf_parity.py")],
+            [sys.executable, str(Path(__file__).parent / "test_jit_build.py")],
         ]
         for cmd in tests:
             info(f"→ {' '.join(cmd)}")

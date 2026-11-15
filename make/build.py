@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from llvm_tools import resolve_llvm_tool
+from jit_publish import JitDeliverables
 from prevail_gate import prevail_bin
 from tiny_log import error, info, warning
 
@@ -23,7 +24,6 @@ NINJA_DIR = MAKE_DIR / "ninja"
 LINKER_DIR = MAKE_DIR / "linker"
 TOOLS_DIR = ROOT / "tools"
 TOOLS_MANIFEST = TOOLS_DIR / "Cargo.toml"
-TOOLS_SRC = TOOLS_DIR / "src" / "main.rs"
 TOOLS_TARGET = TOOLS_DIR / "target"
 XPOST_ELF_MANIFEST = WORKSPACE_ROOT / "xpost" / "xpost-elf" / "Cargo.toml"
 CLANG = resolve_llvm_tool("clang", prefer_homebrew=True)
@@ -58,22 +58,33 @@ class McuLink:
 
 
 @dataclass(frozen=True)
+class JitLink:
+    """JIT publication. Slot and helper stay in the firmware file."""
+
+    firmware: Path
+    tool_bin: Path
+    image_name: str | None = None
+
+
+@dataclass(frozen=True)
 class PrevailStamp:
-    """build/<stem>/prevail.ok. Absence is the refusal."""
+    """<build>/<stem>/prevail.ok. Absence is the refusal."""
 
     stem: str
+    build_dir: Path
 
     @property
     def path(self) -> Path:
-        return DEFAULT_BUILD_DIR / self.stem / "prevail.ok"
+        return self.build_dir / self.stem / "prevail.ok"
 
 
 @dataclass(frozen=True)
 class GraphPlan:
     sources: tuple[Path, ...]
-    mcu: McuLink | None
+    backend: McuLink | JitLink | None
     release: bool
     objdump: str
+    build_dir: Path
 
 
 @dataclass(frozen=True)
@@ -90,6 +101,7 @@ class BuildTarget:
 
 
 TARGETS = ("bpf", "esp32c3")
+EXPLICIT_TARGETS = (*TARGETS, "jit")
 
 
 def _split_paths(value):
@@ -119,12 +131,13 @@ def _default_inputs(crate: str | None = None):
     return inputs
 
 
-def _derive_default_outputs(inputs, target):
+def _derive_default_outputs(inputs, target, build_dir: Path):
     outputs = []
     seen = {}
+    artifact = "bpf.o" if target == "jit" else f"{target}.o"
     for input_path in inputs:
         stem = Path(input_path).stem
-        output_path = DEFAULT_BUILD_DIR / stem / f"{target}.o"
+        output_path = build_dir / stem / artifact
         if stem in seen:
             error(
                 f"默认输出冲突: {seen[stem]} 与 {input_path} 都映射到 {output_path}"
@@ -135,12 +148,12 @@ def _derive_default_outputs(inputs, target):
     return outputs
 
 
-def check_build_args(target, inputs, outputs, crate: str | None = None):
+def check_build_args(target, inputs, outputs, crate: str | None = None, build_dir: Path = DEFAULT_BUILD_DIR):
     if target is None:
         targets = list(TARGETS)
     else:
         normalized_target = target.lower()
-        if normalized_target not in TARGETS:
+        if normalized_target not in EXPLICIT_TARGETS:
             error(f"未找到 target: {target}")
             sys.exit(1)
         targets = [normalized_target]
@@ -171,7 +184,7 @@ def check_build_args(target, inputs, outputs, crate: str | None = None):
     builds = []
     for item in targets:
         raw_outputs = (
-            _derive_default_outputs(raw_inputs, item)
+            _derive_default_outputs(raw_inputs, item, build_dir)
             if output_items is None
             else [Path(path) for path in output_items]
         )
@@ -255,13 +268,12 @@ def _generate_esp32c3_slot_ld(mem: MemMapV0, out_dir: Path) -> Path:
     return out_path
 
 
-def _linker_script(target: str, mem: MemMapV0 | None) -> Path | None:
+def _linker_script(target: str, mem: MemMapV0 | None, build_dir: Path) -> Path | None:
     if target != "esp32c3":
         path = LINKER_DIR / f"{target}.ld"
         return path if path.is_file() else None
     assert mem is not None
-    ninja_dir = DEFAULT_BUILD_DIR / ".ninja"
-    return _generate_esp32c3_slot_ld(mem, ninja_dir)
+    return _generate_esp32c3_slot_ld(mem, build_dir / ".ninja")
 
 
 def ensure_tool(force: bool = False) -> Path:
@@ -380,49 +392,86 @@ def _report_edge(
 
 def compact_name(plan: GraphPlan, stem: str) -> str:
     """Container name. A second link of the same source passes `--image-name`."""
-    if plan.mcu is not None and plan.mcu.image_name:
-        return plan.mcu.image_name
+    backend = plan.backend
+    if isinstance(backend, (McuLink, JitLink)) and backend.image_name:
+        return backend.image_name
     return stem
 
 
 def _defaults_for_stem(src: Path, plan: GraphPlan) -> list[Path]:
-    base = DEFAULT_BUILD_DIR / src.stem
-    if plan.mcu is None:
+    base = plan.build_dir / src.stem
+    backend = plan.backend
+    if backend is None:
         return [base / "bpf.toml"]
+    if isinstance(backend, JitLink):
+        return list(
+            JitDeliverables.for_stem(
+                plan.build_dir, src.stem, compact_name(plan, src.stem)
+            ).outputs()
+        )
     outputs = [base / "esp32c3.bin", base / "esp32c3.toml"]
-    if plan.mcu.compact_elf:
+    if backend.compact_elf:
         outputs.append(base / f"{compact_name(plan, src.stem)}.elf")
     return outputs
 
 
+def _tool_inputs() -> list[Path]:
+    paths = [
+        TOOLS_MANIFEST,
+        XPOST_ELF_MANIFEST,
+        ROOT / "jit" / "Cargo.toml",
+    ]
+    paths.extend(sorted((TOOLS_DIR / "src").glob("*.rs")))
+    paths.extend(sorted((ROOT / "jit" / "src").glob("*.rs")))
+    return [path for path in paths if path.is_file()]
+
+
 def edges_for_stem(src: Path, plan: GraphPlan) -> str:
-    """Emit one stem. plan.mcu decides whether the cone includes the stamp and mcu_cc."""
+    """Emit one stem. plan.backend is the MCU cone, the jit edge, or neither."""
     stem = src.stem
-    base = DEFAULT_BUILD_DIR / stem
+    base = plan.build_dir / stem
     bpf_o = base / "bpf.o"
+    bpf_toml = bpf_o.with_suffix(".toml")
     lines = [
         f"build {bpf_o}: bpf_cc {src}\n  depfile = {bpf_o.with_suffix('.d')}",
         _report_edge(
             bpf_o,
             src,
-            bpf_o.with_suffix(".toml"),
+            bpf_toml,
             _report_flags("bpf", plan.release, has_linker=False),
         ),
     ]
-    if plan.mcu is None:
+    backend = plan.backend
+    if backend is None:
+        return "\n".join(lines)
+    if isinstance(backend, JitLink):
+        deliver = JitDeliverables.for_stem(plan.build_dir, stem, compact_name(plan, stem))
+        outs = " ".join(str(path) for path in deliver.outputs())
+        lines.append(
+            f"build {outs}: jit_publish {bpf_o} | "
+            f"{backend.tool_bin} {backend.firmware} {bpf_toml} "
+            f"{MAKE_DIR / 'jit_publish.py'} {MAKE_DIR / 'prevail_gate.py'}\n"
+            f"  src = {src}\n"
+            f"  obj = {bpf_o}\n"
+            f"  bpf_toml = {bpf_toml}\n"
+            f"  firmware = {backend.firmware}\n"
+            f"  stem = {stem}\n"
+            f"  name = {compact_name(plan, stem)}\n"
+            f"  out_dir = {base}\n"
+            f"  tool = {backend.tool_bin}"
+        )
         return "\n".join(lines)
 
-    stamp = PrevailStamp(stem)
+    stamp = PrevailStamp(stem, plan.build_dir)
     mcu_o = base / "esp32c3.o"
     linked = mcu_o.with_suffix(".elf")
     bin_path = mcu_o.with_suffix(".bin")
     report_path = mcu_o.with_suffix(".toml")
-    bpf_toml = bpf_o.with_suffix(".toml")
     lines.append(
         f"build {stamp.path}: prevail {bpf_o} | {prevail_bin()} {MAKE_DIR / 'prevail_gate.py'}"
     )
     lines.append(mcu_cc_edge(src, mcu_o, stamp, mcu_o.with_suffix(".d")))
-    lines.append(f"build {linked}: link {mcu_o} | {plan.mcu.linker}")
+    lines.append(f"build {linked}: link {mcu_o} | {backend.linker}")
     lines.append(f"build {bin_path}: bin {linked}")
     lines.append(
         _report_edge(
@@ -433,15 +482,15 @@ def edges_for_stem(src: Path, plan: GraphPlan) -> str:
             extra_inputs=str(bpf_toml),
         )
     )
-    if plan.mcu.compact_elf:
-        mem = plan.mcu.mem
+    if backend.compact_elf:
+        mem = backend.mem
         image_name = compact_name(plan, stem)
         compact = base / f"{image_name}.elf"
         # A bytecode container holds the eBPF program, not the linked machine
         # code: the interpreter cannot execute RV32IMC instructions. The section
         # is extracted from the object so the container carries exactly the bytes
         # the interpreter will run.
-        if plan.mcu.engine == "rbpf":
+        if backend.engine == "rbpf":
             section = base / "xdp.bin"
             lines.append(
                 f"build {section}: section {bpf_o} | {MAKE_DIR / 'xdp_section.py'} {MAKE_DIR / 'llvm_tools.py'}\n"
@@ -452,14 +501,14 @@ def edges_for_stem(src: Path, plan: GraphPlan) -> str:
         else:
             pack_image = bin_path
         lines.append(
-            f"build {compact}: pack {pack_image} | {plan.mcu.tool_bin} {bpf_toml} {report_path}\n"
+            f"build {compact}: pack {pack_image} | {backend.tool_bin} {bpf_toml} {report_path}\n"
             f"  image = {pack_image}\n"
             f"  bpf_toml = {bpf_toml}\n"
             f"  name = {image_name}\n"
             f"  slot = {mem.slot_addr:#x}\n"
             f"  helper = {mem.helper_addr:#x}\n"
             f"  machine = {XPOST_ESP32_C3_ARCH}\n"
-            f"  engine_flags = {engine_flags(plan.mcu.engine, bpf_o)}\n"
+            f"  engine_flags = {engine_flags(backend.engine, bpf_o)}\n"
             f"  report = {report_path}"
         )
     return "\n".join(lines)
@@ -479,8 +528,9 @@ def engine_flags(engine: str, bpf_o: Path) -> str:
 
 
 def write_build_ninja(plan: GraphPlan) -> Path:
-    """Fill make/ninja/graph.ninja into build/.ninja/build.ninja."""
-    if plan.mcu is not None and not prevail_bin().is_file():
+    """Fill make/ninja/graph.ninja into <build>/.ninja/build.ninja."""
+    backend = plan.backend
+    if isinstance(backend, (McuLink, JitLink)) and not prevail_bin().is_file():
         error(f"PREVAIL binary missing: {prevail_bin()}")
         sys.exit(1)
 
@@ -489,30 +539,24 @@ def write_build_ninja(plan: GraphPlan) -> Path:
         error(f"ninja 模板不可用: {template}")
         sys.exit(1)
 
-    ninja_dir = DEFAULT_BUILD_DIR / ".ninja"
+    ninja_dir = plan.build_dir / ".ninja"
     ninja_dir.mkdir(parents=True, exist_ok=True)
     ninja_file = ninja_dir / "build.ninja"
 
     edges: list[str] = []
     defaults: list[Path] = []
-    if plan.mcu is not None and plan.mcu.compact_elf:
-        tool_deps = " ".join(
-            str(path)
-            for path in (
-                TOOLS_MANIFEST,
-                TOOLS_SRC,
-                TOOLS_DIR / "src" / "bpf_meta.rs",
-                XPOST_ELF_MANIFEST,
-            )
-            if path.is_file()
-        )
-        edges.append(f"build {plan.mcu.tool_bin}: tool | {tool_deps}")
+    needs_tool = isinstance(backend, JitLink) or (
+        isinstance(backend, McuLink) and backend.compact_elf
+    )
+    if needs_tool:
+        tool_deps = " ".join(str(path) for path in _tool_inputs())
+        edges.append(f"build {backend.tool_bin}: tool | {tool_deps}")
     for src in plan.sources:
         edges.append(edges_for_stem(src, plan))
         defaults.extend(_defaults_for_stem(src, plan))
 
-    linker = plan.mcu.linker if plan.mcu is not None else None
-    tool_bin = plan.mcu.tool_bin if plan.mcu is not None else tool_bin_path()
+    linker = backend.linker if isinstance(backend, McuLink) else None
+    tool_bin = backend.tool_bin if isinstance(backend, (McuLink, JitLink)) else tool_bin_path()
     content = template.read_text()
     content = content.replace("@ROOT@", str(ROOT))
     content = content.replace("@CLANG@", CLANG)
@@ -535,12 +579,13 @@ def write_build_ninja(plan: GraphPlan) -> Path:
     return ninja_file
 
 
-def run_ninja(ninja_file, force=False):
+def run_ninja(ninja_file, force=False, build_dir: Path = DEFAULT_BUILD_DIR):
+    build_dir.mkdir(parents=True, exist_ok=True)
     if force:
         info("强制重建: ninja -t clean")
         clean = subprocess.run(
             ["ninja", "-f", str(ninja_file), "-t", "clean"],
-            cwd=DEFAULT_BUILD_DIR,
+            cwd=build_dir,
         )
         if clean.returncode != 0:
             error(f"ninja clean 失败: exit={clean.returncode}")
@@ -548,7 +593,7 @@ def run_ninja(ninja_file, force=False):
 
     info(f"运行 ninja: {ninja_file}")
     result = subprocess.run(
-        ["ninja", "-f", str(ninja_file)], cwd=DEFAULT_BUILD_DIR
+        ["ninja", "-f", str(ninja_file)], cwd=build_dir
     )
     if result.returncode != 0:
         error(f"ninja 失败: exit={result.returncode}")

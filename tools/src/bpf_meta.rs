@@ -9,7 +9,7 @@ use toml::Value;
 use xpost_elf::{ImageMetadataV0, MAX_ENTRIES, MAX_LAYOUT, MAX_MAPS, MAX_NAME, MapDescriptorV0};
 
 /// Build metadata from `bpf.toml`. Maps that cannot enter Compact ELF V0 are omitted
-/// without printing (not HASH/ARRAY, bad capacity, missing aot_addr, empty layout).
+/// without printing (not HASH/ARRAY, bad capacity, missing address, empty layout).
 pub fn metadata_from_bpf_toml(
     path: &Path,
     name: &str,
@@ -18,28 +18,46 @@ pub fn metadata_from_bpf_toml(
     machine: u8,
 ) -> Result<ImageMetadataV0> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let root: Value =
-        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    metadata_from_toml_text(
+        &text,
+        &path.display().to_string(),
+        name,
+        slot_address,
+        helper_address,
+        machine,
+    )
+}
+
+/// Same map rules as [`metadata_from_bpf_toml`], from toml text already in memory.
+pub fn metadata_from_toml_text(
+    text: &str,
+    label: &str,
+    name: &str,
+    slot_address: u32,
+    helper_address: u32,
+    machine: u8,
+) -> Result<ImageMetadataV0> {
+    let root: Value = toml::from_str(text).with_context(|| format!("parse {label}"))?;
     let maps = root
         .get("maps")
         .cloned()
         .unwrap_or(Value::Table(Default::default()));
     let Value::Table(map_table) = maps else {
-        bail!("{}: maps must be TOML tables", path.display());
+        bail!("{label}: maps must be TOML tables");
     };
 
     let mut records = heapless::Vec::<MapDescriptorV0, MAX_MAPS>::new();
     for (map_name, item) in &map_table {
         let Value::Table(fields) = item else {
-            bail!("{}: map {map_name:?} must be a table", path.display());
+            bail!("{label}: map {map_name:?} must be a table");
         };
         match map_descriptor(map_name, fields)
-            .with_context(|| format!("{}: map {map_name:?}", path.display()))?
+            .with_context(|| format!("{label}: map {map_name:?}"))?
         {
             None => continue,
             Some(rec) => records
                 .push(rec)
-                .map_err(|_| anyhow::anyhow!("{}: more than {MAX_MAPS} maps", path.display()))?,
+                .map_err(|_| anyhow::anyhow!("{label}: more than {MAX_MAPS} maps"))?,
         }
     }
 

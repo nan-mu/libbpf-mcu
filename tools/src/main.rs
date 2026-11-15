@@ -1,6 +1,7 @@
 //! Host CLI: read firmware XPM1 and pack Compact ELF via `xpost-elf`.
 
 mod bpf_meta;
+mod jit_image;
 
 use std::fs;
 use std::path::PathBuf;
@@ -9,7 +10,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use object::{Object, ObjectSection, ObjectSymbol};
-use xpost_elf::{SECTION_NAME, build_container, decode};
+use xpost_elf::{SECTION_NAME, ScanOutcome, build_container, decode, scan_at};
 
 use bpf_meta::metadata_from_bpf_toml;
 
@@ -59,6 +60,32 @@ enum Cmd {
         obj: Option<PathBuf>,
         #[arg(short = 'o', long)]
         out: PathBuf,
+    },
+    /// Compile eBPF to RV32IM, link it at the firmware slot, and write the stage.
+    ///
+    /// The stage directory must be named `.jit-stage`. This command does not
+    /// publish, run PREVAIL, or execute the image.
+    PackJit {
+        /// Linked firmware ELF carrying `.xpost.mem`; supplies slot and helper addresses.
+        #[arg(long)]
+        firmware: PathBuf,
+        /// Clang-produced eBPF object.
+        #[arg(long)]
+        obj: PathBuf,
+        #[arg(long)]
+        bpf_toml: PathBuf,
+        /// Source path recorded in the jit report. Not compiled again.
+        #[arg(long)]
+        src: PathBuf,
+        #[arg(long)]
+        name: String,
+        /// Directory named `.jit-stage`. The only place this command writes.
+        #[arg(long)]
+        stage: PathBuf,
+    },
+    /// Accept one Compact ELF file only when `scan_at` returns Ok.
+    Scan {
+        file: PathBuf,
     },
 }
 
@@ -236,11 +263,40 @@ fn index_map_references(image: &[u8], obj_path: &PathBuf, bpf_toml: &PathBuf) ->
     Ok(out)
 }
 
+fn pack_jit_cmd(args: Cmd) -> Result<()> {
+    let Cmd::PackJit {
+        firmware,
+        obj,
+        bpf_toml,
+        src,
+        name,
+        stage,
+    } = args
+    else {
+        unreachable!()
+    };
+    let artifact = jit_image::JitArtifact::assemble(&firmware, &obj, &bpf_toml, &src, &name)?;
+    artifact.write_stage(&stage)?;
+    Ok(())
+}
+
+fn scan_file(file: &PathBuf) -> Result<()> {
+    let blob = fs::read(file).with_context(|| format!("read {}", file.display()))?;
+    let mut reader = blob.as_slice();
+    match scan_at(&mut reader, 0) {
+        ScanOutcome::Ok(_) => Ok(()),
+        ScanOutcome::SoftSkip { file_len } => bail!("SoftSkip (file_len {file_len})"),
+        ScanOutcome::HardFail => bail!("HardFail"),
+    }
+}
+
 fn run(args: Args) -> Result<()> {
     match args.cmd {
         Cmd::Symbol { firmware, name } => dump_symbol(&firmware, &name),
         Cmd::MemMap { firmware } => dump_mem_map(&firmware),
         pack_cmd @ Cmd::Pack { .. } => pack(pack_cmd),
+        jit_cmd @ Cmd::PackJit { .. } => pack_jit_cmd(jit_cmd),
+        Cmd::Scan { file } => scan_file(&file),
     }
 }
 

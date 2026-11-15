@@ -18,3 +18,4 @@ object = { version = "0.36", default-features = false, features = ["read", "elf"
 toml = "1.1.3"
 heapless = "0.9.3"
 xpost-elf = { path = "../../xpost/xpost-elf" }
+xpost-jit = { path = "../jit" }
