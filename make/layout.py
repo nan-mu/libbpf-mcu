@@ -686,12 +686,39 @@ def _sibling_stale(
     return stale
 
 
+def _input_file(report: Path, rel: object) -> Path:
+    text = rel if isinstance(rel, str) else ""
+    if (
+        not text
+        or text.startswith(("/", "\\"))
+        or Path(text).is_absolute()
+        or _ABS_PATH.search(text)
+    ):
+        raise LayoutError(f"input path is absolute: {text}")
+    return report.parent / text
+
+
+def _input_problem(report: Path, item: object) -> str | None:
+    if not isinstance(item, dict):
+        return "input artifact is not a table"
+    rel = item.get("path", "")
+    try:
+        file_path = _input_file(report, rel)
+    except LayoutError as exc:
+        return str(exc)
+    if not file_path.is_file():
+        return f"missing input {rel}"
+    if sha256_file(file_path) != item.get("sha256"):
+        return f"input hash mismatch: {rel}"
+    return None
+
+
 def _mismatch_reason(
     build_dir: Path,
     program: str,
     row: dict[str, str],
     source: SourceRecord,
-    bpf_sha: str | None,
+    _bpf_sha: str | None,
 ) -> str | None:
     path = manifest_path(build_dir, program).parent / row["report"]
     if not path.is_file():
@@ -703,13 +730,10 @@ def _mismatch_reason(
     build = report.get("build")
     if not isinstance(build, dict) or build.get("source_id") != source.source_id():
         return "source identity changed"
-    if bpf_sha is None:
-        return None
     for item in _as_list(report.get("input_artifact")):
-        if not isinstance(item, dict):
-            continue
-        if item.get("role") in {"bpf_object", "gate_bpf"} and item.get("sha256") != bpf_sha:
-            return "bpf object changed"
+        reason = _input_problem(path, item)
+        if reason is not None:
+            return reason
     return None
 
 
@@ -972,6 +996,10 @@ def _check_report_file(path: Path, expected_sha: str | None = None) -> dict:
             raise LayoutError(f"artifact size mismatch: {rel}")
         if art.get("format") not in FORMATS or art.get("role") not in ROLES:
             raise LayoutError(f"unknown artifact kind {art.get('role')} {art.get('format')}")
+    for item in _as_list(doc.get("input_artifact")):
+        reason = _input_problem(path, item)
+        if reason is not None:
+            raise LayoutError(reason)
     return doc
 
 

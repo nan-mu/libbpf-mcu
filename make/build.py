@@ -256,7 +256,8 @@ def _generate_esp32c3_slot_ld(mem: MemMapV0, out_dir: Path) -> Path:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "esp32c3-slot-0.ld"
-    out_path.write_text(body)
+    if not out_path.is_file() or out_path.read_text() != body:
+        out_path.write_text(body)
     return out_path
 
 
@@ -464,7 +465,7 @@ def edges_for_stem(src: Path, plan: GraphPlan) -> str:
     mem = backend.mem
     content = " --no-content" if plan.release else ""
     lines.append(
-        f"build {stamp.path}: prevail {bpf_o} | {bpf_report} {prevail_bin()} {scripts}\n"
+        f"build {stamp.path}: prevail {bpf_o} | {prevail_bin()} {scripts} || {bpf_report}\n"
         f"  build_dir = {root}\n"
         f"  program = {stem}"
     )
@@ -520,7 +521,7 @@ def edges_for_stem(src: Path, plan: GraphPlan) -> str:
     slot_symbol = backend.slot_symbol or ""
     lines.append(
         f"build {rv_report}: commit_rv32 {commit_inputs} | "
-        f"{stamp.path} {bpf_o} {backend.linker} {scripts}\n"
+        f"{stamp.path} {bpf_o} {backend.linker} {backend.firmware} {scripts}\n"
         f"  program = {stem}\n"
         f"  src = {src}\n"
         f"  build_dir = {root}\n"
