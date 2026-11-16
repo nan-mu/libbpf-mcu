@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -376,6 +377,169 @@ class LayoutTests(unittest.TestCase):
                 export_legacy(root, out, "jit")
             stamp = stamp_path(root, "firewall")
             self.assertFalse(stamp.exists())
+
+    def test_rv32_report_change_stales_bpf_xpost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bpf = _publish_bpf(root)
+            _publish_rv32(root, bpf, b"image-v1")
+            _publish_xpost(root, bpf)
+            self.assertEqual(load_mode(root, "firewall", "bpf-xpost")["status"], "success")
+            _publish_rv32(root, bpf, b"image-v2")
+            manifest = _manifest(root)
+            self.assertEqual(_names(manifest, "mode"), ["bpf", "rv32"])
+            self.assertEqual(_names(manifest, "stale"), ["bpf-xpost"])
+            self.assertEqual(_index_names(root), ["firewall"])
+            self.assertEqual(load_mode(root, "firewall", "bpf")["status"], "success")
+            self.assertEqual(load_mode(root, "firewall", "rv32")["status"], "success")
+            with self.assertRaises(LayoutError):
+                load_mode(root, "firewall", "bpf-xpost")
+
+    def test_missing_input_artifact_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bpf = _publish_bpf(root)
+            notes = _notes(root)
+            _publish_rv32(root, bpf, b"image", extra=_note_input(notes))
+            notes.unlink()
+            self.assertEqual(_names(_manifest(root), "mode"), ["bpf", "rv32"])
+            self.assertEqual(_index_names(root), ["firewall"])
+            with self.assertRaises(LayoutError) as caught:
+                load_mode(root, "firewall", "rv32")
+            self.assertIn("missing input", str(caught.exception))
+            _publish_bpf(root, b"bpf")
+            self.assertEqual(_names(_manifest(root), "stale"), ["rv32"])
+            self.assertEqual(_names(_manifest(root), "mode"), ["bpf"])
+            self.assertEqual(load_mode(root, "firewall", "bpf")["status"], "success")
+            with self.assertRaises(LayoutError):
+                load_mode(root, "firewall", "rv32")
+
+    def test_input_hash_mismatch_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bpf = _publish_bpf(root)
+            notes = _notes(root)
+            _publish_rv32(root, bpf, b"image", extra=_note_input(notes))
+            notes.write_bytes(b"notes-v2")
+            self.assertIn("rv32", _names(_manifest(root), "mode"))
+            with self.assertRaises(LayoutError) as caught:
+                load_mode(root, "firewall", "rv32")
+            self.assertIn("input hash mismatch", str(caught.exception))
+            _publish_bpf(root, b"bpf")
+            self.assertEqual(_names(_manifest(root), "stale"), ["rv32"])
+            self.assertEqual(_index_names(root), ["firewall"])
+            with self.assertRaises(LayoutError):
+                load_mode(root, "firewall", "rv32")
+
+    def test_unchanged_inputs_still_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bpf = _publish_bpf(root)
+            _publish_rv32(root, bpf, b"image")
+            _publish_xpost(root, bpf)
+            self.assertEqual(_names(_manifest(root), "mode"), ["bpf", "rv32", "bpf-xpost"])
+            self.assertNotIn("stale", _manifest(root))
+            self.assertEqual(_index_names(root), ["firewall"])
+            for mode in ("bpf", "rv32", "bpf-xpost"):
+                self.assertEqual(load_mode(root, "firewall", mode)["status"], "success")
+
+    def test_absolute_input_path_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bpf = _publish_bpf(root)
+            _publish_rv32(
+                root,
+                bpf,
+                b"image",
+                extra=[InputArtifact("gate_bpf", "/tmp/not/a/relative", sha256_file(bpf))],
+            )
+            self.assertEqual(_index_names(root), ["firewall"])
+            with self.assertRaises(LayoutError) as caught:
+                load_mode(root, "firewall", "rv32")
+            self.assertIn("absolute", str(caught.exception))
+
+
+def _publish_bpf(root: Path, payload: bytes = b"bpf") -> Path:
+    return publish(
+        root,
+        "firewall",
+        "bpf",
+        "firewall_bpf.o",
+        payload,
+        role="bpf_object",
+        fmt="elf-bpf-relocatable",
+        bpf_sha=sha256_bytes(payload),
+    )
+
+
+def _publish_rv32(
+    root: Path,
+    bpf: Path,
+    payload: bytes,
+    extra: list[InputArtifact] | None = None,
+) -> Path:
+    inputs = [InputArtifact("gate_bpf", "../bpf/firewall_bpf.o", sha256_file(bpf))]
+    if extra:
+        inputs.extend(extra)
+    return publish(
+        root,
+        "firewall",
+        "rv32",
+        "firewall_rv32.bin",
+        payload,
+        role="image",
+        fmt="raw-rv32-image",
+        inputs=inputs,
+        bpf_sha=sha256_file(bpf),
+    )
+
+
+def _publish_xpost(root: Path, bpf: Path) -> Path:
+    basis = report_path(root, "firewall", "rv32")
+    return publish(
+        root,
+        "firewall",
+        "bpf-xpost",
+        "firewall_bpf-xpost.elf",
+        b"container",
+        role="xpost_container",
+        fmt="xpost-compact-elf-v0",
+        inputs=[
+            InputArtifact("bpf_object", "../bpf/firewall_bpf.o", sha256_file(bpf)),
+            InputArtifact("map_index_basis", "../rv32/report.toml", sha256_file(basis)),
+        ],
+        bpf_sha=sha256_file(bpf),
+    )
+
+
+def _notes(root: Path) -> Path:
+    path = root / "firewall" / "bpf" / "notes.bin"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"notes-v1")
+    return path
+
+
+def _note_input(path: Path) -> list[InputArtifact]:
+    return [InputArtifact("map_index_basis", "../bpf/notes.bin", sha256_file(path))]
+
+
+def _manifest(root: Path) -> dict:
+    return tomllib.loads((root / "firewall" / "manifest.toml").read_text())
+
+
+def _names(doc: dict, key: str) -> list[str]:
+    rows = doc.get(key, [])
+    if isinstance(rows, dict):
+        rows = [rows]
+    return [str(row["name"]) for row in rows]
+
+
+def _index_names(root: Path) -> list[str]:
+    doc = tomllib.loads((root / "index.toml").read_text())
+    rows = doc.get("program", [])
+    if isinstance(rows, dict):
+        rows = [rows]
+    return [str(row["name"]) for row in rows]
 
 
 if __name__ == "__main__":

@@ -230,6 +230,7 @@ def main():
             [sys.executable, str(Path(__file__).parent / "test_compact_elf_parity.py")],
             [sys.executable, str(Path(__file__).parent / "test_jit_build.py")],
             [sys.executable, str(Path(__file__).parent / "test_layout.py")],
+            [sys.executable, str(Path(__file__).parent / "test_incremental.py")],
         ]
         for cmd in tests:
             info(f"→ {' '.join(cmd)}")
