@@ -213,7 +213,6 @@ def parse_maps_aot_addrs(objdump: str, obj: Path) -> dict[str, int]:
 
 
 def append_map_tail(out: Path, source: Path) -> None:
-    """Copy `[maps.*]` and `[CORE]` from a BPF report onto this report."""
     lines = source.read_text().splitlines(keepends=True)
     start = next(
         (

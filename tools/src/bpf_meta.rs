@@ -5,9 +5,6 @@ use toml::Value;
 
 use xpost_elf::{ImageMetadataV0, MAX_ENTRIES, MAX_LAYOUT, MAX_MAPS, MAX_NAME, MapDescriptorV0};
 
-/// Copy `aot_addr` from a backend report onto the BPF map tables in memory.
-///
-/// The BPF report is not rewritten. Map order stays the order of `bpf`.
 pub fn with_aot_addrs(bpf_text: &str, addr_text: &str, label: &str) -> Result<Value> {
     let mut root: Value = toml::from_str(bpf_text).with_context(|| format!("parse {label}"))?;
     let addr: Value = toml::from_str(addr_text).context("parse addr report")?;
@@ -30,7 +27,6 @@ pub fn with_aot_addrs(bpf_text: &str, addr_text: &str, label: &str) -> Result<Va
     Ok(root)
 }
 
-/// Same map rules as [`metadata_from_value`], from toml text already in memory.
 pub fn metadata_from_toml_text(
     text: &str,
     label: &str,

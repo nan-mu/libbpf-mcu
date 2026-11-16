@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Path isolation, report hashes, and publish failure behavior."""
 
 from __future__ import annotations
 

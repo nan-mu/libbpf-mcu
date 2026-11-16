@@ -1,11 +1,3 @@
-"""Canonical artifact paths, report envelopes, and the publish index.
-
-Consumers read a program through ``load_mode``. A report is consumable only when
-the index, the manifest, and every listed file hash agree. Paths inside a report
-are relative to that report's directory, so renaming the build root does not
-retarget them.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -399,7 +391,6 @@ def prevail_commit() -> str | None:
 
 
 def selected_body(text: str, skip: frozenset[str] = frozenset()) -> str:
-    """Keep the domain tables a later mode still has to read."""
     lines = text.splitlines(keepends=True)
     kept: list[str] = []
     grabbing = False
