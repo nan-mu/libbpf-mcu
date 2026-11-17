@@ -384,14 +384,18 @@ class LayoutTests(unittest.TestCase):
             bpf = _publish_bpf(root)
             _publish_rv32(root, bpf, b"image-v1")
             _publish_xpost(root, bpf)
+            publish(root, "firewall", "jit", "firewall_jit.bin", b"jit",
+                    role="image", fmt="raw-rv32-image",
+                    inputs=[InputArtifact("bpf_object", "../bpf/firewall_bpf.o", sha256_file(bpf))])
             self.assertEqual(load_mode(root, "firewall", "bpf-xpost")["status"], "success")
             _publish_rv32(root, bpf, b"image-v2")
             manifest = _manifest(root)
-            self.assertEqual(_names(manifest, "mode"), ["bpf", "rv32"])
+            self.assertEqual(_names(manifest, "mode"), ["bpf", "rv32", "jit"])
             self.assertEqual(_names(manifest, "stale"), ["bpf-xpost"])
             self.assertEqual(_index_names(root), ["firewall"])
             self.assertEqual(load_mode(root, "firewall", "bpf")["status"], "success")
             self.assertEqual(load_mode(root, "firewall", "rv32")["status"], "success")
+            self.assertEqual(load_mode(root, "firewall", "jit")["status"], "success")
             with self.assertRaises(LayoutError):
                 load_mode(root, "firewall", "bpf-xpost")
 
@@ -442,6 +446,24 @@ class LayoutTests(unittest.TestCase):
             self.assertEqual(_index_names(root), ["firewall"])
             for mode in ("bpf", "rv32", "bpf-xpost"):
                 self.assertEqual(load_mode(root, "firewall", mode)["status"], "success")
+
+    def test_escaping_inputs_are_refused_and_staled(self) -> None:
+        for reference in ("../../outside", "/tmp/outside", "C:\\outside", "../bpf/link"):
+            with self.subTest(reference=reference), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "build"
+                outside = root / "outside"
+                outside.parent.mkdir(parents=True)
+                outside.write_bytes(b"outside")
+                bpf = _publish_bpf(root)
+                (root / "firewall" / "bpf" / "link").symlink_to(outside)
+                _publish_rv32(root, bpf, b"image", extra=[
+                    InputArtifact("map_index_basis", reference, sha256_file(outside))
+                ])
+                with self.assertRaises(LayoutError):
+                    load_mode(root, "firewall", "rv32")
+                _publish_bpf(root)
+                self.assertEqual(_names(_manifest(root), "stale"), ["rv32"])
+                self.assertEqual(load_mode(root, "firewall", "bpf")["status"], "success")
 
     def test_absolute_input_path_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

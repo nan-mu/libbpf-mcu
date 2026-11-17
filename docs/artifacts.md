@@ -68,6 +68,61 @@ A failed mode drops its own consumable entry and deletes that mode's image and c
 
 A successful build is not a device run.
 
+## Local release command
+
+Development builds and `artifacts export-legacy` do not contact GitHub. Validate consumable modes in an existing tree with:
+
+```bash
+pixi run python make/layout.py verify --build-dir ../build
+```
+
+This checks the index-to-manifest and manifest-to-report hashes, output hashes and sizes, and every input artifact hash. Input paths resolve within the program directory, including through symlinks. Legal sibling references include `../bpf/<p>_bpf.o` and `../rv32/report.toml`. RV32 report changes invalidate rBPF's `map_index_basis`; the manifest records that mode as stale and `load_mode()` rejects it. Other valid modes remain available. A development tree may contain only some modes; release validation additionally requires all four modes and no stale or failed modes.
+
+After merging the PR, run publication manually from clean `main`:
+
+```bash
+pixi run publish-artifacts --firmware /path/to/firmware.elf --tag v0.1.0
+```
+
+The script checks local main identity, tracked and untracked changes, local and remote tag absence, Release absence, `gh auth status`, firmware XPM1, PREVAIL, and build tools. A tag is required and is never inferred. The script refuses an existing Tag or Release. It pins GitHub operations to the repository in `origin`, regardless of `GH_REPO`. It does not execute `git tag` or push a tag. After building and validating, it asks you to type the requested tag and full source commit, showing the destination repository. Only after this confirmation does `gh api` atomically create the missing tag at that commit; a concurrent tag creation aborts publication. `gh release create --verify-tag` then creates the Release and uploads both assets. Default publication creates a non-draft Release.
+
+| Option | Behavior |
+| --- | --- |
+| `--program STEM` | Select one program. Repeat for several. Default selects all tests outside `unused`. |
+| `--out DIRECTORY` | New output directory outside the repository. Default is the system temporary directory under `libbpf-mcu-publications/<tag>`. Existing directories are rejected. |
+| `--dry-run` | Require clean main and check GitHub availability; build and verify the package without uploading or creating a tag. |
+| `--package-only` | Build and verify locally, including on a development branch. Does not call `gh` or create a Release. Mutually exclusive with dry-run. |
+| `--draft` | Create a draft Release when uploading. |
+
+For local acceptance before merge:
+
+```bash
+pixi run publish-artifacts --firmware /path/to/firmware.elf \
+  --tag local-firewall --program firewall --package-only --out /tmp/new-firewall-package
+```
+
+The script creates an isolated build directory, invokes the existing build CLI for BPF, AOT, JIT, and rBPF, then validates every expected mode. rBPF retains the AOT container and publishes against its final RV32 report. An unsupported or failed mode stops publication with the program and mode name. No mode is silently omitted. The diagnostic work directory and `commands.log` remain available after success or failure; remove them yourself when no longer needed.
+
+The script copies only index, manifests, reports, and declared official artifacts into a separate staging tree:
+
+```text
+libbpf-mcu-artifacts/
+├── index.toml
+├── <program>/
+│   ├── manifest.toml
+│   ├── bpf/
+│   ├── rv32/
+│   ├── jit/
+│   └── bpf-xpost/
+└── SHA256SUMS
+```
+
+The internal `SHA256SUMS` covers every official file except itself. The output directory contains `libbpf-mcu-artifacts-<tag>.tar.gz` and a separate `SHA256SUMS` covering the archive. After extraction, run `sha256sum -c SHA256SUMS` from the extracted root, or use `shasum -a 256 -c SHA256SUMS` on macOS. The script extracts its own archive and repeats protocol and checksum validation before upload. Firmware, Ninja graphs, depfiles, PREVAIL stamps, linker scripts, caches, and `.stage` files are excluded. Reports retain firmware hashes, source identities, flags, and tool versions.
+
+Release notes include the source commit, firmware hash, and toolchain. Only the archive and its external checksum file are uploaded. Upload errors return a failure; the script does not retry by overwriting an existing Release. A failure after confirmed tag creation can leave a tag or partially uploaded Release requiring manual inspection.
+
+CI runs Python protocol, path, hash, publisher-fixture, and Ninja incremental tests plus syntax, formatting, and static checks. CI does not build or upload formal Release assets. The complete local suite remains `pixi run python make/cli.py test`; its Rust parity tests also require the sibling xpost workspace. Formal publication is always a local manual action.
+
 ## Old paths
 
 `artifacts export-legacy` copies one mode into a different directory. It does not write back into the canonical tree, and it refuses a second mode in the same output directory.

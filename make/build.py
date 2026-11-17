@@ -391,7 +391,7 @@ def _defaults_for_stem(src: Path, plan: GraphPlan) -> list[Path]:
         )
     elif isinstance(backend, McuLink):
         paths.append(report_path(root, stem, "rv32"))
-        if backend.engine == "aot" and backend.compact_elf:
+        if backend.compact_elf:
             paths.append(spec_path(root, stem, "rv32", "xpost_container"))
         if backend.engine == "rbpf":
             paths.append(report_path(root, stem, "bpf-xpost"))
@@ -479,45 +479,27 @@ def edges_for_stem(src: Path, plan: GraphPlan) -> str:
     )
     image_name = compact_name(plan, stem)
     container_arg = ""
-    pack_out: Path | None = None
-    pack_image: Path | None = None
-    export_flags = ""
-    extra_pack_out = ""
-    if backend.engine == "rbpf":
-        xdir = mode_dir(root, stem, "bpf-xpost")
-        section = xdir / ".stage" / "section.bin"
-        patched = spec_path(root, stem, "bpf-xpost", "image")
-        pack_out = spec_path(root, stem, "bpf-xpost", "xpost_container")
+    aot_container: Path | None = None
+    if backend.compact_elf:
+        aot_container = spec_path(root, stem, "rv32", "xpost_container")
+        container_arg = f"--container {aot_container}"
         lines.append(
-            f"build {section}: section {bpf_o} | {MAKE_DIR / 'xdp_section.py'} {MAKE_DIR / 'llvm_tools.py'}\n"
-            f"  obj = {bpf_o}\n"
-            f"  sec_out = {section}"
-        )
-        pack_image = section
-        export_flags = f"--export-image {patched}"
-        extra_pack_out = f" {patched}"
-    elif backend.compact_elf:
-        pack_image = image
-        pack_out = spec_path(root, stem, "rv32", "xpost_container")
-        container_arg = f"--container {pack_out}"
-    if pack_out is not None and pack_image is not None:
-        lines.append(
-            f"build {pack_out}{extra_pack_out}: pack {pack_image} | "
+            f"build {aot_container}: pack {image} | "
             f"{backend.tool_bin} {bpf_report} {body}\n"
-            f"  image = {pack_image}\n"
+            f"  image = {image}\n"
             f"  bpf_toml = {bpf_report}\n"
             f"  addr_toml = {body}\n"
             f"  name = {image_name}\n"
             f"  slot = {mem.slot_addr:#x}\n"
             f"  helper = {mem.helper_addr:#x}\n"
             f"  machine = {XPOST_ESP32_C3_ARCH}\n"
-            f"  engine_flags = {engine_flags(backend.engine, bpf_o)}\n"
-            f"  export_flags = {export_flags}\n"
-            f"  out_file = {pack_out}"
+            f"  engine_flags = {engine_flags('aot', bpf_o)}\n"
+            f"  export_flags = \n"
+            f"  out_file = {aot_container}"
         )
     commit_inputs = f"{mcu_o} {debug} {image} {body}"
-    if backend.engine == "aot" and pack_out is not None:
-        commit_inputs = f"{commit_inputs} {pack_out}"
+    if aot_container is not None:
+        commit_inputs = f"{commit_inputs} {aot_container}"
     slot_symbol = backend.slot_symbol or ""
     lines.append(
         f"build {rv_report}: commit_rv32 {commit_inputs} | "
@@ -535,7 +517,7 @@ def edges_for_stem(src: Path, plan: GraphPlan) -> str:
         f"  linker = {backend.linker}\n"
         f"  firmware = {backend.firmware}\n"
         f"  release = {release}\n"
-        f"  engine = {backend.engine}\n"
+        f"  engine = aot\n"
         f"  image_arg = {('--image-name ' + image_name) if backend.image_name else ''}\n"
         f"  slot_arg = {('--slot-symbol ' + slot_symbol) if slot_symbol else ''}\n"
         f"  headers = {mcu_dep}\n"
@@ -545,7 +527,30 @@ def edges_for_stem(src: Path, plan: GraphPlan) -> str:
         f"  table = {mem.table_addr:#x}\n"
         f"  table_len = {mem.table_len:#x}"
     )
-    if backend.engine == "rbpf" and pack_out is not None:
+    if backend.engine == "rbpf":
+        xdir = mode_dir(root, stem, "bpf-xpost")
+        section = xdir / ".stage" / "section.bin"
+        patched = spec_path(root, stem, "bpf-xpost", "image")
+        pack_out = spec_path(root, stem, "bpf-xpost", "xpost_container")
+        lines.append(
+            f"build {section}: section {bpf_o} | {MAKE_DIR / 'xdp_section.py'} {MAKE_DIR / 'llvm_tools.py'}\n"
+            f"  obj = {bpf_o}\n"
+            f"  sec_out = {section}"
+        )
+        lines.append(
+            f"build {pack_out} {patched}: pack {section} | "
+            f"{backend.tool_bin} {bpf_report} {rv_report}\n"
+            f"  image = {section}\n"
+            f"  bpf_toml = {bpf_report}\n"
+            f"  addr_toml = {rv_report}\n"
+            f"  name = {image_name}\n"
+            f"  slot = {mem.slot_addr:#x}\n"
+            f"  helper = {mem.helper_addr:#x}\n"
+            f"  machine = {XPOST_ESP32_C3_ARCH}\n"
+            f"  engine_flags = {engine_flags('rbpf', bpf_o)}\n"
+            f"  export_flags = --export-image {patched}\n"
+            f"  out_file = {pack_out}"
+        )
         xreport = report_path(root, stem, "bpf-xpost")
         patched = spec_path(root, stem, "bpf-xpost", "image")
         lines.append(

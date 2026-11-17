@@ -9,6 +9,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import cli
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -31,6 +34,11 @@ if step == "prevail":
     report.write_text(previous + "verified\\n")
 elif step == "commit_rv32":
     dest.write_text(Path(extra).read_bytes().hex())
+elif step in ("pack", "jit_publish"):
+    for name in sys.argv[3:]:
+        path = Path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(step + "\\n")
 else:
     dest.write_text(step + "\\n")
 with Path(log).open("a") as handle:
@@ -61,12 +69,16 @@ def _rules(stub: Path, log: Path) -> str:
         f"rule report\n  command = {run} report $out\n"
         f"rule commit_rv32\n  command = {run} commit_rv32 $out $firmware\n"
         f"rule jit_publish\n  command = {run} jit_publish $out\n"
+        f"rule section\n  command = {run} section $out\n"
+        f"rule pack\n  command = {run} pack $out\n"
+        f"rule commit_xpost\n  command = {run} commit_xpost $out\n"
     )
 
 
 def _ninja(path: Path) -> None:
     proc = subprocess.run(
         ["ninja", "-f", str(path)],
+        cwd=path.parent,
         capture_output=True,
         text=True,
         check=False,
@@ -93,6 +105,52 @@ def _graph(root: Path, edges: str, build: Path) -> tuple[Path, Path]:
 
 
 class IncrementalTests(unittest.TestCase):
+    def test_default_build_creates_both_target_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "firewall.c"
+            src.write_text("int x;\n")
+            build = root / "build"
+            args = ["cli.py", "build", "--inputs", str(src), "--build-dir", str(build),
+                    "--firmware", str(root / "firmware")]
+            with patch.object(sys, "argv", args), patch.object(cli, "ensure_tool"), \
+                 patch.object(cli, "load_mem_map_from_firmware", return_value=_mem()), \
+                 patch.object(cli, "_linker_script", return_value=root / "link.ld"), \
+                 patch.object(cli, "write_build_ninja"), patch.object(cli, "run_ninja"):
+                cli.main()
+            self.assertTrue((build / "firewall" / "bpf").is_dir())
+            self.assertTrue((build / "firewall" / "rv32").is_dir())
+
+    def test_four_modes_keep_aot_and_second_rbpf_build_is_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, build = _aot_edges(root)
+            src = root / "firewall.c"
+            backend = McuLink(_mem(), root / "link.ld", root / "tool", root / "firmware.elf", True)
+            from dataclasses import replace
+            stub, log, ninja = root / "stub.py", root / "steps.log", root / "build.ninja"
+            stub.write_text(STUB)
+            with patch.dict(os.environ, {"PREVAIL": str(root / "prevail-bin")}):
+                for mode in ("bpf", "rv32", "jit", "bpf-xpost"):
+                    if mode == "bpf-xpost":
+                        (build / "firewall" / "rv32" / "firewall_rv32.elf").unlink()
+                    selected = {"bpf": None, "rv32": backend,
+                                "jit": JitLink(root / "firmware.elf", root / "tool", _mem()),
+                                "bpf-xpost": replace(backend, engine="rbpf")}[mode]
+                    plan = GraphPlan((src,), selected, False, "llvm-objdump", build)
+                    edges = edges_for_stem(src, plan)
+                    kept = "\n".join(line for line in edges.splitlines() if not line.startswith("  depfile ="))
+                    target = report_path(build, "firewall", mode)
+                    ninja.write_text(_rules(stub, log) + "\n" + kept + f"\ndefault {target}\n")
+                    _ninja(ninja)
+                self.assertIn("  engine = aot\n", edges)
+                self.assertTrue((build / "firewall" / "rv32" / "firewall_rv32.elf").is_file())
+                for mode in ("bpf", "rv32", "jit", "bpf-xpost"):
+                    self.assertTrue(report_path(build, "firewall", mode).is_file())
+                log.write_text("")
+                _ninja(ninja)
+                self.assertEqual(log.read_text(), "")
+
     def test_second_run_skips_prevail_and_downstream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

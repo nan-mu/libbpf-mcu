@@ -53,6 +53,26 @@ Outputs go to `--build-dir`, which defaults to `../build` outside the repository
 
 The `.elf` suffix does not say which engine produced the file. Read `role` and `format` in the report. Do not embed a `.bin` into the firmware. `layout.toml` is not a compile input.
 
+## 验证与本地发布
+
+普通开发构建不会访问 GitHub。检查已有构建目录的报告、输出和输入哈希：
+
+```bash
+pixi run python make/layout.py verify --build-dir ../build
+```
+
+PR 合并后，在干净的 `main` 上手动发布。必须显式指定 Tag 和带 XPM1 的固件：
+
+```bash
+pixi run publish-artifacts --firmware /path/to/firmware.elf --tag v0.1.0
+```
+
+脚本重新构建全部程序的 BPF、RV32 AOT、JIT 和 rBPF，验证后生成压缩包及 `SHA256SUMS`。它使用本地 `gh` 上传。在创建不存在的 Tag 前，必须输入提示中的 Tag 和完整 commit。已有 Tag 或 Release 会被拒绝，脚本不会推送 Tag。
+
+`--program firewall` 可重复使用。`--out /new/output` 指定尚不存在的仓库外目录。`--dry-run` 在干净 `main` 上执行检查和打包，不上传。开发分支可用 `--package-only` 验证本地包，该模式不调用 GitHub。`--draft` 显式创建草稿，否则为正式 Release。每个所选程序必须成功生成四种模式，不支持的模式会中止整个流程。
+
+CI 只检查代码和构建系统，不自动创建 Release。发布包不含固件，报告保留固件 SHA-256、源码和工具链信息。参数、目录和验证流程见 [docs/artifacts.md](docs/artifacts.md#local-release-command)。
+
 ## 流水线
 
 `make/cli.py` 和 `make/build.py` 只排路径。它们解析输入，准备主机工具，读取 XPM1，并写出一张 ninja 图。Ninja 执行这些步骤。

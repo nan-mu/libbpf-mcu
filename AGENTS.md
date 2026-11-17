@@ -87,6 +87,34 @@ jit/scripts/check-xdp.sh
 `--repeat N` times only the compile call. `ns_min`, `ns_med`, and `ns_max` are
 those samples.
 
+## Local publication
+
+Development builds never publish to GitHub. Validate a development tree with
+`pixi run python make/layout.py verify --build-dir ../build`. Input artifacts
+must resolve within the program directory and match their SHA-256; RV32 report
+changes stale the rBPF container through `map_index_basis`.
+
+After merge, a user can run:
+
+```bash
+pixi run publish-artifacts --firmware /path/to/firmware.elf --tag v0.1.0
+```
+
+Formal publication and `--dry-run` require clean `main`; `--package-only` allows
+local verification on a development branch and never calls GitHub. Repeat
+`--program STEM` to select programs; every selected program must produce four
+modes. `--out` must be a new directory outside this repository. The script
+retains an isolated diagnostic work directory, validates a staged and extracted
+archive, and uploads only its tar.gz and external SHA256SUMS through local `gh`.
+Internal SHA256SUMS covers all official files except itself. Firmware is not
+packaged; its hash and toolchain remain in the reports.
+
+A user must confirm the explicit tag and commit before GitHub creates a missing
+tag. Existing tags/releases are rejected. The script never pushes tags or
+merges PRs. CI tests code and the build protocol only; it never publishes formal
+assets. Agents implementing this tool must test upload with mocks, not create a
+Release. See `docs/artifacts.md` for parameters and package structure.
+
 ## Scope
 
 Phase 1 proves RV32IMC only. Architecture-agnostic remains a design goal until a

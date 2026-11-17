@@ -161,7 +161,10 @@ def main():
         builds = check_build_args(
             target, args.inputs, args.outputs, crate=args.crate, build_dir=build_dir
         )
-        checked = check_build_fs(BuildPaths(builds[0].inputs, builds[0].outputs))
+        checked_builds = [
+            check_build_fs(BuildPaths(item.inputs, item.outputs)) for item in builds
+        ]
+        checked = checked_builds[0]
         backend = None
         if normalized == "jit":
             firmware = Path(args.firmware).expanduser().resolve()
@@ -230,6 +233,7 @@ def main():
             [sys.executable, str(Path(__file__).parent / "test_compact_elf_parity.py")],
             [sys.executable, str(Path(__file__).parent / "test_jit_build.py")],
             [sys.executable, str(Path(__file__).parent / "test_layout.py")],
+            [sys.executable, str(Path(__file__).parent.parent / "scripts" / "test_publish_artifacts.py")],
             [sys.executable, str(Path(__file__).parent / "test_incremental.py")],
         ]
         for cmd in tests:

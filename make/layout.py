@@ -11,7 +11,7 @@ import sys
 import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 MAKE_DIR = Path(__file__).resolve().parent
 ROOT = MAKE_DIR.parent
@@ -271,7 +271,7 @@ def input_set_id(
 
 
 def rel_join(base: Path, rel: str) -> Path:
-    if not rel or rel.startswith(("/", "\\")) or ".." in Path(rel).parts:
+    if not rel or rel.startswith(("/", "\\")) or PureWindowsPath(rel).is_absolute() or ".." in Path(rel).parts:
         raise LayoutError(f"path is not relative to its report: {rel!r}")
     path = base / rel
     resolved = path.resolve()
@@ -692,10 +692,15 @@ def _input_file(report: Path, rel: object) -> Path:
         not text
         or text.startswith(("/", "\\"))
         or Path(text).is_absolute()
+        or PureWindowsPath(text).is_absolute()
         or _ABS_PATH.search(text)
     ):
         raise LayoutError(f"input path is absolute: {text}")
-    return report.parent / text
+    root = report.parent.parent.resolve()
+    path = (report.parent / text).resolve()
+    if not path.is_relative_to(root):
+        raise LayoutError(f"input path escapes its program directory: {text}")
+    return path
 
 
 def _input_problem(report: Path, item: object) -> str | None:
