@@ -566,7 +566,7 @@ def edges_for_stem(src: Path, plan: GraphPlan) -> str:
             f"  stamp = {stamp.path}\n"
             f"  firmware = {backend.firmware}\n"
             f"  release = {release}\n"
-            f"  image_arg = {('--image-name ' + image_name) if backend.image_name else ''}\n"
+            f"  image_arg = {'--slot-symbol '+ slot_symbol if slot_symbol else ''} {'--image-name '+ image_name if backend.image_name else ''}\n"
             f"  helper = {mem.helper_addr:#x}\n"
             f"  slot = {mem.slot_addr:#x}\n"
             f"  slot_len = {mem.slot_len:#x}\n"

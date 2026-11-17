@@ -24,10 +24,7 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Print `{addr,size}` for one firmware ELF symbol.
-    Symbol {
-        firmware: PathBuf,
-        name: String,
-    },
+    Symbol { firmware: PathBuf, name: String },
     /// Dump firmware `.xpost.mem` (XPM1) addresses as one JSON object on stdout.
     MemMap {
         /// Linked firmware ELF carrying `.xpost.mem`.
@@ -93,6 +90,8 @@ enum Cmd {
     /// Accept one Compact ELF file only when `scan_at` returns Ok.
     Scan {
         file: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -209,7 +208,11 @@ fn pack(args: Cmd) -> Result<()> {
 /// binding table in. Getting the two orders out of step would silently point a
 /// reference at the wrong map, so both come from `bpf.toml` through the same
 /// metadata builder.
-fn index_map_references(image: &[u8], obj_path: &PathBuf, overlaid: &toml::Value) -> Result<Vec<u8>> {
+fn index_map_references(
+    image: &[u8],
+    obj_path: &PathBuf,
+    overlaid: &toml::Value,
+) -> Result<Vec<u8>> {
     use object::{Object, ObjectSection, ObjectSymbol};
 
     let data = fs::read(obj_path).with_context(|| format!("read {}", obj_path.display()))?;
@@ -309,11 +312,25 @@ fn pack_jit_cmd(args: Cmd) -> Result<()> {
     Ok(())
 }
 
-fn scan_file(file: &PathBuf) -> Result<()> {
+fn scan_file(file: &PathBuf, json: bool) -> Result<()> {
     let blob = fs::read(file).with_context(|| format!("read {}", file.display()))?;
     let mut reader = blob.as_slice();
     match scan_at(&mut reader, 0) {
-        ScanOutcome::Ok(_) => Ok(()),
+        ScanOutcome::Ok(parsed) => {
+            if json {
+                // scan_at accepts only the V0 profile with machine code 1.
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "name": parsed.name.as_str(),
+                        "slot_address": parsed.slot_address,
+                        "helper_address": parsed.helper_address,
+                        "machine": 1,
+                    })
+                );
+            }
+            Ok(())
+        }
         ScanOutcome::SoftSkip { file_len } => bail!("SoftSkip (file_len {file_len})"),
         ScanOutcome::HardFail => bail!("HardFail"),
     }
@@ -325,7 +342,7 @@ fn run(args: Args) -> Result<()> {
         Cmd::MemMap { firmware } => dump_mem_map(&firmware),
         pack_cmd @ Cmd::Pack { .. } => pack(pack_cmd),
         jit_cmd @ Cmd::PackJit { .. } => pack_jit_cmd(jit_cmd),
-        Cmd::Scan { file } => scan_file(&file),
+        Cmd::Scan { file, json } => scan_file(&file, json),
     }
 }
 

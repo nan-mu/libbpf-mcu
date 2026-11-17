@@ -1,106 +1,142 @@
 # libbpf-mcu
 
-libbpf-mcu 把 libbpf 风格的 XDP C 编译成两份结果。一份是主机上的 eBPF 对象。另一份是 ESP32-C3 上的 RV32IMC XDP ELF。MCU 侧是独立的 freestanding 编译，不是把 eBPF 字节码翻译成 RV32，也不是在 MCU 上运行 Linux XDP。
+libbpf-mcu builds libbpf-style C/eBPF XDP programs for the XPOST microcontroller runtime. It provides freestanding C headers, host build tools, PREVAIL verification, and artifact reports for ESP32-C3. Programs can run as native code compiled from C, native code generated from eBPF on the host, or eBPF bytecode packaged for the rBPF interpreter.
 
-已经实现的目标是 RV32IMC，ABI 为 `ilp32`，没有 FPU。eBPF 检查器接受 `bpf.o`，并不由此推出 MCU 二进制已经满足相应安全性质。链接布局和调用约定要单独说明。
+The supported MCU target is ESP32-C3 with RV32IMC, the ILP32 ABI, and no FPU. A second architecture is a project goal. The MCU runtime and helper interface come from XPOST. This repository does not provide a Linux XDP runtime.
 
-论文 coming soon。
+## Build modes
 
-本仓库自己的代码使用 [MIT](LICENSE)。`include/bpf/` 与 `include-bpf/bpf/` 里带 SPDX 的头文件保持其上游许可证，当前是 LGPL-2.1 或 BSD-2-Clause。`prevail/` 是 [vbpf/prevail](https://github.com/vbpf/prevail) 子模块，许可证以该目录中的文件为准。
+| Mode in reports | Input and processing | Result |
+| --- | --- | --- |
+| `bpf` | Clang compiles C with the BPF headers. | Raw eBPF relocatable ELF with sections, BTF, and relocations. |
+| `rv32` | Clang independently compiles the same C with the MCU headers, then LLD links against firmware addresses. | RV32IMC AOT object, linked debug ELF, raw image, and Compact ELF V0 container. |
+| `jit` | The host JIT compiles eBPF from the raw BPF object and links helpers and map references. | RV32IM machine code and a Compact ELF V0 container. RV32IMC devices can execute this code. |
+| `bpf-xpost` | The packer extracts eBPF and rewrites map references to indices for the rBPF loader. | eBPF image and a Compact ELF V0 container for interpretation. This is a packaging mode, not another compiler. |
 
-libbpf-mcu compiles libbpf-style XDP C into two results. One result is a host eBPF object. The other is an RV32IMC XDP ELF for the ESP32-C3. The MCU build is a separate freestanding compilation. It does not translate eBPF bytecode into RV32, and it is not a Linux XDP runtime on the MCU.
+AOT takes C as its compilation input. Its BPF object is the input to the PREVAIL gate. The JIT runs on the host and emits no compressed or floating-point instructions. The raw BPF object remains unchanged by all downstream modes.
 
-The implemented target is RV32IMC, the ABI is `ilp32`, and there is no FPU. Acceptance of `bpf.o` by an eBPF checker does not by itself establish the safety of the MCU binary. The linker layout and the calling convention need their own account.
+## Prerequisites
 
-Paper: coming soon.
+Run commands from this repository's root. The Pixi manifest and lock file target macOS on Apple Silicon (`osx-arm64`). Other host platforms need their own environment setup. Pixi installs Python `>=3.14.6,<3.15` and the declared Python dependency. Install the native tools separately.
 
-Code in this repository uses the [MIT](LICENSE) license. Headers under `include/bpf/` and `include-bpf/bpf/` that carry an SPDX line keep their upstream license. Those lines currently say LGPL-2.1 or BSD-2-Clause. `prevail/` is the [vbpf/prevail](https://github.com/vbpf/prevail) submodule. Use the license files in that directory.
+- Install Pixi, Ninja, Cargo, and Rust. `tools/Cargo.toml` uses Rust edition 2024, and `jit/Cargo.toml` uses edition 2021. Use a toolchain that supports these editions and their dependencies. These manifests declare no `rust-version`, and the repository does not pin a Rust toolchain.
+- Install LLVM with the BPF and RISC-V backends, LLD, `llvm-objcopy`, and `llvm-objdump`. Apple Clang does not supply the required BPF backend. The build prefers Homebrew LLVM for Clang and has no enforced LLVM minimum version. `--objcopy` and `--objdump` override those tools.
+- Initialize the PREVAIL submodule and build it manually. Backend builds require `prevail/bin/prevail`. PREVAIL's own [build instructions](prevail/README.md#building) describe its C++23 compiler and native dependencies.
+- Place the XPOST workspace beside this checkout. `tools/Cargo.toml` resolves `xpost-elf` at `../xpost/xpost-elf` relative to this repository. That crate owns Compact ELF V0 and XPM1 encoding and decoding.
+- Supply an already linked firmware ELF with a `.xpost.mem` XPM1 record for AOT, JIT, and rBPF builds. XPM1 provides the helper dispatcher, code slot, and map table addresses and lengths.
 
-## 现状
-
-代码还在改。这次按现状发布。下文的 `pixi` 命令是当前的构建方式。换一台机器时，缺的依赖和路径需要自己看代码，没有另写一份部署说明。实验室配置的清理以后再做。
-
-## Status
-
-The code is still changing. This publication keeps the tree as it is. The `pixi` commands below are the current build. On another machine, missing dependencies and paths have to be read out of the code. There is no separate deployment guide. Lab-specific cleanup comes later.
-
-## 构建
-
-在本仓库根目录运行。`--firmware` 是已经链接好的固件 ELF，里面要有 `.xpost.mem`，格式为 XPM1。地址按文件中的值用于槽位链接和 XDP ELF 元数据。本仓库不决定烧录哪一份镜像。
-
-```bash
-pixi run build --firmware <firmware.elf>
-pixi run build --firmware <firmware.elf> -c just_drop
-pixi run clean
-```
-
-不写 `-c` 时，先构建 `bpf`，再构建 `esp32c3`。输入是 `tests/**/*.c`，不含 `tests/unused/`。`-c <stem>` 只构建 `tests/**/<stem>.c`，同样跳过 `unused/`。
-
-产物写到 `--build-dir`，默认是仓库外的 `../build`。同一份 C 源码的 BPF、RV32 AOT、JIT 和 rBPF 容器分开放。文件名带模式，不再靠最后一次构建覆盖同名 `.elf`。`--image-name` 只改容器内部名称。`--output` 不再改路径，需要旧文件名时用 `artifacts export-legacy` 写到另一个目录。字段和哈希见 `docs/artifacts.md`。
-
-| 路径 | 作用 |
-| --- | --- |
-| `<p>/bpf/<p>_bpf.o` | 原始 Clang eBPF ELF，保留 section、BTF 和 relocation。 |
-| `<p>/bpf/report.toml` | BPF 报告和 map 定义。AOT 地址不写进这里。 |
-| `<p>/bpf/prevail.ok` | 这次 BPF 输入的 PREVAIL 凭证。只在真正跑过门禁时存在。 |
-| `<p>/rv32/<p>_rv32.elf` | AOT 的 XPOST Compact ELF V0 容器。 |
-| `<p>/jit/<p>_jit.elf` | JIT 的 XPOST Compact ELF V0 容器。 |
-| `<p>/bpf-xpost/<p>_bpf-xpost.elf` | rBPF 的 XPOST Compact ELF V0 容器。 |
-
-`.elf` 后缀不能区分引擎。看报告里的 `role` 和 `format`。不要把 `.bin` 嵌进固件。`layout.toml` 不是编译输入。
-
-Outputs go to `--build-dir`, which defaults to `../build` outside the repository. BPF, RV32 AOT, JIT, and the rBPF container from one C source stay in separate directories. File names include the mode, so a later build does not replace another mode's `.elf`. `--image-name` sets only the name inside the container. `--output` does not choose a path. For the old file names, `artifacts export-legacy` copies one mode into a different directory. Fields and hashes are in `docs/artifacts.md`.
-
-The `.elf` suffix does not say which engine produced the file. Read `role` and `format` in the report. Do not embed a `.bin` into the firmware. `layout.toml` is not a compile input.
-
-## 验证与本地发布
-
-普通开发构建不会访问 GitHub。检查已有构建目录的报告、输出和输入哈希：
+For example, initialize and build PREVAIL after installing its native dependencies:
 
 ```bash
-pixi run python make/layout.py verify --build-dir ../build
+	git submodule update --init --recursive
+	cmake -S prevail -B prevail/build -DCMAKE_BUILD_TYPE=Release
+	cmake --build prevail/build
+	pixi install
 ```
 
-PR 合并后，在干净的 `main` 上手动发布。必须显式指定 Tag 和带 XPM1 的固件：
+On macOS, use the Homebrew compiler and include/library configuration described in PREVAIL's build instructions if CMake selects Apple Clang.
+
+## Build programs
+
+Build a raw eBPF object without firmware or a PREVAIL run:
 
 ```bash
-pixi run publish-artifacts --firmware /path/to/firmware.elf --tag v0.1.0
+	pixi run build bpf -c firewall
 ```
 
-脚本重新构建全部程序的 BPF、RV32 AOT、JIT 和 rBPF，验证后生成压缩包及 `SHA256SUMS`。它使用本地 `gh` 上传。在创建不存在的 Tag 前，必须输入提示中的 Tag 和完整 commit。已有 Tag 或 Release 会被拒绝，脚本不会推送 Tag。
+Build BPF and AOT with addresses from your linked firmware:
 
-`--program firewall` 可重复使用。`--out /new/output` 指定尚不存在的仓库外目录。`--dry-run` 在干净 `main` 上执行检查和打包，不上传。开发分支可用 `--package-only` 验证本地包，该模式不调用 GitHub。`--draft` 显式创建草稿，否则为正式 Release。每个所选程序必须成功生成四种模式，不支持的模式会中止整个流程。
+```bash
+	pixi run build --firmware /path/to/firmware.elf -c firewall
+```
 
-CI 只检查代码和构建系统，不自动创建 Release。发布包不含固件，报告保留固件 SHA-256、源码和工具链信息。参数、目录和验证流程见 [docs/artifacts.md](docs/artifacts.md#local-release-command)。
+Build host JIT code or an rBPF container explicitly:
 
-## 流水线
+```bash
+	pixi run build jit --firmware /path/to/firmware.elf -c firewall
+	pixi run build esp32c3 --engine rbpf --firmware /path/to/firmware.elf -c firewall
+```
 
-`make/cli.py` 和 `make/build.py` 只排路径。它们解析输入，准备主机工具，读取 XPM1，并写出一张 ninja 图。Ninja 执行这些步骤。
+Omitting the target selects `bpf` followed by `esp32c3`. Omitting `-c` selects all `tests/**/*.c` except files under `tests/unused/`. `-c STEM` selects one unique source stem. Use `--inputs "path/to/a.c path/to/b.c"` for explicit sources, without `-c`.
 
-1. `cargo build` 生成 `tools/target/<host>/release/xpost-mcu-elf`。`tools/` 或 `xpost-elf` 的输入变化时重新构建。
-2. clang 编译 `<p>/bpf/<p>_bpf.o`。构建包含 ESP32-C3 或 JIT 时，ninja 对这份对象运行 PREVAIL，把凭证写到 `<p>/bpf/prevail.ok`，再进入后面的编译或打包。
-3. RV32 的可重定位对象、调试 ELF、原始镜像和报告写在 `<p>/rv32/`。AOT 地址在这份报告里。
-4. 直接调用 `xpost-mcu-elf pack`。它同时读 BPF 报告和带 `aot_addr` 的后端报告，不回写 BPF 报告。
+`--build-dir /path/to/build` selects the output root. The default is `../build`, outside the repository. `--force` rebuilds the graph. `--release` omits section contents from object reports. It does not select a different optimization level. `--image-name NAME` sets the container's internal name. `--slot-symbol SYMBOL` replaces the firmware slot address and length with that symbol's address and size for ESP32-C3 builds. JIT rejects `--slot-symbol`, `--engine rbpf`, and `--no-compact-elf`. `--no-compact-elf` suppresses the AOT container. `--output` is rejected because names are defined by the artifact protocol.
 
-`prevail/bin/prevail` 是检查器二进制。只构建 `bpf` 时不运行 PREVAIL。构建成功不等于设备上已经跑通。XDP ELF 的编解码只用 `xpost-elf`。不能写入 Compact ELF V0 的 map 不进入元数据。
+Python resolves inputs, prepares the host tool, reads XPM1, and writes a Ninja graph. Ninja runs Clang, PREVAIL, linking, reporting, and packing. `include-bpf/` supplies the BPF headers. `include/` supplies the freestanding MCU headers. Backend builds gate the raw BPF object with PREVAIL before publishing their reports. An rBPF build also produces the RV32 report used to establish map metadata.
 
-`make/cli.py` and `make/build.py` only plan the route. They resolve inputs, prepare the host tool, read XPM1, and write one ninja graph. Ninja runs the steps.
+## Artifact layout
 
-1. `cargo build` produces `tools/target/<host>/release/xpost-mcu-elf`. It rebuilds when `tools/` or `xpost-elf` inputs change.
-2. clang compiles `<p>/bpf/<p>_bpf.o`. When the build includes ESP32-C3 or JIT, ninja runs PREVAIL on that object, writes `<p>/bpf/prevail.ok`, and only then compiles or packs.
-3. The RV32 relocatable object, debug ELF, raw image, and report are written under `<p>/rv32/`. AOT addresses live in that report.
-4. The build calls `xpost-mcu-elf pack` directly. Pack reads the BPF report and the backend report that carries `aot_addr`. It does not write the BPF report.
+The complete layout below shows all four modes for program `<p>`. A build contains only the modes and optional artifacts it produced.
 
-The checker binary is `prevail/bin/prevail`. A `bpf` only build does not run PREVAIL. A successful build does not mean the image has run on a device. XDP ELF encode and decode use `xpost-elf`. Maps that cannot be stored in Compact ELF V0 stay out of the metadata.
+```text
+<build-root>/
+├── index.toml
+└── <p>/
+    ├── manifest.toml
+    ├── bpf/
+    │   ├── <p>_bpf.o
+    │   ├── report.toml
+    │   └── prevail.ok
+    ├── rv32/
+    │   ├── <p>_rv32.o
+    │   ├── <p>_rv32.debug.elf
+    │   ├── <p>_rv32.bin
+    │   ├── <p>_rv32.elf
+    │   └── report.toml
+    ├── jit/
+    │   ├── <p>_jit.bin
+    │   ├── <p>_jit.elf
+    │   └── report.toml
+    └── bpf-xpost/
+        ├── <p>_bpf-xpost.bin
+        ├── <p>_bpf-xpost.elf
+        └── report.toml
+```
 
-## 头文件
+`prevail.ok` exists only after the gate runs. JIT does not emit a relocatable `.o`. The RV32 `.debug.elf` is a linked ELF for inspection. The mode's other `.elf` is an XPOST Compact ELF V0 container. Select artifacts by their report `role` and `format`, not by the `.elf` suffix.
 
-`include/` 给 MCU freestanding 目标使用，对应 `esp32c3` 的 ninja 边。`include-bpf/` 给主机 BPF 目标使用，对应 `bpf` 的 ninja 边。两边不要混用。
+`index.toml` hashes program manifests. Each manifest hashes its mode reports, and each report hashes its declared artifacts and inputs. See the [artifact protocol and release matrix](docs/artifacts.md) for field ownership, fingerprints, invalidation, and legacy exports. Ninja files, depfiles, linker scripts, and staging directories are internal build files.
 
-`include/` is for the MCU freestanding target and the `esp32c3` ninja edge. `include-bpf/` is for the host BPF target and the `bpf` ninja edge. Do not mix the two trees.
+## XPOST integration
 
-## 范围
+XPOST consumes a selected artifact root, program, and profile. Resolve its engine to the corresponding mode directory:
 
-编译标志包括 `riscv32-unknown-none-elf`、`-march=rv32imc`、`-mabi=ilp32`、`-nostdlib`、`-ffreestanding` 和 `-fno-builtin`。源码不使用 libc、操作系统接口、动态分配或 Linux 运行时。第二个非 RISC-V 目标还没有实现。在那之前，跨架构是设计方向。
+| XPOST engine | libbpf-mcu mode | Container |
+| --- | --- | --- |
+| `Aot` | `rv32` | `<p>/rv32/<p>_rv32.elf` |
+| `Jit` | `jit` | `<p>/jit/<p>_jit.elf` |
+| `Rbpf` | `bpf-xpost` | `<p>/bpf-xpost/<p>_bpf-xpost.elf` |
 
-The compile flags include `riscv32-unknown-none-elf`, `-march=rv32imc`, `-mabi=ilp32`, `-nostdlib`, `-ffreestanding`, and `-fno-builtin`. The sources do not use libc, an operating-system interface, dynamic allocation, or a Linux runtime. A second non-RISC-V target is not implemented yet. Until that target exists, cross-architecture support is a design direction.
+Each profile must select its own root and program, especially when the same source has multiple slot or image-name variants. In a release archive, use the selected `sets/<id>` directory as the artifact root. The existing v1 index, manifest, and report fields remain the consumer contract.
+
+libbpf-mcu produces code, containers, and reports. XPOST builds and flashes firmware, loads containers, manages runtime caches, and runs device experiments. A firmware ELF is a build input here. A raw `.bin` is an inspection artifact, not a firmware flashing instruction.
+
+## Local verification
+
+Run the local test suite and validate an existing artifact tree:
+
+```bash
+	pixi run test
+	pixi run python make/layout.py verify --build-dir ../build
+```
+
+The suite includes Python build/protocol tests and Rust JIT tests. Some tests require the native tools, PREVAIL, and the sibling XPOST workspace. `pixi run clean` removes the default build output.
+
+Compilation, PREVAIL acceptance, artifact integrity, and device execution establish different facts. PREVAIL checks the eBPF input. It does not prove that the independently compiled MCU binary preserves those properties. Artifact verification checks the recorded files and hash links. ABI correctness, link layout, and behavior on a device require separate evidence. These instructions make no claim that a particular build or device experiment has passed.
+
+## Local release publication
+
+Define independent build sets in a TOML plan. Each set selects one program, requested modes, firmware, and backend options. The [release matrix reference](docs/artifacts.md#release-plans-and-matrix) includes two `case_mark` variants and explains generated dependencies.
+
+```bash
+	pixi run publish-artifacts --plan /path/to/release-plan.toml --tag v0.1.0
+```
+
+Formal publication requires clean local `main`, an explicit unused tag, and authenticated local `gh`. After building and validating the package, the script requires you to type the tag and full source commit. It then creates the tag reference through `gh api` and uploads with `gh release create --verify-tag`. Existing tags and Releases are rejected.
+
+`--package-only` builds and checks a local package on a development branch without GitHub calls. `--dry-run` requires clean `main` and checks the GitHub destination, then packages without publication. These two options are mutually exclusive. `--draft` creates a draft when uploading. `--out DIRECTORY` selects a new directory outside the repository. Publication runs locally. No hosted workflow participates.
+
+The archive retains independent `sets/<id>` artifact roots and an outer `release-index.toml`. Only the archive and its external `SHA256SUMS` are uploaded. Firmware is excluded, while reports retain its hash and XPM1 addresses. See the [package and publication reference](docs/artifacts.md#package-and-publication) for validation and failure behavior.
+
+## License
+
+Repository code is licensed under [MIT](LICENSE). Headers in `include/bpf/` and `include-bpf/bpf/` retain their SPDX licenses, currently `LGPL-2.1 OR BSD-2-Clause`. The PREVAIL submodule and its bundled dependencies retain their own notices, including [LICENSE.txt](prevail/LICENSE.txt) and [LICENSE-Apache-2.0.txt](prevail/LICENSE-Apache-2.0.txt).

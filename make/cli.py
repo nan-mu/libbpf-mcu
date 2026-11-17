@@ -236,6 +236,11 @@ def main():
             [sys.executable, str(Path(__file__).parent.parent / "scripts" / "test_publish_artifacts.py")],
             [sys.executable, str(Path(__file__).parent / "test_incremental.py")],
         ]
+        for crate in ("jit", "tools"):
+            tests.append([
+                "cargo", "test", "--manifest-path",
+                str(Path(__file__).resolve().parent.parent / crate / "Cargo.toml"),
+            ])
         for cmd in tests:
             info(f"→ {' '.join(cmd)}")
             result = subprocess.run(cmd, cwd=str(Path(__file__).parent))

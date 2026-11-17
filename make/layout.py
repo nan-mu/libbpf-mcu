@@ -68,11 +68,23 @@ MODE_SPECS: dict[str, tuple[Spec, ...]] = {
         Spec("aot_object", "{program}_rv32.o", "elf-riscv-relocatable", False, "object"),
         Spec("debug_elf", "{program}_rv32.debug.elf", "elf-riscv-linked", False, "debug"),
         Spec("image", "{program}_rv32.bin", "raw-rv32-image", False, "image"),
-        Spec("xpost_container", "{program}_rv32.elf", "xpost-compact-elf-v0", True, "container"),
+        Spec(
+            "xpost_container",
+            "{program}_rv32.elf",
+            "xpost-compact-elf-v0",
+            True,
+            "container",
+        ),
     ),
     "jit": (
         Spec("image", "{program}_jit.bin", "raw-rv32-image", False, "image"),
-        Spec("xpost_container", "{program}_jit.elf", "xpost-compact-elf-v0", True, "container"),
+        Spec(
+            "xpost_container",
+            "{program}_jit.elf",
+            "xpost-compact-elf-v0",
+            True,
+            "container",
+        ),
     ),
     "bpf-xpost": (
         Spec("image", "{program}_bpf-xpost.bin", "raw-ebpf-image", False, "image"),
@@ -271,7 +283,12 @@ def input_set_id(
 
 
 def rel_join(base: Path, rel: str) -> Path:
-    if not rel or rel.startswith(("/", "\\")) or PureWindowsPath(rel).is_absolute() or ".." in Path(rel).parts:
+    if (
+        not rel
+        or rel.startswith(("/", "\\"))
+        or PureWindowsPath(rel).is_absolute()
+        or ".." in Path(rel).parts
+    ):
         raise LayoutError(f"path is not relative to its report: {rel!r}")
     path = base / rel
     resolved = path.resolve()
@@ -349,14 +366,16 @@ def dependency_for(path: Path, source: Path) -> Dependency:
     return Dependency(rel, role, sha)
 
 
-def dependencies_from(source: Path, depfile: Path | None, extra: list[Path]) -> list[Dependency]:
-    paths = [source, *extra]
+def dependencies_from(
+    source: Path, depfile: Path | None, extra: list[Path]
+) -> list[Dependency]:
+    paths = list(extra)
     if depfile is not None and depfile.is_file():
         for item in parse_depfile(depfile.read_text()):
             paths.append(Path(item))
     found: dict[tuple[str, str], Dependency] = {}
     for path in paths:
-        if not path.is_file():
+        if not path.is_file() or path.resolve() == source.resolve():
             continue
         dep = dependency_for(path, source)
         found[(dep.path, dep.sha256)] = dep
@@ -431,7 +450,9 @@ def compose_report(
 ) -> str:
     if status not in {"success", "failed", "unsupported"}:
         raise LayoutError(f"bad status {status}")
-    extra = tuple((item.path, item.sha256) for item in inputs)
+    extra = ((source.path, source.sha256),) + tuple(
+        (item.path, item.sha256) for item in inputs
+    )
     if firmware and firmware.get("sha256"):
         extra = extra + (("firmware", firmware["sha256"]),)
     lines = [
@@ -462,6 +483,10 @@ def compose_report(
         f"endian = {q(build.endian)}",
         "",
     ]
+    lines.append("[build.options]")
+    for key, value in build.options:
+        lines.append(f"{q(key)} = {q(value)}")
+    lines.append("")
     for dep in deps:
         lines.extend(
             [
@@ -538,7 +563,11 @@ def artifact_records(items: list[ArtifactFile]) -> list[dict[str, object]]:
     for item in items:
         if item.role not in ROLES or item.format not in FORMATS:
             raise LayoutError(f"bad artifact role or format: {item.role} {item.format}")
-        if not item.rel or item.rel.startswith(("/", "\\")) or ".." in Path(item.rel).parts:
+        if (
+            not item.rel
+            or item.rel.startswith(("/", "\\"))
+            or ".." in Path(item.rel).parts
+        ):
             raise LayoutError(f"artifact path is not report-relative: {item.rel}")
         data = item.file.read_bytes()
         records.append(
@@ -792,7 +821,12 @@ def commit_mode(
 ) -> Path:
     program = check_program(program)
     mode = parse_mode(mode)
-    if verification.get("status") not in {"not_run", "accepted", "rejected", "unsupported"}:
+    if verification.get("status") not in {
+        "not_run",
+        "accepted",
+        "rejected",
+        "unsupported",
+    }:
         raise LayoutError("verification status is missing")
     records = artifact_records(artifacts)
     if not any(bool(art["primary"]) for art in records):
@@ -857,9 +891,15 @@ def retract_mode(build_dir: Path, program: str, mode: str, reason: str) -> None:
         toolchain={},
         inputs=[],
         firmware=None,
-        verification={"status": "rejected", "input_sha256": "", "verifier": "", "verifier_id": "", "options": ""},
+        verification={
+            "status": "rejected",
+            "input_sha256": "",
+            "verifier": "",
+            "verifier_id": "",
+            "options": "",
+        },
         artifacts=[],
-        body=f'reason = {q(reason)}\n',
+        body=f"reason = {q(reason)}\n",
     )
     with _index_lock(build_dir):
         existing = _load_toml(manifest_path(build_dir, program))
@@ -1040,6 +1080,104 @@ def load_mode(build_dir: Path, program: str, mode: str) -> dict:
     return _check_report_file(report, str(row["report_sha256"]))
 
 
+def validate_release_mode(build_dir: Path, program: str, mode: str) -> set[str]:
+    """Validate the canonical release contract and return its report and artifacts."""
+    build_dir = build_dir.resolve()
+    program = check_program(program)
+    mode = parse_mode(mode)
+
+    def safe(path: Path) -> None:
+        if not path.is_relative_to(build_dir):
+            raise LayoutError(f"path escapes tree: {path}")
+        for part in (path, *path.parents):
+            if part == build_dir:
+                break
+            if part.is_symlink():
+                raise LayoutError(f"path uses symlink: {part}")
+
+    manifest_file = manifest_path(build_dir, program)
+    report_file = report_path(build_dir, program, mode)
+    for path in (index_path(build_dir), manifest_file, report_file):
+        safe(path)
+    index = _load_toml(index_path(build_dir))
+    rows = _as_list(index.get("program"))
+    matches = [r for r in rows if isinstance(r, dict) and r.get("name") == program]
+    if len(matches) != 1 or matches[0].get("manifest") != f"{program}/manifest.toml":
+        raise LayoutError(f"{program}: invalid index entry")
+    manifest = _load_toml(manifest_file)
+    if manifest.get("program") != program:
+        raise LayoutError(f"{program}: manifest identity mismatch")
+    modes = _as_list(manifest.get("mode"))
+    matches = [r for r in modes if isinstance(r, dict) and r.get("name") == mode]
+    if len(matches) != 1 or matches[0].get("report") != f"{mode}/report.toml":
+        raise LayoutError(f"{program}/{mode}: invalid manifest entry")
+    for spec in MODE_SPECS[mode]:
+        safe(report_file.parent / filename(program, spec))
+    if mode != "bpf":
+        safe(build_dir / program / "bpf" / f"{program}_bpf.o")
+    if mode == "bpf-xpost":
+        safe(report_path(build_dir, program, "rv32"))
+    report = load_mode(build_dir, program, mode)
+    if (
+        report.get("program") != program
+        or report.get("mode") != mode
+        or report.get("source") != manifest.get("source")
+    ):
+        raise LayoutError(f"{program}/{mode}: report identity mismatch")
+    artifacts = report.get("artifact", [])
+    specs = MODE_SPECS[mode]
+    expected = {(s.role, filename(program, s), s.format, s.primary) for s in specs}
+    if (
+        not isinstance(artifacts, list)
+        or len(artifacts) != len(specs)
+        or any(not isinstance(a, dict) for a in artifacts)
+        or {
+            (a.get("role"), a.get("path"), a.get("format"), a.get("primary"))
+            for a in artifacts
+        }
+        != expected
+    ):
+        raise LayoutError(f"{program}/{mode}: artifact identities mismatch")
+    files = {report_file.relative_to(build_dir).as_posix()}
+    for artifact in artifacts:
+        path = report_file.parent / artifact["path"]
+        safe(path)
+        files.add(path.relative_to(build_dir).as_posix())
+    expected_inputs = {
+        "bpf": {},
+        "rv32": {"gate_bpf": f"../bpf/{program}_bpf.o"},
+        "jit": {"bpf_object": f"../bpf/{program}_bpf.o"},
+        "bpf-xpost": {
+            "bpf_object": f"../bpf/{program}_bpf.o",
+            "map_index_basis": "../rv32/report.toml",
+        },
+    }[mode]
+    inputs = report.get("input_artifact", [])
+    if (
+        not isinstance(inputs, list)
+        or len(inputs) != len(expected_inputs)
+        or any(not isinstance(i, dict) for i in inputs)
+        or {(i.get("role"), i.get("path")) for i in inputs}
+        != set(expected_inputs.items())
+    ):
+        raise LayoutError(f"{program}/{mode}: input dependencies mismatch")
+    for item in inputs:
+        path = Path(os.path.normpath(report_file.parent / item["path"]))
+        safe(path)
+    if mode != "bpf":
+        verification = report.get("verification", {})
+        bpf = build_dir / program / "bpf" / f"{program}_bpf.o"
+        safe(bpf)
+        if (
+            not isinstance(verification, dict)
+            or verification.get("status") != "accepted"
+            or verification.get("input_sha256") != sha256_file(bpf)
+            or not verification.get("verifier_id")
+        ):
+            raise LayoutError(f"{program}/{mode}: verification mismatch")
+    return files
+
+
 def verify_tree(build_dir: Path) -> list[tuple[str, str]]:
     index = _load_toml(index_path(build_dir))
     if index.get("schema") != SCHEMA_INDEX:
@@ -1097,10 +1235,38 @@ def export_legacy(build_dir: Path, out: Path, mode: str) -> list[str]:
                 bpf_file,
                 report_path(build_dir, program, "rv32"),
             )
-            _copy_role(build_dir, program, mode, mode_report, "aot_object", destination / "esp32c3.o")
-            _copy_role(build_dir, program, mode, mode_report, "debug_elf", destination / "esp32c3.elf")
-            _copy_role(build_dir, program, mode, mode_report, "image", destination / "esp32c3.bin")
-            _copy_role(build_dir, program, mode, mode_report, "xpost_container", destination / f"{program}.elf")
+            _copy_role(
+                build_dir,
+                program,
+                mode,
+                mode_report,
+                "aot_object",
+                destination / "esp32c3.o",
+            )
+            _copy_role(
+                build_dir,
+                program,
+                mode,
+                mode_report,
+                "debug_elf",
+                destination / "esp32c3.elf",
+            )
+            _copy_role(
+                build_dir,
+                program,
+                mode,
+                mode_report,
+                "image",
+                destination / "esp32c3.bin",
+            )
+            _copy_role(
+                build_dir,
+                program,
+                mode,
+                mode_report,
+                "xpost_container",
+                destination / f"{program}.elf",
+            )
         elif mode == "jit":
             write_legacy_toml(
                 destination / "bpf.toml",
@@ -1109,8 +1275,17 @@ def export_legacy(build_dir: Path, out: Path, mode: str) -> list[str]:
                 None,
                 skip=frozenset({"[jit]", "[rbpf]"}),
             )
-            _copy_role(build_dir, program, mode, mode_report, "image", destination / "jit.bin")
-            _copy_role(build_dir, program, mode, mode_report, "xpost_container", destination / f"{program}.elf")
+            _copy_role(
+                build_dir, program, mode, mode_report, "image", destination / "jit.bin"
+            )
+            _copy_role(
+                build_dir,
+                program,
+                mode,
+                mode_report,
+                "xpost_container",
+                destination / f"{program}.elf",
+            )
             (destination / "jit.toml").write_text(
                 selected_body(report_path(build_dir, program, mode).read_text())
             )
@@ -1124,8 +1299,22 @@ def export_legacy(build_dir: Path, out: Path, mode: str) -> list[str]:
                 bpf_file,
                 None,
             )
-            _copy_role(build_dir, program, mode, mode_report, "image", destination / f"{program}.bin")
-            _copy_role(build_dir, program, mode, mode_report, "xpost_container", destination / f"{program}.elf")
+            _copy_role(
+                build_dir,
+                program,
+                mode,
+                mode_report,
+                "image",
+                destination / f"{program}.bin",
+            )
+            _copy_role(
+                build_dir,
+                program,
+                mode,
+                mode_report,
+                "xpost_container",
+                destination / f"{program}.elf",
+            )
         exported.append(program)
     if not exported:
         raise LayoutError(f"no verified {mode} program to export")
@@ -1135,7 +1324,7 @@ def export_legacy(build_dir: Path, out: Path, mode: str) -> list[str]:
             [
                 f"schema = {q(SCHEMA_LEGACY)}",
                 f"mode = {q(mode)}",
-                "note = \"path transition only; files are copies and are not written back\"",
+                'note = "path transition only; files are copies and are not written back"',
                 "",
             ]
         ),
@@ -1184,8 +1373,10 @@ def write_legacy_toml(
     skip: frozenset[str] = frozenset(),
 ) -> None:
     report = tomllib.loads(report_file.read_text())
-    text = _legacy_header(report, bpf_file.stat().st_size) + "\n" + selected_body(
-        report_file.read_text(), skip
+    text = (
+        _legacy_header(report, bpf_file.stat().st_size)
+        + "\n"
+        + selected_body(report_file.read_text(), skip)
     )
     dest.write_text(text)
     if addr_file is None or not addr_file.is_file():
@@ -1390,6 +1581,7 @@ def _backend_facts(
     cflags: str,
     ldflags: str,
     diagnostic: tuple[str, ...],
+    container: bool = True,
 ) -> BuildFacts:
     argv = ["build", mode, "-c", program, "--engine", engine]
     if release:
@@ -1399,6 +1591,7 @@ def _backend_facts(
     if slot_symbol:
         argv.extend(["--slot-symbol", slot_symbol])
     options = (
+        ("container", "1" if container else "0"),
         ("engine", engine),
         ("helper", firmware.get("helper_addr", "")),
         ("image_name", image_name),
@@ -1406,6 +1599,8 @@ def _backend_facts(
         ("slot", firmware.get("slot_addr", "")),
         ("slot_len", firmware.get("slot_len", "")),
         ("slot_symbol", slot_symbol),
+        ("table", firmware.get("table_addr", "")),
+        ("table_len", firmware.get("table_len", "")),
     )
     return BuildFacts(
         tuple(argv),
@@ -1425,12 +1620,19 @@ def cmd_commit_rv32(args: argparse.Namespace) -> None:
     bpf_sha = sha256_file(args.bpf_object)
     verification = verification_from_stamp(args.stamp, args.bpf_object)
     if verification["status"] != "accepted":
-        retract_mode(args.build_dir, args.program, "rv32", "PREVAIL did not accept this BPF object")
+        retract_mode(
+            args.build_dir,
+            args.program,
+            "rv32",
+            "PREVAIL did not accept this BPF object",
+        )
         _die("refusing to publish rv32 without an accepted gate stamp")
     container = args.container if args.container and args.container.is_file() else None
     body = args.body.read_text()
     if container is not None:
-        body = body.rstrip() + f"\nelf_size_kb = {container.stat().st_size / 1024:.3f}\n"
+        body = (
+            body.rstrip() + f"\nelf_size_kb = {container.stat().st_size / 1024:.3f}\n"
+        )
     artifacts = [
         ArtifactFile("aot_object", "elf-riscv-relocatable", False, args.object, args.object.name),
         ArtifactFile("debug_elf", "elf-riscv-linked", False, args.debug_elf, args.debug_elf.name),
@@ -1484,6 +1686,7 @@ def cmd_commit_rv32(args: argparse.Namespace) -> None:
             args.image_name,
             args.slot_symbol,
             firmware,
+            container=container is not None,
             target="riscv32-unknown-none-elf",
             isa="rv32imc",
             abi="ilp32",
@@ -1491,7 +1694,13 @@ def cmd_commit_rv32(args: argparse.Namespace) -> None:
             ldflags=_flag_text("ldflags"),
             diagnostic=tuple(
                 redact(part, args.build_dir)
-                for part in (str(args.clang), "-c", str(args.src), "-o", str(args.object))
+                for part in (
+                    str(args.clang),
+                    "-c",
+                    str(args.src),
+                    "-o",
+                    str(args.object),
+                )
             ),
         ),
         dependencies_from(args.src, args.headers if args.headers.is_file() else None, extra),
@@ -1509,7 +1718,12 @@ def cmd_commit_xpost(args: argparse.Namespace) -> None:
     bpf_sha = sha256_file(args.bpf_object)
     verification = verification_from_stamp(args.stamp, args.bpf_object)
     if verification["status"] != "accepted":
-        retract_mode(args.build_dir, args.program, "bpf-xpost", "PREVAIL did not accept this BPF object")
+        retract_mode(
+            args.build_dir,
+            args.program,
+            "bpf-xpost",
+            "PREVAIL did not accept this BPF object",
+        )
         _die("refusing to publish bpf-xpost without an accepted gate stamp")
     addr_sha = sha256_file(args.addr_report)
     body = "\n".join(
@@ -1528,7 +1742,7 @@ def cmd_commit_xpost(args: argparse.Namespace) -> None:
         args.slot_len,
         args.table,
         args.table_len,
-        "",
+        args.slot_symbol,
     )
     release = args.release == "1"
     commit_mode(
@@ -1542,7 +1756,7 @@ def cmd_commit_xpost(args: argparse.Namespace) -> None:
             release,
             "rbpf",
             args.image_name,
-            "",
+            args.slot_symbol,
             firmware,
             target="bpf",
             isa="ebpf",
@@ -1696,6 +1910,7 @@ def main() -> None:
     xpost.add_argument("--stamp", type=Path, required=True)
     xpost.add_argument("--firmware", type=Path, required=True)
     xpost.add_argument("--image-name", default="")
+    xpost.add_argument("--slot-symbol", default="")
     xpost.add_argument("--helper", required=True)
     xpost.add_argument("--slot", required=True)
     xpost.add_argument("--slot-len", required=True)
@@ -1729,4 +1944,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

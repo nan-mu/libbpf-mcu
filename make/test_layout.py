@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import tomllib
 import unittest
@@ -17,6 +19,9 @@ from layout import (
     LayoutError,
     SourceRecord,
     commit_mode,
+    compose_report,
+    dependencies_from,
+    _backend_facts,
     export_legacy,
     input_set_id,
     load_mode,
@@ -86,7 +91,6 @@ def publish(
         build or facts(),
         deps
         or [
-            Dependency("tests/xdp/firewall.c", "source", "source-sha"),
             Dependency("include-bpf/vmlinux.h", "header", "header-sha"),
         ],
         {"clang": "clang version test"},
@@ -107,6 +111,53 @@ def publish(
 
 
 class LayoutTests(unittest.TestCase):
+    def test_report_identity_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            src = directory / "source.c"
+            header = directory / "header.h"
+            alias = directory / "alias.c"
+            depfile = directory / "source.d"
+            src.write_text("first")
+            header.write_text("header")
+            alias.symlink_to(src)
+            depfile.write_text(f"out: {src} {alias} {header}\n")
+            deps = dependencies_from(src, depfile, [src, alias, header])
+            self.assertEqual(len(deps), 1)
+            self.assertEqual(deps[0].sha256, sha256_file(header))
+            firmware = {"helper_addr": "0x1", "slot_addr": "0x2", "slot_len": "0x3", "table_addr": "0x4", "table_len": "0x5"}
+            build = _backend_facts("firewall", "rv32", False, "aot", "image", "entry", firmware,
+                target="riscv32", isa="rv32imc", abi="ilp32", cflags="flags", ldflags="link", diagnostic=(), container=False)
+            toolchain = {"clang": "clang test"}
+            def report(sha: str) -> dict:
+                return tomllib.loads(compose_report(program="firewall", mode="rv32", status="success",
+                    source=source(sha), build=build, deps=deps, toolchain=toolchain, inputs=[],
+                    firmware={**firmware, "slot_symbol": "entry"}, verification={"status": "not_run"}, artifacts=[], body=""))
+            first = report(sha256_file(src))
+            src.write_text("second")
+            second = report(sha256_file(src))
+            self.assertNotEqual(first["build"]["input_set_id"], second["build"]["input_set_id"])
+            self.assertEqual(len(first["dependency"]), 1)
+            self.assertEqual(first["firmware"]["slot_symbol"], "entry")
+            options = first["build"]["options"]
+            self.assertEqual(options["slot_symbol"], "entry")
+            self.assertEqual((options["table"], options["table_len"], options["container"]), ("0x4", "0x5", "0"))
+            fields = {key: first["build"][key] for key in ("abi", "argv", "cflags", "endian", "isa", "ldflags", "opt", "target")}
+            fields["options"] = sorted(options.items())
+            fields["toolchain"] = first["toolchain"]
+            encoded = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+            self.assertEqual(first["build"]["configuration_id"], hashlib.sha256(encoded).hexdigest())
+
+    def test_rbpf_graph_passes_slot_symbol(self) -> None:
+        from build import GraphPlan, McuLink, MemMapV0, edges_for_stem
+
+        backend = McuLink(MemMapV0(1, 2, 3, 4, 5), Path("linker"), Path("tool"),
+                          Path("firmware"), True, slot_symbol="firmware_slot", engine="rbpf")
+        plan = GraphPlan((Path("firewall.c"),), backend, False, "objdump", Path("build"))
+        graph = edges_for_stem(Path("firewall.c"), plan)
+        xpost = graph.split(": commit_xpost", 1)[1]
+        self.assertIn("--slot-symbol firmware_slot", xpost)
+
     def test_mode_paths_do_not_collide(self) -> None:
         root = Path("/tmp/build")
         paths = [

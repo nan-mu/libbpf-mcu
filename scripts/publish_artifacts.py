@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -13,7 +14,9 @@ import tarfile
 import tempfile
 import tomllib
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "make"))
@@ -24,6 +27,135 @@ LOG_DIR: Path | None = None
 
 class PublishError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class BuildSet:
+    id: str
+    program: str
+    modes: tuple[str, ...]
+    firmware: Path | None
+    firmware_sha256: str | None
+    image_name: str | None
+    slot_symbol: str | None
+    release: bool
+    mem_map: Any | None
+
+
+def load_plan(path: Path) -> tuple[BuildSet, ...]:
+    """Validate every plan entry and inspect firmware before returning any set."""
+    from build import (
+        _default_inputs,
+        apply_slot_symbol,
+        ensure_tool,
+        load_mem_map_from_firmware,
+    )
+
+    doc = document(path)
+    if set(doc) != {"schema", "build"} or doc["schema"] != "libbpf-mcu.release-plan.v1":
+        raise PublishError("invalid release plan schema or keys")
+    rows = doc["build"]
+    if not isinstance(rows, list) or not rows:
+        raise PublishError("release plan must contain build entries")
+    names = [p.stem for p in _default_inputs()]
+    ids: set[str] = set()
+    sets = []
+    allowed = {
+        "id",
+        "program",
+        "modes",
+        "firmware",
+        "image_name",
+        "slot_symbol",
+        "release",
+    }
+    for row in rows:
+        if not isinstance(row, dict) or set(row) - allowed:
+            raise PublishError("invalid build entry or unknown keys")
+        ident, program, modes = row.get("id"), row.get("program"), row.get("modes")
+        if not isinstance(ident, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_-]*", ident
+        ):
+            raise PublishError(f"unsafe build id: {ident!r}")
+        if ident.casefold() in ids:
+            raise PublishError(f"duplicate build id: {ident}")
+        ids.add(ident.casefold())
+        if not isinstance(program, str) or names.count(program) != 1:
+            raise PublishError(f"unknown or ambiguous program: {program!r}")
+        if (
+            not isinstance(modes, list)
+            or not modes
+            or any(
+                not isinstance(mode, str) or mode not in layout.MODES for mode in modes
+            )
+            or len(set(modes)) != len(modes)
+        ):
+            raise PublishError(f"{ident}: invalid modes")
+        release = row.get("release", False)
+        if type(release) is not bool:
+            raise PublishError(f"{ident}: release must be a boolean")
+        image_name = row.get("image_name")
+        if image_name is not None and (
+            not isinstance(image_name, str)
+            or not re.fullmatch(r"[A-Za-z0-9_]{1,31}", image_name)
+        ):
+            raise PublishError(f"{ident}: invalid image name")
+        slot = row.get("slot_symbol")
+        if slot is not None and (
+            not isinstance(slot, str)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", slot)
+        ):
+            raise PublishError(f"{ident}: invalid slot symbol")
+        if slot and "jit" in modes:
+            raise PublishError(f"{ident}: jit does not support slot_symbol")
+        backend = any(mode != "bpf" for mode in modes)
+        raw_firmware = row.get("firmware")
+        if not backend and (
+            raw_firmware is not None
+            or image_name is not None
+            or slot is not None
+            or release
+        ):
+            raise PublishError(f"{ident}: backend options require a backend mode")
+        if backend and (not isinstance(raw_firmware, str) or not raw_firmware):
+            raise PublishError(f"{ident}: firmware is required")
+        firmware = (path.parent / raw_firmware).resolve() if backend else None
+        if firmware is not None and not firmware.is_file():
+            raise PublishError(f"{ident}: firmware not found: {firmware}")
+        sets.append(
+            BuildSet(
+                ident,
+                program,
+                tuple(modes),
+                firmware,
+                layout.sha256_file(firmware) if firmware else None,
+                image_name,
+                slot,
+                release,
+                None,
+            )
+        )
+    if not any(item.firmware for item in sets):
+        return tuple(sets)
+    from dataclasses import replace
+
+    try:
+        tool = ensure_tool(force=True)
+    except SystemExit as exc:
+        raise PublishError("host tool build failed") from exc
+    inspected = []
+    for item in sets:
+        if item.firmware is None:
+            inspected.append(item)
+            continue
+        try:
+            mem = load_mem_map_from_firmware(item.firmware, tool)
+            if item.slot_symbol:
+                mem = apply_slot_symbol(mem, item.firmware, tool, item.slot_symbol)
+        except SystemExit as exc:
+            raise PublishError(f"{item.id}: firmware inspection failed") from exc
+        inspected.append(replace(item, mem_map=mem))
+    return tuple(inspected)
 
 
 def run(args: list[str], *, allow_failure: bool = False) -> subprocess.CompletedProcess:
@@ -71,9 +203,12 @@ def contained(root: Path, rel: str) -> Path:
     return path
 
 
-def official(root: Path, programs: list[str]) -> set[str]:
+def official(
+    root: Path, programs: list[str], expected_modes: tuple[str, ...] | None = None
+) -> set[str]:
     """Validate the protocol and return precisely the files allowed in the archive."""
     root = root.resolve()
+    expected_modes = expected_modes if expected_modes is not None else layout.MODES
     index = document(contained(root, "index.toml"))
     rows = index.get("program", [])
     if (
@@ -83,7 +218,6 @@ def official(root: Path, programs: list[str]) -> set[str]:
     ):
         raise PublishError("index programs are missing, duplicated, or not sorted")
     files = {"index.toml"}
-    inputs = []
     for row in rows:
         name = row["name"]
         if row.get("manifest") != f"{name}/manifest.toml":
@@ -101,104 +235,14 @@ def official(root: Path, programs: list[str]) -> set[str]:
             manifest.get("stale")
             or manifest.get("failed")
             or not isinstance(modes, list)
-            or [r.get("name") for r in modes] != list(layout.MODES)
+            or [r.get("name") for r in modes] != list(expected_modes)
         ):
             raise PublishError(f"{name}: missing, duplicated, stale, or failed modes")
         files.add(row["manifest"])
         for mode in modes:
-            m = mode["name"]
-            expected_report = f"{m}/report.toml"
-            if mode.get("report") != expected_report:
-                raise PublishError(f"{name}/{m}: invalid report path")
-            rel = f"{name}/{expected_report}"
-            report_path = contained(root, rel)
-            report = document(report_path)
-            if (
-                layout.sha256_file(report_path) != mode.get("report_sha256")
-                or report.get("program") != name
-                or report.get("mode") != m
-                or report.get("source") != manifest.get("source")
-            ):
-                raise PublishError(f"{name}/{m}: report identity or hash mismatch")
-            files.add(rel)
-            artifacts = report.get("artifact", [])
-            specs = layout.MODE_SPECS[m]
-            if not isinstance(artifacts, list) or len(artifacts) != len(specs):
-                raise PublishError(f"{name}/{m}: missing or duplicated artifacts")
-            expected = {
-                (s.role, layout.filename(name, s), s.format, s.primary) for s in specs
-            }
-            actual = {
-                (a.get("role"), a.get("path"), a.get("format"), a.get("primary"))
-                for a in artifacts
-            }
-            if actual != expected:
-                raise PublishError(f"{name}/{m}: artifact identities mismatch")
-            for a in artifacts:
-                artifact_rel = f"{name}/{m}/{a['path']}"
-                artifact = contained(root, artifact_rel)
-                if layout.sha256_file(artifact) != a.get(
-                    "sha256"
-                ) or artifact.stat().st_size != a.get("size_bytes"):
-                    raise PublishError(f"{name}/{m}: artifact hash or size mismatch")
-                files.add(artifact_rel)
-            expected_inputs = {
-                "bpf": set(),
-                "rv32": {"gate_bpf"},
-                "jit": {"bpf_object"},
-                "bpf-xpost": {"bpf_object", "map_index_basis"},
-            }[m]
-            input_rows = report.get("input_artifact", [])
-            if (
-                not isinstance(input_rows, list)
-                or {i.get("role") for i in input_rows} != expected_inputs
-                or len(input_rows) != len(expected_inputs)
-            ):
-                raise PublishError(
-                    f"{name}/{m}: missing or duplicated input dependencies"
-                )
-            for item in input_rows:
-                raw = item.get("path", "")
-                if not raw or "\\" in raw or PurePosixPath(raw).is_absolute():
-                    raise PublishError(f"{name}/{m}: invalid input path")
-                cursor = report_path.parent
-                for part in PurePosixPath(raw).parts:
-                    cursor = cursor.parent if part == ".." else cursor / part
-                    if cursor.is_symlink():
-                        raise PublishError(f"{name}/{m}: input uses symlink")
-                target = (report_path.parent / raw).resolve()
-                if not target.is_relative_to((root / name).resolve()):
-                    raise PublishError(f"{name}/{m}: input escapes program")
-                input_rel = target.relative_to(root.resolve()).as_posix()
-                expected_input = (
-                    root / name / "rv32/report.toml"
-                    if item["role"] == "map_index_basis"
-                    else root / name / "bpf" / f"{name}_bpf.o"
-                )
-                if target != expected_input:
-                    raise PublishError(f"{name}/{m}: incorrect path for {item['role']}")
-                lexical = Path(os.path.normpath(str(report_path.parent / raw)))
-                contained(root, lexical.relative_to(root).as_posix())
-                if target != lexical or layout.sha256_file(target) != item.get(
-                    "sha256"
-                ):
-                    raise PublishError(f"{name}/{m}: input hash or symlink mismatch")
-                inputs.append(input_rel)
-            verification = report.get("verification", {})
-            bpf_hash = layout.sha256_file(contained(root, f"{name}/bpf/{name}_bpf.o"))
-            if (
-                verification.get("status") != "accepted"
-                or verification.get("input_sha256") != bpf_hash
-                or not verification.get("verifier_id")
-            ):
-                raise PublishError(
-                    f"{name}/{m}: verification was not accepted for these BPF bytes"
-                )
-            layout.load_mode(root, name, m)
-    if not set(inputs) <= files:
-        raise PublishError("input artifact is not in the official file set")
+            files.update(layout.validate_release_mode(root, name, mode["name"]))
     if set(layout.verify_tree(root)) != {
-        (p, m) for p in programs for m in layout.MODES
+        (p, m) for p in programs for m in expected_modes
     }:
         raise PublishError("tree verification failed")
     return files
@@ -210,8 +254,97 @@ def sums(root: Path, files: set[str]) -> str:
     )
 
 
-def verify_package(root: Path, programs: list[str]) -> None:
-    files = official(root, programs)
+def produced_modes(requested: tuple[str, ...]) -> tuple[str, ...]:
+    modes = set(requested) | {"bpf"}
+    if "bpf-xpost" in modes:
+        modes.add("rv32")
+    return tuple(mode for mode in layout.MODES if mode in modes)
+
+
+def inspect_container(path: Path) -> dict:
+    from build import tool_bin_path
+
+    result = run([str(tool_bin_path()), "scan", str(path), "--json"])
+    try:
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict):
+            raise ValueError("expected an object")
+        return data
+    except (ValueError, TypeError) as exc:
+        raise PublishError(f"invalid container inspection output: {path}") from exc
+
+
+def verify_package(root: Path, sets: tuple[BuildSet, ...]) -> None:
+    index = document(contained(root, "release-index.toml"))
+    rows = index.get("set")
+    if (
+        index.get("schema") != "libbpf-mcu.release-index.v1"
+        or not isinstance(rows, list)
+        or len(rows) != len(sets)
+    ):
+        raise PublishError("invalid release index")
+    files = {"release-index.toml"}
+    for item, row in zip(sets, rows):
+        rel = f"sets/{item.id}"
+        modes = produced_modes(item.modes)
+        expected = {
+            "id": item.id,
+            "program": item.program,
+            "root": rel,
+            "requested_modes": list(item.modes),
+            "produced_modes": list(modes),
+        }
+        if item.firmware_sha256 is not None:
+            expected["firmware_sha256"] = item.firmware_sha256
+        if row != expected:
+            raise PublishError(f"{item.id}: release index mismatch")
+        set_root = contained(root, rel)
+        for path in official(set_root, [item.program], modes):
+            files.add(f"{rel}/{path}")
+        for mode in modes:
+            if mode != "bpf":
+                report = document(set_root / item.program / mode / "report.toml")
+                firmware = report.get("firmware", {})
+                if firmware.get("sha256") != item.firmware_sha256:
+                    raise PublishError(f"{item.id}/{mode}: firmware hash mismatch")
+                for key in (
+                    "helper_addr",
+                    "slot_addr",
+                    "slot_len",
+                    "table_addr",
+                    "table_len",
+                ):
+                    try:
+                        matches = int(firmware[key], 0) == getattr(item.mem_map, key)
+                    except (KeyError, TypeError, ValueError, AttributeError):
+                        matches = False
+                    if not matches:
+                        raise PublishError(f"{item.id}/{mode}: firmware {key} mismatch")
+                options = report.get("build", {}).get("options", {})
+                for key, expected in (
+                    ("image_name", item.image_name or ""),
+                    ("release", "1" if item.release else "0"),
+                    ("slot_symbol", item.slot_symbol or ""),
+                ):
+                    if options.get(key) != expected:
+                        raise PublishError(
+                            f"{item.id}/{mode}: build option {key} mismatch"
+                        )
+                spec = next(
+                    s for s in layout.MODE_SPECS[mode] if s.role == "xpost_container"
+                )
+                container = (
+                    set_root / item.program / mode / layout.filename(item.program, spec)
+                )
+                metadata = inspect_container(container)
+                expected = {
+                    "name": item.image_name or item.program,
+                    "slot_address": item.mem_map.slot_addr,
+                    "helper_address": item.mem_map.helper_addr,
+                    "machine": 1,
+                }
+                if metadata != expected:
+                    raise PublishError(f"{item.id}/{mode}: container metadata mismatch")
     actual = {
         p.relative_to(root).as_posix()
         for p in root.rglob("*")
@@ -252,9 +385,8 @@ def main(argv: list[str] | None = None) -> int:
     global LOG_DIR
     LOG_DIR = None
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--firmware", type=Path, required=True)
+    parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--tag", required=True)
-    parser.add_argument("--program", action="append")
     parser.add_argument("--out", type=Path)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--dry-run", action="store_true")
@@ -269,10 +401,11 @@ def main(argv: list[str] | None = None) -> int:
             or args.tag.endswith(".")
         ):
             raise PublishError("tag must be a safe single path segment")
-        firmware = args.firmware.expanduser().resolve()
-        if not firmware.is_file():
-            raise PublishError(f"firmware not found: {firmware}")
-        firmware_hash = layout.sha256_file(firmware)
+        plan = args.plan.expanduser().resolve()
+        plan_hash = layout.sha256_file(plan)
+        sets = load_plan(plan)
+        if layout.sha256_file(plan) != plan_hash:
+            raise PublishError("plan changed during preflight")
         out = (
             (
                 args.out
@@ -305,33 +438,15 @@ def main(argv: list[str] | None = None) -> int:
             repository = release_repository()
             run(["gh", "auth", "status", "--hostname", "github.com"])
             absent(args.tag, repository)
-        from build import (
-            _default_inputs,
-            ensure_tool,
-            load_mem_map_from_firmware,
-            CLANG,
-            DEFAULT_OBJDUMP,
-            DEFAULT_OBJCOPY,
-        )
+        from build import CLANG, DEFAULT_OBJDUMP, DEFAULT_OBJCOPY
         from prevail_gate import prevail_bin
 
-        paths = _default_inputs()
-        names = [p.stem for p in paths]
-        programs = sorted(args.program if args.program is not None else names)
-        if (
-            not programs
-            or len(set(programs)) != len(programs)
-            or any(names.count(p) != 1 for p in programs)
-        ):
-            raise PublishError(
-                "program selection contains unknown, ambiguous, or duplicate stems"
-            )
         for tool in (CLANG, "ninja", "cargo", DEFAULT_OBJDUMP, DEFAULT_OBJCOPY):
             if shutil.which(tool) is None:
                 raise PublishError(f"required tool missing: {tool}")
-        if not prevail_bin().is_file() or not os.access(prevail_bin(), os.X_OK):
-            raise PublishError(f"PREVAIL executable missing: {prevail_bin()}")
-        load_mem_map_from_firmware(firmware, ensure_tool())
+        if any(set(item.modes) != {"bpf"} for item in sets):
+            if not prevail_bin().is_file() or not os.access(prevail_bin(), os.X_OK):
+                raise PublishError(f"PREVAIL executable missing: {prevail_bin()}")
         work = Path(tempfile.mkdtemp(prefix="libbpf-mcu-publish-"))
         LOG_DIR = work
         print(f"Diagnostic work directory retained: {work}")
@@ -342,48 +457,69 @@ def main(argv: list[str] | None = None) -> int:
             stage.mkdir(parents=True)
             extract = temp / "extract"
             extract.mkdir()
-            for program in programs:
-                for target, engine in (
-                    ("bpf", None),
-                    ("esp32c3", None),
-                    ("jit", None),
-                    ("esp32c3", "rbpf"),
-                ):
+            files = {"release-index.toml"}
+            index_lines = ['schema = "libbpf-mcu.release-index.v1"', ""]
+            for item in sets:
+                set_build = build / item.id
+                modes = produced_modes(item.modes)
+                # rbpf produces rv32 and bpf-xpost together; run it before jit.
+                commands = []
+                if "bpf-xpost" in modes:
+                    commands.append(("bpf-xpost", "esp32c3", "rbpf"))
+                elif "rv32" in modes:
+                    commands.append(("rv32", "esp32c3", None))
+                if "jit" in modes:
+                    commands.append(("jit", "jit", None))
+                if not commands:
+                    commands.append(("bpf", "bpf", None))
+                for mode, target, engine in commands:
                     cmd = [
                         sys.executable,
                         str(ROOT / "make/cli.py"),
                         "build",
                         target,
                         "-c",
-                        program,
+                        item.program,
                         "--build-dir",
-                        str(build),
+                        str(set_build),
                     ]
-                    if target != "bpf":
-                        cmd += ["--firmware", str(firmware)]
+                    if mode != "bpf":
+                        cmd += ["--firmware", str(item.firmware)]
+                        if item.image_name:
+                            cmd += ["--image-name", item.image_name]
+                        if item.release:
+                            cmd.append("--release")
+                        if item.slot_symbol and mode in ("rv32", "bpf-xpost"):
+                            cmd += ["--slot-symbol", item.slot_symbol]
                     if engine:
                         cmd += ["--engine", engine]
-                    print(f"[2/5] Build {program}/{engine or target}", flush=True)
-                    try:
-                        run(cmd)
-                    except PublishError as exc:
-                        raise PublishError(
-                            f"{program}/{engine or target}: {exc}"
-                        ) from exc
-            print("[3/5] Validate all programs and four-mode dependencies")
-            files = official(build, programs)
-            for program in programs:
-                for mode in ("rv32", "jit", "bpf-xpost"):
-                    report = document(build / program / mode / "report.toml")
-                    if report.get("firmware", {}).get("sha256") != firmware_hash:
-                        raise PublishError(f"{program}/{mode}: firmware hash mismatch")
+                    print(f"[2/5] Build {item.id}/{mode}", flush=True)
+                    run(cmd)
+                for rel in official(set_build, [item.program], modes):
+                    dest_rel = f"sets/{item.id}/{rel}"
+                    dest = stage / dest_rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(contained(set_build, rel), dest)
+                    files.add(dest_rel)
+                row = {
+                    "id": item.id,
+                    "program": item.program,
+                    "root": f"sets/{item.id}",
+                    "requested_modes": list(item.modes),
+                    "produced_modes": list(modes),
+                }
+                if item.firmware_sha256 is not None:
+                    row["firmware_sha256"] = item.firmware_sha256
+                index_lines.append("[[set]]")
+                index_lines.extend(
+                    f"{key} = {json.dumps(value)}" for key, value in row.items()
+                )
+                index_lines.append("")
+            print("[3/5] Validate sets and dependencies")
+            (stage / "release-index.toml").write_text("\n".join(index_lines))
             print("[4/5] Stage, checksum, archive, extract, and validate again")
-            for rel in sorted(files):
-                dest = stage / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(contained(build, rel), dest)
             (stage / "SHA256SUMS").write_text(sums(stage, files))
-            verify_package(stage, programs)
+            verify_package(stage, sets)
             archive_name = f"libbpf-mcu-artifacts-{args.tag}.tar.gz"
             archive = temp / archive_name
             with tarfile.open(archive, "w:gz") as tar:
@@ -400,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
                     ):
                         raise PublishError(f"unsafe archive entry: {member.name}")
                 tar.extractall(extract, filter="data")
-            verify_package(extract / stage.name, programs)
+            verify_package(extract / stage.name, sets)
             out.mkdir(parents=True, exist_ok=False)
             shutil.copyfile(archive, out / archive_name)
             (out / "SHA256SUMS").write_text(
@@ -433,17 +569,25 @@ def main(argv: list[str] | None = None) -> int:
                     or run(["git", "branch", "--show-current"]).stdout.strip() != "main"
                 ):
                     raise PublishError("repository state changed before release")
-                if layout.sha256_file(firmware) != firmware_hash:
-                    raise PublishError("firmware changed during publication")
+                if layout.sha256_file(plan) != plan_hash:
+                    raise PublishError("plan changed during publication")
+                for item in sets:
+                    if (
+                        item.firmware
+                        and layout.sha256_file(item.firmware) != item.firmware_sha256
+                    ):
+                        raise PublishError(
+                            f"{item.id}: firmware changed during publication"
+                        )
                 if release_repository() != repository:
                     raise PublishError("publication repository changed during build")
-                toolchain = {
-                    mode: document(stage / programs[0] / mode / "report.toml").get(
-                        "toolchain", {}
-                    )
-                    for mode in layout.MODES
-                }
-                notes = f"Source commit: {commit}\nSource branch: {branch}; dirty: {bool(status)}\nFirmware SHA256: {firmware_hash}\nToolchains: {toolchain}\n"
+                notes = f"Source commit: {commit}\nSource branch: {branch}; dirty: {bool(status)}\nPlan SHA256: {plan_hash}\n"
+                for item in sets:
+                    notes += f"Set {item.id}: {item.program}, requested {', '.join(item.modes)}, produced {', '.join(produced_modes(item.modes))}\n"
+                    if item.firmware:
+                        notes += (
+                            f"Firmware {item.firmware}: SHA256 {item.firmware_sha256}\n"
+                        )
                 print("[5/5] Create confirmed tag and upload release assets")
                 # Creating the ref is atomic: a concurrent tag cannot be reused.
                 run(
