@@ -98,13 +98,7 @@ resolved case-mark-idle Aot     profile=case_mark_idle
 
 The producer mappings remain `Aot -> rv32`, `Jit -> jit`, and `Rbpf -> bpf-xpost`. The consumer crate was read and used without modification. Its ordinary resolution does not need the outer release index or the new readable build options.
 
-Retained local evidence:
-
-- Smoke inputs, package, independent extraction, resolver runner, and fresh caches: `/private/var/folders/sx/y9r434kd5g7gld19gj1wz1kc0000gn/T/pr4-matrix-smoke-tv9sd0p6`.
-- Publisher diagnostics and original independent build roots: `/var/folders/sx/y9r434kd5g7gld19gj1wz1kc0000gn/T/libbpf-mcu-publish-13o5p1di`.
-- Logs: `/tmp/pr4-local-tests-final.log`, `/tmp/pr4-matrix-final.log`, and `/tmp/pr4-matrix-verify.log`.
-
-These temporary paths are local evidence, not packaged inputs or public download URLs.
+Local evidence included smoke inputs, the package, an independent extraction, a resolver runner, fresh caches, publisher diagnostics, independent build roots, and test and matrix logs. These temporary files were not packaged inputs or public download URLs.
 
 ## Incremental build regression
 

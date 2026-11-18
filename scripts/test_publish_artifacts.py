@@ -432,7 +432,7 @@ modes = ["bpf"]
                 pub.official(root, ["firewall"])
 
     def test_no_gh_for_package_only_and_dry_run_never_uploads(self):
-        for option in ("--package-only", "--dry-run"):
+        for option in ("--package-only", "--dry-run", "--dry-run-outdated"):
             with self.subTest(option=option), tempfile.TemporaryDirectory() as temp:
                 tmp = Path(temp)
                 firmware = tmp / "firmware.elf"
@@ -444,13 +444,20 @@ modes = ["bpf"]
                 out = tmp / "out"
                 calls = []
 
-                def run(args, **kwargs):
+                def run(
+                    args, *, calls=calls, option=option, firmware=firmware, **kwargs
+                ):
                     calls.append(args)
                     if args[:4] == ["git", "remote", "get-url", "origin"]:
                         return SimpleNamespace(
                             stdout="git@github.com:nan-mu/libbpf-mcu.git",
                             stderr="",
                             returncode=0,
+                        )
+                    if args == ["git", "ls-remote", "origin", "refs/heads/main"]:
+                        sha = "b" * 40 if option == "--dry-run-outdated" else "a" * 40
+                        return SimpleNamespace(
+                            stdout=f"{sha}\trefs/heads/main\n", stderr="", returncode=0
                         )
                     if args[0] == sys.executable:
                         target = Path(args[args.index("--build-dir") + 1])
@@ -460,7 +467,7 @@ modes = ["bpf"]
                     class Result:
                         returncode = 1 if args[:3] == ["gh", "release", "view"] else 0
                         stdout = (
-                            "abc"
+                            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                             if args[:3]
                             in (
                                 ["git", "rev-parse", "HEAD"],
@@ -503,9 +510,13 @@ modes = ["bpf"]
                             "v1",
                             "--out",
                             str(out),
-                            option,
+                            "--dry-run" if option == "--dry-run-outdated" else option,
                         ]
                     )
+                if option == "--dry-run-outdated":
+                    self.assertEqual(result, 1)
+                    self.assertFalse(any(c[0] == sys.executable for c in calls))
+                    continue
                 self.assertEqual(result, 0)
                 builds = [c for c in calls if c[0] == sys.executable]
                 self.assertEqual([c[3] for c in builds], ["esp32c3", "jit"])
@@ -516,6 +527,14 @@ modes = ["bpf"]
                 )
                 if option == "--package-only":
                     self.assertFalse(any(c[0] == "gh" for c in calls))
+                    self.assertFalse(any(c[:2] == ["git", "ls-remote"] for c in calls))
+                else:
+                    self.assertTrue(
+                        any(
+                            c == ["git", "ls-remote", "origin", "refs/heads/main"]
+                            for c in calls
+                        )
+                    )
 
     def test_multiple_sets_and_subset_closures(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -558,7 +577,7 @@ release = true
                 return SimpleNamespace(
                     stdout="main"
                     if args[:3] == ["git", "branch", "--show-current"]
-                    else "abc"
+                    else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     if args[:3] == ["git", "rev-parse", "HEAD"]
                     else "",
                     stderr="",
@@ -630,6 +649,11 @@ release = true
         for failure in (
             "dirty",
             "nonmain",
+            "behind",
+            "divergent",
+            "queryfail",
+            "malformed",
+            "remote_change",
             "tag",
             "auth",
             "tool",
@@ -652,7 +676,9 @@ release = true
                 )
                 calls = []
 
-                def run(args, **kwargs):
+                def run(
+                    args, *, calls=calls, failure=failure, firmware=firmware, **kwargs
+                ):
                     calls.append(args)
                     if args[:4] == ["git", "remote", "get-url", "origin"]:
                         return SimpleNamespace(
@@ -660,6 +686,22 @@ release = true
                             stderr="",
                             returncode=0,
                         )
+                    if args == ["git", "ls-remote", "origin", "refs/heads/main"]:
+                        if failure == "queryfail":
+                            raise pub.PublishError("git failed: offline")
+                        queries = sum(c == args for c in calls)
+                        sha = (
+                            "b" * 40
+                            if failure in ("behind", "divergent")
+                            or (failure == "remote_change" and queries == 3)
+                            else "a" * 40
+                        )
+                        remote = (
+                            "invalid"
+                            if failure == "malformed"
+                            else f"{sha}\trefs/heads/main\n"
+                        )
+                        return SimpleNamespace(stdout=remote, stderr="", returncode=0)
                     if failure == "tag_race" and args[:2] == ["gh", "api"]:
                         raise pub.PublishError("reference already exists")
                     if failure == "auth" and args[:3] == ["gh", "auth", "status"]:
@@ -688,7 +730,7 @@ release = true
                     class Result:
                         returncode = 1 if args[:3] == ["gh", "release", "view"] else 0
                         stdout = (
-                            "abc"
+                            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                             if args[:3]
                             in (
                                 ["git", "rev-parse", "HEAD"],
@@ -706,14 +748,21 @@ release = true
 
                     return Result()
 
-                answer = "no" if failure == "confirmation" else "v1 abc"
+                answer = (
+                    "no"
+                    if failure == "confirmation"
+                    else "v1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                )
 
-                def confirm(prompt):
+                def confirm(
+                    prompt, *, failure=failure, firmware=firmware, answer=answer
+                ):
                     self.assertIn("github.com/nan-mu/libbpf-mcu", prompt)
                     if failure == "firmware_change":
                         firmware.write_bytes(b"changed")
                     return answer
 
+                errors = io.StringIO()
                 with (
                     patch.object(pub, "run", side_effect=run),
                     patch.object(
@@ -738,7 +787,7 @@ release = true
                     ),
                     patch("builtins.input", side_effect=confirm),
                     redirect_stdout(io.StringIO()),
-                    redirect_stderr(io.StringIO()),
+                    redirect_stderr(errors),
                 ):
                     result = pub.main(
                         [
@@ -751,6 +800,15 @@ release = true
                         ]
                     )
                 self.assertEqual(result, 0 if failure == "success" else 1)
+                if failure in (
+                    "behind",
+                    "divergent",
+                    "queryfail",
+                    "malformed",
+                    "remote_change",
+                ):
+                    self.assertIn("behind or divergent", errors.getvalue())
+                    self.assertIn("manually update", errors.getvalue())
                 uploads = [c for c in calls if c[:3] == ["gh", "release", "create"]]
                 self.assertEqual(
                     len(uploads), 1 if failure in ("upload", "success") else 0
@@ -761,9 +819,29 @@ release = true
                         "github.com/nan-mu/libbpf-mcu",
                     )
                     self.assertEqual(
-                        uploads[0][uploads[0].index("--target") + 1], "abc"
+                        uploads[0][uploads[0].index("--target") + 1],
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     )
                     self.assertIn("--verify-tag", uploads[0])
+                    if failure == "success":
+                        notes = uploads[0][uploads[0].index("--notes") + 1]
+                        for value in (
+                            "one",
+                            "firewall",
+                            "requested",
+                            "produced",
+                            "bpf",
+                            "rv32",
+                            "jit",
+                            "bpf-xpost",
+                            "a" * 40,
+                            layout.sha256_file(plan),
+                            layout.sha256_file(firmware),
+                        ):
+                            self.assertIn(value, notes)
+                        self.assertNotIn(str(firmware), notes)
+                        self.assertNotIn(str(firmware.resolve()), notes)
+                        self.assertNotIn(str(Path.home()), notes)
 
     def test_wrong_dependency_role_target_and_symlink_are_rejected(self):
         for variant in ("wrong-role-target", "symlink", "missing"):

@@ -427,6 +427,23 @@ def main(argv: list[str] | None = None) -> int:
         branch = run(["git", "branch", "--show-current"]).stdout.strip()
         print(f"source commit={commit} branch={branch} dirty={bool(status)}")
         if not args.package_only:
+
+            def check_remote_main() -> None:
+                try:
+                    remote = run(["git", "ls-remote", "origin", "refs/heads/main"])
+                except PublishError as exc:
+                    raise PublishError(
+                        "cannot check origin main; local main may be behind or divergent; manually update and retry"
+                    ) from exc
+                match = re.fullmatch(
+                    r"([0-9a-fA-F]{40}|[0-9a-fA-F]{64})\s+refs/heads/main\s*",
+                    remote.stdout,
+                )
+                if not match or match.group(1).lower() != commit.lower():
+                    raise PublishError(
+                        "origin main is invalid or differs; local main may be behind or divergent; manually update and retry"
+                    )
+
             if (
                 status
                 or branch != "main"
@@ -435,6 +452,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise PublishError(
                     "formal and dry-run publication require clean local main at HEAD"
                 )
+            check_remote_main()
             repository = release_repository()
             run(["gh", "auth", "status", "--hostname", "github.com"])
             absent(args.tag, repository)
@@ -554,6 +572,7 @@ def main(argv: list[str] | None = None) -> int:
                     or run(["git", "branch", "--show-current"]).stdout.strip() != "main"
                 ):
                     raise PublishError("repository state changed during build")
+                check_remote_main()
                 reply = input(
                     f"Type {args.tag} {commit} to create the tag and release in {repository}: "
                 )
@@ -569,6 +588,12 @@ def main(argv: list[str] | None = None) -> int:
                     or run(["git", "branch", "--show-current"]).stdout.strip() != "main"
                 ):
                     raise PublishError("repository state changed before release")
+                if (
+                    run(["git", "rev-parse", "refs/heads/main"]).stdout.strip()
+                    != commit
+                ):
+                    raise PublishError("local main changed before release")
+                check_remote_main()
                 if layout.sha256_file(plan) != plan_hash:
                     raise PublishError("plan changed during publication")
                 for item in sets:
@@ -585,9 +610,7 @@ def main(argv: list[str] | None = None) -> int:
                 for item in sets:
                     notes += f"Set {item.id}: {item.program}, requested {', '.join(item.modes)}, produced {', '.join(produced_modes(item.modes))}\n"
                     if item.firmware:
-                        notes += (
-                            f"Firmware {item.firmware}: SHA256 {item.firmware_sha256}\n"
-                        )
+                        notes += f"Firmware SHA256: {item.firmware_sha256}\n"
                 print("[5/5] Create confirmed tag and upload release assets")
                 # Creating the ref is atomic: a concurrent tag cannot be reused.
                 run(
