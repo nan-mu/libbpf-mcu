@@ -1,0 +1,22 @@
+# Replace the firmware paths with the linked firmware ELF for each target.
+schema = "libbpf-mcu.release-plan.v1"
+
+[[build]]
+id = "firewall"
+program = "firewall"
+modes = ["bpf", "rv32", "jit", "bpf-xpost"]
+firmware = "../firmware.elf"
+
+[[build]]
+id = "case-mark"
+program = "case_mark"
+modes = ["rv32"]
+firmware = "../firmware.elf"
+
+[[build]]
+id = "case-mark-idle"
+program = "case_mark"
+modes = ["rv32"]
+firmware = "../firmware.elf"
+image_name = "case_mark_idle"
+slot_symbol = "xdp_slot_idle"

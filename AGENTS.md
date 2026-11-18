@@ -1,89 +1,14 @@
-# libbpf-mcu
+# Repository invariants
 
-Freestanding C compat layer: compile libbpf-style XDP C to MCU AOT objects for
-ESP32-C3 / RV32IMC (phase 1). This is not a Linux XDP runtime on the MCU.
+- Keep the supported target explicit: ESP32-C3, RV32IMC, ILP32, no FPU. A second architecture is a goal, not implemented support.
+- Keep `include-bpf/` for Clang BPF and `include/` for freestanding C-to-MCU compilation. AOT compiles C independently. Host JIT compiles eBPF to RV32IM. `bpf-xpost` packages eBPF for rBPF and rewrites map references to indices.
+- Preserve the raw `<p>/bpf/<p>_bpf.o`. AOT addresses belong in the RV32 report. JIT has no relocatable `.o`. Use report `role` and `format` to distinguish linked debug ELF from Compact ELF V0 containers.
+- Use `xpost-elf` for Compact ELF V0 and XPM1 encoding and decoding. Firmware addresses come from the supplied linked ELF. Flashing, runtime caches, and device experiments belong to XPOST.
+- Preserve the v1 index, manifest, and report schemas and their relative paths. Validate index-to-manifest, manifest-to-report, artifact, and input hashes. Inputs must resolve within the program directory. A changed RV32 report invalidates rBPF through `map_index_basis`.
+- Keep primary source identity in `[source]`, not `[[dependency]]`. Include its bytes in `input_set_id`. Serialize build options and hash their canonical ordered representation with the configuration. See [the field ownership reference](docs/artifacts.md#field-ownership).
+- Keep release sets independent under `sets/<id>`. Put `release-index.toml` outside those unchanged artifact roots. Requested modes and generated dependencies are separate lists.
+- Keep build outputs outside the checkout by default. Ninja files, depfiles, linker scripts, stamps, and staging directories are internal. Legacy exports are copies into another directory.
 
-## Build
+Run `pixi run test` locally for relevant implementation changes. Validate generated artifacts with `pixi run python make/layout.py verify --build-dir ../build`. Check documentation changes against the actual CLI, manifests, and protocol, then run `git diff --check`. Do not add CI or hooks for this workflow. Compilation, PREVAIL acceptance, hash verification, and device execution are separate evidence. Do not report unrun checks as passed.
 
-```bash
-pixi run build --firmware <firmware.elf>
-pixi run build --firmware <firmware.elf> -c just_drop
-pixi run clean
-```
-
-- `--firmware` is a linked firmware ELF that carries `.xpost.mem` (XPM1). Addresses
-  are read as-is and used for slot linking and XDP ELF metadata. libbpf-mcu
-  does not choose what to flash.
-- Omit target → build `bpf` then `esp32c3` for every `tests/**/*.c` except
-  `tests/unused/`.
-- `-c <stem>` → only matching `tests/**/<stem>.c` (also excludes `unused/`).
-
-Artifacts land in `../build/<stem>/`:
-
-| File | Role |
-|------|------|
-| `bpf.o` | Host BPF object |
-| `bpf.toml` | BPF report / map metadata (`aot_addr` merged after MCU link) |
-| `<stem>.elf` | **XDP ELF** V0 (aka `xdp.elf`; cold-region image, flash separately from firmware) |
-| `esp32c3.toml` | MCU report; includes `elf_size_kb` (XDP ELF bytes / 1024) |
-
-Intermediate: `esp32c3.o`, `esp32c3.elf`, `esp32c3.bin`. Do not embed `.bin` into
-firmware. `layout.toml` is not a compile input. Do not confuse `esp32c3.elf`
-(AOT debug ELF) with XDP ELF (`<stem>.elf` / `xdp.elf`).
-
-## Pipeline
-
-Python (`make/cli.py` / `make/build.py`) only plans the route: resolve inputs, ensure
-the host tool, read XPM1, write one ninja graph. Ninja executes:
-
-1. `cargo build` → `tools/target/<host>/release/xpost-mcu-elf` (restat; rebuild when
-   `tools/` or `xpost-elf` inputs change)
-2. clang compiles `bpf.o`. When the build includes ESP32-C3, ninja runs PREVAIL on
-   that `bpf.o` and writes `prevail.ok` before the ESP32-C3 cc edge.
-3. clang link / bin / report
-4. `xpost-mcu-elf pack` (direct binary call, never `cargo run`) + stamp `elf_size_kb`
-
-`prevail/` is a git submodule. The binary is `prevail/bin/prevail`. `build bpf`
-emits only the bpf edges and does not run PREVAIL.
-
-Encode/decode uses `xpost-elf` only. Maps that cannot enter XDP ELF V0 are
-omitted silently from metadata.
-
-## Headers
-
-- `include/` — MCU freestanding (`esp32c3` ninja)
-- `include-bpf/` — host BPF (`bpf` ninja)
-
-## JIT
-
-`jit/` is a separate host tool. `pixi run build` does not run it, and it is not
-the freestanding C-to-RV32IMC path above.
-
-It compiles eBPF bytecode to RV32IM on the Mac. RV32IMC can run the encoding.
-The compiler emits no RVC, F, D, or A. Register pairing follows the Jitterbug
-RV32 JIT. `compile` leaves helper calls and map `lddw`s as relocations.
-`check` links those against `helper_dispatcher` and a VMR address, then
-compares the image with the eBPF reference interpreter. An omitted section
-selects `xdp` or `xdp1`, not the empty `.text` Clang emits. Half and word
-memory operations are byte loads and stores, because eBPF allows an
-unaligned address. BPF-to-BPF calls,
-ALU64 div/mod, atomics, and tail calls are rejected. A helper call uses the
-firmware ilp32 shape: id in `a0`, R1..R5 lows in `a1`..`a5`, return
-zero-extended from `a0`. The program entry still takes `ctx` in `a0` and
-returns R0 in `a0`/`a1`.
-
-```bash
-cargo test --manifest-path jit/Cargo.toml
-cargo run --release --manifest-path jit/Cargo.toml -- compile <bpf.o-or-raw> -o out.rv32
-cargo run --release --manifest-path jit/Cargo.toml -- check <bpf.o>
-jit/scripts/check-xdp.sh
-```
-
-`--repeat N` times only the compile call. `ns_min`, `ns_med`, and `ns_max` are
-those samples.
-
-## Scope
-
-Phase 1 proves RV32IMC only. Architecture-agnostic remains a design goal until a
-second arch exists. Verifier safety does not automatically transfer to the MCU
-binary; linker layout and ABI are separate proof burden.
+Publication is a local manual action through `pixi run publish-artifacts --plan PLAN --tag TAG`. Formal publication requires clean `main` and explicit tag/commit confirmation. Agents test tag creation, upload, and Release behavior with mocks only. Do not create a Release while implementing or testing the publisher. See [the artifact reference](docs/artifacts.md) for the release matrix and packaging contract.

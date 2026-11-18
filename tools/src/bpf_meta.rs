@@ -1,34 +1,32 @@
 //! Parse libbpf-mcu `bpf.toml` into Compact ELF metadata (silent omit on skip).
 
-use std::fs;
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
 use toml::Value;
 
 use xpost_elf::{ImageMetadataV0, MAX_ENTRIES, MAX_LAYOUT, MAX_MAPS, MAX_NAME, MapDescriptorV0};
 
-/// Build metadata from `bpf.toml`. Maps that cannot enter Compact ELF V0 are omitted
-/// without printing (not HASH/ARRAY, bad capacity, missing address, empty layout).
-pub fn metadata_from_bpf_toml(
-    path: &Path,
-    name: &str,
-    slot_address: u32,
-    helper_address: u32,
-    machine: u8,
-) -> Result<ImageMetadataV0> {
-    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    metadata_from_toml_text(
-        &text,
-        &path.display().to_string(),
-        name,
-        slot_address,
-        helper_address,
-        machine,
-    )
+pub fn with_aot_addrs(bpf_text: &str, addr_text: &str, label: &str) -> Result<Value> {
+    let mut root: Value = toml::from_str(bpf_text).with_context(|| format!("parse {label}"))?;
+    let addr: Value = toml::from_str(addr_text).context("parse addr report")?;
+    let Some(Value::Table(addr_maps)) = addr.get("maps").cloned() else {
+        return Ok(root);
+    };
+    if let Some(Value::Table(maps)) = root.get_mut("maps") {
+        for (name, item) in maps.iter_mut() {
+            let Some(Value::Table(addr_fields)) = addr_maps.get(name) else {
+                continue;
+            };
+            let Some(addr_value) = addr_fields.get("aot_addr").cloned() else {
+                continue;
+            };
+            if let Value::Table(fields) = item {
+                fields.insert("aot_addr".into(), addr_value);
+            }
+        }
+    }
+    Ok(root)
 }
 
-/// Same map rules as [`metadata_from_bpf_toml`], from toml text already in memory.
 pub fn metadata_from_toml_text(
     text: &str,
     label: &str,
@@ -38,6 +36,17 @@ pub fn metadata_from_toml_text(
     machine: u8,
 ) -> Result<ImageMetadataV0> {
     let root: Value = toml::from_str(text).with_context(|| format!("parse {label}"))?;
+    metadata_from_value(&root, label, name, slot_address, helper_address, machine)
+}
+
+pub fn metadata_from_value(
+    root: &Value,
+    label: &str,
+    name: &str,
+    slot_address: u32,
+    helper_address: u32,
+    machine: u8,
+) -> Result<ImageMetadataV0> {
     let maps = root
         .get("maps")
         .cloned()

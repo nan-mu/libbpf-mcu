@@ -2,9 +2,6 @@
 
 Shared skeleton for all targets:
   source / size → [xdp] → [text?] → optional BTF maps/CORE (bpf only).
-
-MCU linked ELFs may also stamp `aot_addr` into the sibling `bpf.toml`
-(`[maps.*]` from BTF) using `.maps` symbol VMAs.
 """
 
 from __future__ import annotations
@@ -178,14 +175,16 @@ def write_report(
     objdump: str,
     with_content: bool,
     btf_toml_lines: list[str] | None = None,
+    *,
+    header: bool = True,
 ) -> None:
-    """All targets: header → [xdp] → [text?] → optional BTF tail."""
     sections = parse_sections(objdump, obj, keep_empty=True)
     xdp = find_section(sections, "xdp", "xdp1", ".xdp")
     text = find_section(sections, "text", ".text")
 
     lines: list[str] = []
-    append_header(lines, source, obj.stat().st_size)
+    if header:
+        append_header(lines, source, obj.stat().st_size)
     _asm_block(lines, "xdp", objdump, obj, xdp, with_content)
     _asm_block(
         lines, "text", objdump, obj, text, with_content, omit_if_empty=True
@@ -211,6 +210,24 @@ def parse_maps_aot_addrs(objdump: str, obj: Path) -> dict[str, int]:
             continue
         out[name] = addr
     return out
+
+
+def append_map_tail(out: Path, source: Path) -> None:
+    lines = source.read_text().splitlines(keepends=True)
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("[maps.") or line.startswith("[CORE]")
+        ),
+        None,
+    )
+    if start is None:
+        return
+    tail = "".join(lines[start:]).strip()
+    if not tail:
+        return
+    out.write_text(out.read_text().rstrip() + "\n\n" + tail + "\n")
 
 
 def merge_aot_addrs_into_toml(path: Path, addrs: dict[str, int]) -> int:
@@ -286,10 +303,17 @@ def main() -> None:
         action="store_true",
         help="Analyze .BTF/.BTF.ext and append [maps.*]/[CORE]",
     )
+    parser.add_argument("--body-only", action="store_true")
+    parser.add_argument(
+        "--maps-from",
+        type=Path,
+        default=None,
+        help="Copy [maps.*] and [CORE] from this report onto --out",
+    )
     parser.add_argument(
         "--merge-aot-addrs",
         action="store_true",
-        help="Stamp .maps VMAs as aot_addr into sibling bpf.toml [maps.*]",
+        help="Stamp .maps VMAs as aot_addr into --out, not into the BPF report",
     )
     args = parser.parse_args()
 
@@ -334,37 +358,14 @@ def main() -> None:
         objdump=objdump,
         with_content=not args.no_content,
         btf_toml_lines=btf_toml_lines,
+        header=not args.body_only,
     )
-
+    if args.maps_from:
+        append_map_tail(out, args.maps_from)
     if args.merge_aot_addrs:
         addrs = parse_maps_aot_addrs(objdump, obj)
-        bpf_toml = out.parent / "bpf.toml"
-        tty = sys.stderr.isatty()
-
-        def progress(msg: str) -> None:
-            # Ephemeral only on a TTY (erased on success). Non-TTY: stay quiet.
-            if tty:
-                sys.stderr.write(f"\r\033[K{msg}")
-                sys.stderr.flush()
-
-        def clear_progress() -> None:
-            if tty:
-                sys.stderr.write("\r\033[K")
-                sys.stderr.flush()
-
-        if not addrs:
-            progress(f"obj_report: --merge-aot-addrs: no .maps symbols in {obj}")
-            clear_progress()
-        elif not bpf_toml.is_file():
-            progress(f"obj_report: --merge-aot-addrs: missing {bpf_toml}")
-            clear_progress()
-        else:
-            n = merge_aot_addrs_into_toml(bpf_toml, addrs)
-            progress(
-                f"obj_report: merged aot_addr for {n}/{len(addrs)} maps "
-                f"into {bpf_toml}"
-            )
-            clear_progress()
+        if addrs and out.is_file():
+            merge_aot_addrs_into_toml(out, addrs)
 
 
 if __name__ == "__main__":

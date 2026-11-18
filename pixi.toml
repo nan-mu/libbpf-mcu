@@ -8,6 +8,8 @@ version = "0.1.0"
 [tasks]
 build = "python make/cli.py build"
 clean = "python make/cli.py clean"
+test = "python make/cli.py test"
+publish-artifacts = "python scripts/publish_artifacts.py"
 
 [dependencies]
 python = ">=3.14.6,<3.15"

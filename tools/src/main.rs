@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use object::{Object, ObjectSection, ObjectSymbol};
 use xpost_elf::{SECTION_NAME, ScanOutcome, build_container, decode, scan_at};
 
-use bpf_meta::metadata_from_bpf_toml;
+use bpf_meta::{metadata_from_value, with_aot_addrs};
 
 #[derive(Parser, Debug)]
 #[command(name = "xpost-mcu-elf", about = "XPM1 + Compact ELF helpers (xpost-elf)")]
@@ -24,10 +24,7 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Print `{addr,size}` for one firmware ELF symbol.
-    Symbol {
-        firmware: PathBuf,
-        name: String,
-    },
+    Symbol { firmware: PathBuf, name: String },
     /// Dump firmware `.xpost.mem` (XPM1) addresses as one JSON object on stdout.
     MemMap {
         /// Linked firmware ELF carrying `.xpost.mem`.
@@ -39,6 +36,9 @@ enum Cmd {
         image: PathBuf,
         #[arg(long)]
         bpf_toml: PathBuf,
+        /// Backend report whose map `aot_addr` values are applied in memory.
+        #[arg(long)]
+        addr_toml: Option<PathBuf>,
         #[arg(long)]
         name: String,
         #[arg(long, value_parser = parse_u32)]
@@ -58,6 +58,10 @@ enum Cmd {
         /// the map identity lives in its relocation table, not in the bytes.
         #[arg(long)]
         obj: Option<PathBuf>,
+        /// Write the image bytes that the container carries, after map-index
+        /// rewriting when that flag is set.
+        #[arg(long)]
+        export_image: Option<PathBuf>,
         #[arg(short = 'o', long)]
         out: PathBuf,
     },
@@ -86,6 +90,8 @@ enum Cmd {
     /// Accept one Compact ELF file only when `scan_at` returns Ok.
     Scan {
         file: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -129,16 +135,28 @@ fn dump_mem_map(firmware: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("partial");
+    fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("rename {}", path.display()))?;
+    Ok(())
+}
+
 fn pack(args: Cmd) -> Result<()> {
     let Cmd::Pack {
         image,
         bpf_toml,
+        addr_toml,
         name,
         slot_address,
         helper_address,
         machine,
         map_index,
         obj,
+        export_image,
         out,
     } = args
     else {
@@ -148,6 +166,13 @@ fn pack(args: Cmd) -> Result<()> {
         bail!("--name must be non-empty ASCII");
     }
     let mut image_bytes = fs::read(&image).with_context(|| format!("read {}", image.display()))?;
+    let bpf_text = fs::read_to_string(&bpf_toml).with_context(|| format!("read {}", bpf_toml.display()))?;
+    let overlaid = if let Some(addr) = &addr_toml {
+        let addr_text = fs::read_to_string(addr).with_context(|| format!("read {}", addr.display()))?;
+        with_aot_addrs(&bpf_text, &addr_text, &bpf_toml.display().to_string())?
+    } else {
+        toml::from_str(&bpf_text).with_context(|| format!("parse {}", bpf_toml.display()))?
+    };
     // A bytecode image reaches the interpreter with its map references
     // unresolved: the object file names each map by symbol and leaves the
     // instruction's immediate at zero. Writing the map's index into that
@@ -156,16 +181,23 @@ fn pack(args: Cmd) -> Result<()> {
     // lookup silently misses.
     if map_index {
         let obj = obj.context("--map-index needs --obj <bpf.o> to read relocations")?;
-        let patched = index_map_references(&image_bytes, &obj, &bpf_toml)?;
+        let patched = index_map_references(&image_bytes, &obj, &overlaid)?;
         image_bytes = patched;
     }
-    let meta = metadata_from_bpf_toml(&bpf_toml, &name, slot_address, helper_address, machine)?;
+    if let Some(export) = &export_image {
+        write_atomic(export, &image_bytes)?;
+    }
+    let meta = metadata_from_value(
+        &overlaid,
+        &bpf_toml.display().to_string(),
+        &name,
+        slot_address,
+        helper_address,
+        machine,
+    )?;
     let blob = build_container(&image_bytes, &meta, None)
         .map_err(|e| anyhow::anyhow!("build_container: {e:?}"))?;
-    if let Some(parent) = out.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-    fs::write(&out, blob.as_slice()).with_context(|| format!("write {}", out.display()))?;
+    write_atomic(&out, blob.as_slice())?;
     Ok(())
 }
 
@@ -176,17 +208,17 @@ fn pack(args: Cmd) -> Result<()> {
 /// binding table in. Getting the two orders out of step would silently point a
 /// reference at the wrong map, so both come from `bpf.toml` through the same
 /// metadata builder.
-fn index_map_references(image: &[u8], obj_path: &PathBuf, bpf_toml: &PathBuf) -> Result<Vec<u8>> {
+fn index_map_references(
+    image: &[u8],
+    obj_path: &PathBuf,
+    overlaid: &toml::Value,
+) -> Result<Vec<u8>> {
     use object::{Object, ObjectSection, ObjectSymbol};
 
     let data = fs::read(obj_path).with_context(|| format!("read {}", obj_path.display()))?;
     let file = object::File::parse(&*data).context("parse bpf object")?;
 
-    // Map order as the container will record it: the metadata builder's order.
-    // The addresses here are placeholders; only the names and their order matter
-    // for resolving a reference, and a zero address would fail that builder's
-    // own validation, so a plausible slot address is supplied.
-    let meta = metadata_from_bpf_toml(bpf_toml, "probe", 0x1000, 0x1000, 1)?;
+    let meta = metadata_from_value(overlaid, "bpf report", "probe", 0x1000, 0x1000, 1)?;
     let order: Vec<String> = meta
         .maps
         .iter()
@@ -280,11 +312,25 @@ fn pack_jit_cmd(args: Cmd) -> Result<()> {
     Ok(())
 }
 
-fn scan_file(file: &PathBuf) -> Result<()> {
+fn scan_file(file: &PathBuf, json: bool) -> Result<()> {
     let blob = fs::read(file).with_context(|| format!("read {}", file.display()))?;
     let mut reader = blob.as_slice();
     match scan_at(&mut reader, 0) {
-        ScanOutcome::Ok(_) => Ok(()),
+        ScanOutcome::Ok(parsed) => {
+            if json {
+                // scan_at accepts only the V0 profile with machine code 1.
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "name": parsed.name.as_str(),
+                        "slot_address": parsed.slot_address,
+                        "helper_address": parsed.helper_address,
+                        "machine": 1,
+                    })
+                );
+            }
+            Ok(())
+        }
         ScanOutcome::SoftSkip { file_len } => bail!("SoftSkip (file_len {file_len})"),
         ScanOutcome::HardFail => bail!("HardFail"),
     }
@@ -296,7 +342,7 @@ fn run(args: Args) -> Result<()> {
         Cmd::MemMap { firmware } => dump_mem_map(&firmware),
         pack_cmd @ Cmd::Pack { .. } => pack(pack_cmd),
         jit_cmd @ Cmd::PackJit { .. } => pack_jit_cmd(jit_cmd),
-        Cmd::Scan { file } => scan_file(&file),
+        Cmd::Scan { file, json } => scan_file(&file, json),
     }
 }
 
