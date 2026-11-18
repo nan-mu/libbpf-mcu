@@ -1,6 +1,10 @@
 # PR #4 local verification
 
-This revision was checked locally on 2026-11-18 from the development tree based on `26077194182fedf9e588eab771dd2f44411067ba`. The package smoke used real LLVM, PREVAIL, Ninja, Rust host tools, and the current XPOST resolver. Its firmware inputs were generated ELF fixtures with valid XPM1 records and a sized `xdp_slot_idle` symbol. They were not flashed to hardware. The development package records the source tree as dirty; it is not a formal release.
+The main artifact and multi-firmware package smoke ran on 2026-11-18 against the development implementation subsequently committed as `5281788ceffef00ebee10eac46d09104f9470eaf`. At execution time, the publisher recorded HEAD `26077194182fedf9e588eab771dd2f44411067ba` with `dirty=True`. The smoke therefore tested uncommitted implementation changes, not a clean checkout of either commit. It used real LLVM, PREVAIL, Ninja, Rust host tools, and the existing XPOST artifact resolver. Its generated firmware ELF fixtures contained valid XPM1 records and a sized `xdp_slot_idle` symbol. No device execution was performed.
+
+The final polishing revision is `f8157570c78eb7d3bd9252dec6f82afc3362a5fa`. Its changes were limited to remote `main` freshness checks in the publisher, public Release Notes path redaction, removal of the unrelated audit file, verification documentation cleanup, and corresponding publisher regression tests. The complete local test suite and static checks listed below were rerun after these changes. The earlier package smoke was not rerun for this polishing revision.
+
+The development package records its source tree as dirty and is not a formal release.
 
 ## Local test entry point
 
