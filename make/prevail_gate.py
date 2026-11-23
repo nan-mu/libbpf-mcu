@@ -1,4 +1,4 @@
-"""PREVAIL listing parse and the stamp that unlocks one MCU compile."""
+"""Select and verify the program in a BPF object."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from typing import Literal
 
 MAKE_DIR = Path(__file__).resolve().parent
 ROOT = MAKE_DIR.parent
+VERIFY_TIMEOUT = 300
 
 XdpSection = Literal["xdp", "xdp1"]
 
@@ -34,7 +35,7 @@ def prevail_bin() -> Path:
     """
     override = os.environ.get("PREVAIL")
     if override:
-        return Path(override)
+        return Path(override).expanduser().resolve()
     return ROOT / "prevail" / "bin" / "prevail"
 
 
@@ -57,127 +58,75 @@ def select_program(listing: str) -> ProgramRef:
     return found[0]
 
 
+class PrevailError(ValueError):
+    pass
+
+
 def _run_prevail(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=VERIFY_TIMEOUT
+        )
+    except subprocess.TimeoutExpired as exc:
+        detail = (exc.stdout or b"") + (exc.stderr or b"")
+        raise PrevailError(
+            f"PREVAIL timed out after {VERIFY_TIMEOUT}s: {detail.decode(errors='replace').strip()}"
+        ) from exc
     except OSError as exc:
-        sys.stderr.write(f"{exc}\n")
-        raise SystemExit(1) from exc
-    if proc.stderr:
-        sys.stderr.write(proc.stderr)
-        if not proc.stderr.endswith("\n"):
-            sys.stderr.write("\n")
-    return proc
+        raise PrevailError(f"cannot execute PREVAIL: {exc}") from exc
 
 
-def examine(obj: Path) -> ProgramRef:
-    """List, select the one xdp or xdp1 program, and run the checker. No stamp I/O."""
-    listed = _run_prevail([str(prevail_bin()), "-l", str(obj)])
-    if listed.returncode != 0:
-        raise SystemExit(1)
-    program = select_program(listed.stdout)
-    checked = _run_prevail(
-        [
-            str(prevail_bin()),
-            "--stack-size",
-            "512",
-            "--section",
-            program.section,
-            "--function",
-            program.function,
-            str(obj),
-        ]
-    )
-    if checked.returncode != 0:
-        raise SystemExit(1)
-    return program
-
-
-def published_path(path: Path) -> str:
-    path = Path(path)
-    if not path.is_absolute():
-        return path.as_posix()
+def examine(obj: Path, verifier: Path | None = None) -> ProgramRef:
+    """List, select the one xdp or xdp1 program, and run the checker."""
+    verifier = verifier or prevail_bin()
+    listed = _run_prevail([str(verifier), "-l", str(obj)])
+    if listed.returncode:
+        raise PrevailError(
+            f"PREVAIL could not list programs: {(listed.stdout + listed.stderr).strip()}"
+        )
     try:
-        return path.relative_to(ROOT).as_posix()
-    except ValueError:
-        return path.name
-
-
-def write_stamp(stamp: Path, obj: Path, program: ProgramRef) -> None:
-    from layout import sha256_file, verifier_identity
-
-    body = (
-        f"section={program.section}\n"
-        f"function={program.function}\n"
-        f"bpf_o={published_path(obj)}\n"
-        f"bpf_sha256={sha256_file(obj)}\n"
-        f"verifier=prevail\n"
-        f"verifier_id={verifier_identity()}\n"
-        f"options=stack-size=512\n"
+        program = select_program(listed.stdout)
+    except SystemExit as exc:
+        raise PrevailError(
+            f"PREVAIL expected one XDP entry: {listed.stdout.strip()}"
+        ) from exc
+    label = program.section
+    if program.function != program.section:
+        label += "/" + program.function
+    try:
+        checked = _run_prevail(
+            [
+                str(verifier),
+                "--stack-size",
+                "512",
+                "--section",
+                program.section,
+                "--function",
+                program.function,
+                str(obj),
+            ]
+        )
+    except PrevailError as exc:
+        raise PrevailError(f"{label}: {exc}") from exc
+    detail = (checked.stdout + checked.stderr).strip()
+    if checked.returncode:
+        raise PrevailError(f"PREVAIL exited {checked.returncode} for {label}: {detail}")
+    verdict = re.compile(
+        rf"PASS: {re.escape(label)}(?: \(terminates within [0-9]+ loop iterations\))?"
     )
-    tmp = stamp.with_name(stamp.name + ".tmp")
-    tmp.write_text(body)
-    os.replace(tmp, stamp)
-
-
-def stamp_aot(obj: Path, stamp: Path) -> None:
-    stamp.unlink(missing_ok=True)
-    write_stamp(stamp, obj, examine(obj))
+    if not any(verdict.fullmatch(line) for line in checked.stdout.splitlines()):
+        raise PrevailError(f"PREVAIL did not report PASS for {label}: {detail}")
+    return program
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="prevail_gate")
     parser.add_argument("--obj", type=Path, required=True)
-    parser.add_argument("--stamp", type=Path, required=True)
-    parser.add_argument("--build-dir", type=Path)
-    parser.add_argument("--program", default="")
     args = parser.parse_args()
     try:
-        stamp_aot(args.obj, args.stamp)
-    except SystemExit:
-        _record_gate(args, accepted=False)
-        raise
-    _record_gate(args, accepted=True)
-
-
-def _record_gate(args: argparse.Namespace, accepted: bool) -> None:
-    if args.build_dir is None or not args.program:
-        return
-    from layout import LayoutError, parse_stamp, record_verification, retract_mode, sha256_file
-
-    try:
-        if accepted:
-            parsed = parse_stamp(args.stamp.read_text())
-            record_verification(
-                args.build_dir,
-                args.program,
-                {
-                    "status": "accepted",
-                    "input_sha256": parsed.get("bpf_sha256", ""),
-                    "verifier": "prevail",
-                    "verifier_id": parsed.get("verifier_id", ""),
-                    "options": parsed.get("options", ""),
-                },
-            )
-            return
-        digest = sha256_file(args.obj) if args.obj.is_file() else ""
-        record_verification(
-            args.build_dir,
-            args.program,
-            {
-                "status": "rejected",
-                "input_sha256": digest,
-                "verifier": "prevail",
-                "verifier_id": "",
-                "options": "stack-size=512",
-            },
-        )
-        retract_mode(args.build_dir, args.program, "rv32", "PREVAIL rejected the program")
-        retract_mode(
-            args.build_dir, args.program, "bpf-xpost", "PREVAIL rejected the program"
-        )
-    except LayoutError as exc:
-        sys.stderr.write(f"{exc}\n")
+        examine(args.obj)
+    except PrevailError as exc:
+        sys.exit(str(exc))
 
 
 if __name__ == "__main__":

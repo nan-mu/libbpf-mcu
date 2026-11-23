@@ -1,5 +1,6 @@
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -9,27 +10,21 @@ from build import (
     DEFAULT_BUILD_DIR,
     DEFAULT_OBJCOPY,
     DEFAULT_OBJDUMP,
-    BuildPaths,
-    GraphPlan,
-    JitLink,
-    McuLink,
-    _linker_script,
-    check_build_args,
-    check_build_fs,
+    build,
     clean_build,
-    ensure_tool,
-    apply_slot_symbol,
-    load_mem_map_from_firmware,
-    run_ninja,
-    tool_bin_path,
-    write_build_ninja,
+    resolve_sources,
 )
+from layout import LayoutError
 
 
 def check_image_name(name: str | None) -> str | None:
     if name is None:
         return None
-    if not name or any(ch in name for ch in "/\\.") or not all(ch.isalnum() or ch == "_" for ch in name):
+    if (
+        not name
+        or any(ch in name for ch in "/\\.")
+        or not all(ch.isalnum() or ch == "_" for ch in name)
+    ):
         error(f"--image-name must be a single identifier, got {name!r}")
         sys.exit(2)
     return name
@@ -43,16 +38,16 @@ def main():
     parser = argparse.ArgumentParser(prog="libbpf-mcu")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    build_parser = subparsers.add_parser("build")
+    build_parser = subparsers.add_parser("build", allow_abbrev=False)
     build_parser.add_argument(
         "target",
         nargs="?",
-        default=None,
-        help="构建目标。省略则先 bpf 再 esp32c3（需 --firmware）。jit 必须显式指定",
+        choices=("bpf", "rv32imc", "jit"),
+        help="无目标时默认 bpf；传入 --firmware 时默认 rv32imc。",
     )
-    build_parser.add_argument("--inputs", "-i")
-    build_parser.add_argument("--output", "--outputs", "-o", dest="outputs")
-    build_parser.add_argument(
+    inputs = build_parser.add_mutually_exclusive_group()
+    inputs.add_argument("--inputs", nargs="+", metavar="FILE", help="一个或多个 C 源文件")
+    inputs.add_argument(
         "-c",
         "--crate",
         dest="crate",
@@ -60,33 +55,13 @@ def main():
         help="只编译 tests/**/<stem>.c 中 stem 匹配的一个源文件",
     )
     build_parser.add_argument(
-        "-f", "--force", action="store_true", help="强制重新编译，忽略增量"
-    )
-    build_parser.add_argument(
-        "--release",
-        action="store_true",
-        help="发布模式：对象报告不写入节内容",
-    )
-    build_parser.add_argument(
-        "--objdump",
-        default=os.environ.get("LIBBPF_MCU_OBJDUMP", DEFAULT_OBJDUMP),
-        help=f"objdump 可执行文件（默认 {DEFAULT_OBJDUMP}）",
-    )
-    build_parser.add_argument(
-        "--objcopy",
-        default=os.environ.get("LIBBPF_MCU_OBJCOPY", DEFAULT_OBJCOPY),
-        help=f"objcopy 可执行文件（默认 {DEFAULT_OBJCOPY}）",
+        "--force", action="store_true", help="强制重新编译，忽略增量"
     )
     build_parser.add_argument(
         "--firmware",
         type=Path,
         default=None,
-        help="已链接固件 ELF（须含 .xpost.mem / XPM1）；esp32c3 必填",
-    )
-    build_parser.add_argument(
-        "--no-compact-elf",
-        action="store_true",
-        help="ESP32-C3: do not emit the <program>_rv32.elf Compact ELF container",
+        help="已链接固件 ELF（须含 .xpost.mem / XPM1）；rv32imc、jit 必填",
     )
     build_parser.add_argument(
         "--slot-symbol",
@@ -96,12 +71,12 @@ def main():
     build_parser.add_argument(
         "--image-name",
         default=None,
-        help="Compact ELF container internal name. The file name stays <program>_<mode>.elf",
+        help="Internal Compact ELF name. The output filename follows the program and mode.",
     )
     build_parser.add_argument(
         "--engine",
         choices=["aot", "rbpf"],
-        default="aot",
+        default=None,
         help=(
             "what the container carries. aot: the linked RV32IMC machine code. "
             "rbpf: the eBPF bytecode, with each map reference rewritten to the "
@@ -112,111 +87,40 @@ def main():
         "--build-dir",
         type=Path,
         default=None,
-        help="输出根目录，含 build.ninja。省略则用默认 ../build",
+        help="输出根目录，默认为 build/",
     )
 
     subparsers.add_parser("clean")
     subparsers.add_parser("test")
-    artifacts = subparsers.add_parser("artifacts")
-    artifact_commands = artifacts.add_subparsers(dest="artifacts_command", required=True)
-    export = artifact_commands.add_parser("export-legacy")
-    export.add_argument("--build-dir", type=Path, required=True)
-    export.add_argument("--out", type=Path, required=True)
-    export.add_argument("--mode", required=True, choices=("rv32", "jit", "bpf-xpost"))
-
     args = parser.parse_args()
     if args.command == "build":
-        target = args.target
-        normalized = target.lower() if target is not None else None
-        build_dir = (
-            Path(args.build_dir).expanduser().resolve()
-            if args.build_dir is not None
+        target = args.target or ("rv32imc" if args.firmware is not None else "bpf")
+        if target != "rv32imc" and args.engine is not None:
+            build_parser.error("--engine is only available for rv32imc")
+        if target == "bpf" and any((args.firmware, args.slot_symbol, args.image_name)):
+            build_parser.error("--firmware, --slot-symbol and --image-name require rv32imc or jit")
+        if target != "bpf" and args.firmware is None:
+            build_parser.error(f"{target} requires --firmware")
+        args.image_name = check_image_name(args.image_name)
+        objdump = os.environ.get("LIBBPF_MCU_OBJDUMP", DEFAULT_OBJDUMP)
+        objcopy = os.environ.get("LIBBPF_MCU_OBJCOPY", DEFAULT_OBJCOPY)
+        args.objdump = shutil.which(objdump) or objdump
+        args.objcopy = shutil.which(objcopy) or objcopy
+        mode = {
+            "bpf": "bpf",
+            "jit": "jit",
+            "rv32imc": "ebpf" if args.engine == "rbpf" else "llvm-aot",
+        }[target]
+        root = (
+            args.build_dir.expanduser().resolve()
+            if args.build_dir
             else DEFAULT_BUILD_DIR
         )
-        if args.outputs is not None:
-            error(
-                "--output 不再选择产物路径。文件名由程序名和模式决定，目录由 --build-dir 决定。"
-                "旧布局用 artifacts export-legacy 导出到另一个目录。"
-            )
-            sys.exit(2)
-        if normalized == "jit":
-            if args.no_compact_elf:
-                error("jit 不能与 --no-compact-elf 一起用")
-                sys.exit(2)
-            if args.slot_symbol:
-                error("jit 不能与 --slot-symbol 一起用")
-                sys.exit(2)
-            if args.engine != "aot":
-                error("jit 不能与 --engine rbpf 一起用")
-                sys.exit(2)
-            if args.firmware is None:
-                error("jit 需要 --firmware <firmware.elf>（含 .xpost.mem / XPM1）")
-                sys.exit(1)
-        elif args.firmware is not None and normalized not in (None, "bpf", "esp32c3"):
-            print(
-                f"error: --firmware 仅用于 bpf/esp32c3 全量或 esp32c3，不能与 target={target} 一起用",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        builds = check_build_args(
-            target, args.inputs, args.outputs, crate=args.crate, build_dir=build_dir
-        )
-        checked_builds = [
-            check_build_fs(BuildPaths(item.inputs, item.outputs)) for item in builds
-        ]
-        checked = checked_builds[0]
-        backend = None
-        if normalized == "jit":
-            firmware = Path(args.firmware).expanduser().resolve()
-            tool = ensure_tool(force=args.force)
-            mem = load_mem_map_from_firmware(firmware, tool)
-            info(
-                f"XPM1 helper={mem.helper_addr:#x} slot={mem.slot_addr:#x}+{mem.slot_len:#x} "
-                f"table={mem.table_addr:#x}+{mem.table_len:#x}"
-            )
-            backend = JitLink(
-                firmware=firmware,
-                tool_bin=tool_bin_path(),
-                mem=mem,
-                image_name=check_image_name(args.image_name),
-            )
-        elif any(item.target == "esp32c3" for item in builds):
-            if args.firmware is None:
-                error("esp32c3 需要 --firmware <firmware.elf>（含 .xpost.mem / XPM1）")
-                sys.exit(1)
-            tool = ensure_tool(force=args.force)
-            mem = load_mem_map_from_firmware(Path(args.firmware), tool)
-            if args.slot_symbol:
-                mem = apply_slot_symbol(mem, Path(args.firmware), tool, args.slot_symbol)
-            info(
-                f"XPM1 helper={mem.helper_addr:#x} slot={mem.slot_addr:#x}+{mem.slot_len:#x} "
-                f"table={mem.table_addr:#x}+{mem.table_len:#x}"
-            )
-            linker = _linker_script("esp32c3", mem, build_dir)
-            assert linker is not None
-            image_name = check_image_name(args.image_name)
-            backend = McuLink(
-                mem=mem,
-                linker=linker,
-                tool_bin=tool_bin_path(),
-                firmware=Path(args.firmware).expanduser().resolve(),
-                compact_elf=not args.no_compact_elf,
-                image_name=image_name,
-                slot_symbol=args.slot_symbol,
-                engine=args.engine,
-            )
-        names = ", ".join(item.target for item in builds)
-        info(f"编译目标 [{names}]")
-        if os.environ.get("DEBUG") == "1":
-            debug(f"输入文件: {[str(path) for path in checked.inputs]}")
-        plan = GraphPlan(
-            sources=tuple(checked.inputs),
-            backend=backend,
-            release=args.release,
-            objdump=args.objdump,
-            build_dir=build_dir,
-        )
-        run_ninja(write_build_ninja(plan), force=args.force, build_dir=build_dir)
+        try:
+            build(root, resolve_sources(args.inputs, args.crate), mode, args)
+        except (OSError, LayoutError) as exc:
+            error(str(exc))
+            sys.exit(1)
     elif args.command == "clean":
         clean_build()
     elif args.command == "test":
@@ -233,31 +137,22 @@ def main():
             [sys.executable, str(Path(__file__).parent / "test_compact_elf_parity.py")],
             [sys.executable, str(Path(__file__).parent / "test_jit_build.py")],
             [sys.executable, str(Path(__file__).parent / "test_layout.py")],
-            [sys.executable, str(Path(__file__).parent.parent / "scripts" / "test_publish_artifacts.py")],
-            [sys.executable, str(Path(__file__).parent / "test_incremental.py")],
+            [sys.executable, str(Path(__file__).parent / "test_build_state.py")],
         ]
         for crate in ("jit", "tools"):
-            tests.append([
-                "cargo", "test", "--manifest-path",
-                str(Path(__file__).resolve().parent.parent / crate / "Cargo.toml"),
-            ])
+            tests.append(
+                [
+                    "cargo",
+                    "test",
+                    "--manifest-path",
+                    str(Path(__file__).resolve().parent.parent / crate / "Cargo.toml"),
+                ]
+            )
         for cmd in tests:
             info(f"→ {' '.join(cmd)}")
             result = subprocess.run(cmd, cwd=str(Path(__file__).parent))
             if result.returncode != 0:
                 sys.exit(result.returncode)
-    elif args.command == "artifacts" and args.artifacts_command == "export-legacy":
-        from layout import LayoutError, export_legacy
-
-        try:
-            programs = export_legacy(args.build_dir, args.out, args.mode)
-        except LayoutError as exc:
-            error(str(exc))
-            sys.exit(2)
-        info("exported " + ", ".join(programs))
-    else:
-        parser.print_help()
-        sys.exit(1)
 
 
 if __name__ == "__main__":

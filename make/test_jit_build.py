@@ -1,34 +1,56 @@
-#!/usr/bin/env python3
-"""Build-only checks for `build jit`. No device and no oracle sweep."""
+"""Real BPF, AOT, interpreter and JIT build and report regressions."""
 
 from __future__ import annotations
 
-import hashlib
+import json
+import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from build import tool_bin_path  # noqa: E402
-from jit_publish import JitDeliverables  # noqa: E402
-from xpost_mem import MAGIC, WIRE_SIZE  # noqa: E402
+from btf import analyze
+from build import BPF_FLAGS, CLANG, MCU_FLAGS, tool_bin_path
+from build_state import read_state, render_reports
+from layout import (
+    ROOT,
+    bpf_path,
+    container_path,
+    load_index,
+    native_object_path,
+    report_path,
+    source_path,
+    state_path,
+)
+from llvm_tools import resolve_llvm_tool
+from obj_report import MACHINES, executable_sections
+from xpost_elf import parse_container
+from xpost_mem import MAGIC, WIRE_SIZE
 
 HELPER = 0x40380000
 SLOT = 0x40380200
 SLOT_LEN = 0xE00
-_ABSOLUTE = re.compile(r"(?:^|[=\s\"'])(/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+)")
 
 
-def xpm1_record() -> bytes:
-    payload = struct.pack("<6I", MAGIC, HELPER, SLOT, SLOT_LEN, 0x310000, 0x10000)
+def xdp_map_relocations(obj: Path) -> list[tuple[int, str]]:
+    objdump = resolve_llvm_tool("llvm-objdump")
+    relocs = subprocess.check_output([objdump, "-r", obj], text=True)
+    section = relocs.split("RELOCATION RECORDS FOR [xdp]:\n")[1].split("\n\n", 1)[0]
+    return [
+        (int(offset, 16), name)
+        for offset, name in re.findall(
+            r"^([0-9a-f]+)\s+R_BPF_64_64\s+(\w+)$", section, re.M
+        )
+    ]
+
+
+def xpm1_record(slot_len: int = SLOT_LEN) -> bytes:
+    payload = struct.pack("<6I", MAGIC, HELPER, SLOT, slot_len, 0x310000, 0x10000)
     if len(payload) != WIRE_SIZE:
         raise RuntimeError(f"XPM1 record is {len(payload)} bytes, not {WIRE_SIZE}")
     return payload
@@ -78,207 +100,531 @@ def firmware_elf(payload: bytes) -> bytes:
     return bytes(blob)
 
 
-def build_argv(*args: str) -> list[str]:
-    pixi = shutil.which("pixi")
-    if pixi is not None:
-        return [pixi, "run", "build", *args]
-    return [sys.executable, str(ROOT / "make" / "cli.py"), "build", *args]
-
-
-def run_build(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        build_argv(*args),
+def run_build(*args, build_dir: Path, check=True, env=None):
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "make" / "cli.py"),
+            "build",
+            *map(str, args),
+            "--build-dir",
+            str(build_dir),
+        ],
         cwd=ROOT,
+        env=env,
         text=True,
         capture_output=True,
     )
+    if check and result.returncode:
+        raise AssertionError(
+            f"build exited {result.returncode}\n{result.stdout}\n{result.stderr}"
+        )
+    return result
 
 
-class JitBuildTests(unittest.TestCase):
+class ProgramBuildTests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls) -> None:
-        cls.tmp = tempfile.TemporaryDirectory(prefix="jit-build-")
-        cls.root = Path(cls.tmp.name)
+    def setUpClass(cls):
+        tmp = tempfile.TemporaryDirectory(prefix="program-build-")
+        cls.addClassCleanup(tmp.cleanup)
+        cls.root = Path(tmp.name).resolve()
         cls.firmware = cls.root / "firmware.elf"
         cls.firmware.write_bytes(firmware_elf(xpm1_record()))
-        cls.jit_dir = cls.root / "jit"
-        cls.oob_dir = cls.root / "oob"
-        cls.mcu_dir = cls.root / "mcu"
-        cls.rbpf_dir = cls.root / "rbpf"
-        proc = run_build(
-            "jit",
-            "-c",
-            "firewall",
-            "--firmware",
-            str(cls.firmware),
-            "--build-dir",
-            str(cls.jit_dir),
+        cls.build_dir = cls.root / "build"
+        cls.program = cls.build_dir / "just_tx"
+        cls.aot_args = ("rv32imc", "-c", "just_tx", "--firmware", cls.firmware)
+        cls.ebpf_args = (*cls.aot_args, "--engine", "rbpf")
+        cls.jit_args = ("jit", "-c", "just_tx", "--firmware", cls.firmware)
+        for args in (cls.aot_args, cls.ebpf_args, cls.jit_args):
+            run_build(*args, build_dir=cls.build_dir)
+
+    def test_exact_executable_bytes_and_source(self):
+        root, name = self.build_dir, "just_tx"
+        snapshot = source_path(root, name).read_bytes()
+        native_state = read_state(state_path(root, name, "llvm-aot"))
+        native = executable_sections(Path(native_state["linked_elf"]).read_bytes())
+        self.assertTrue(native_object_path(root, name).is_file())
+        report_bytes = report_path(root, name).read_bytes()
+        self.assertEqual(report_bytes.count(snapshot), 1)
+        report = report_bytes.decode()
+        self.assertIn("tests/xdp/just_tx.c", report)
+        self.assertEqual(
+            re.findall(r"^## (.+)$", report, flags=re.MULTILINE),
+            ["Source", "eBPF", "RV32IMC"],
         )
-        if proc.returncode != 0:
-            raise AssertionError(
-                f"jit build exited {proc.returncode}\n{proc.stdout}\n{proc.stderr}"
+        sections = re.split(r"^### (.+)$", report, flags=re.MULTILINE)
+        sections = dict(zip(sections[1::2], sections[2::2], strict=True))
+        self.assertEqual(set(sections), {"bpf", "llvm-aot", "ebpf", "jit"})
+        bpf = executable_sections(bpf_path(root, name).read_bytes())
+        for mode in ("bpf", "llvm-aot", "ebpf", "jit"):
+            with self.subTest(mode=mode):
+                section_text = sections[mode]
+                self.assertIn(MACHINES[mode], section_text)
+                match = re.search(
+                    r"^#### Machine code and assembly\n+(`{3,})text\n(.*?)^\1$",
+                    section_text,
+                    re.MULTILINE | re.DOTALL,
+                )
+                self.assertIsNotNone(match)
+                listing = match.group(2)
+                if mode == "bpf":
+                    expected = {code.name: (0, code.data) for code in bpf}
+                else:
+                    container = container_path(root, name, mode)
+                    meta, image = parse_container(container.read_bytes())
+                    self.assertEqual(
+                        (meta.helper_address, meta.slot_address), (HELPER, SLOT)
+                    )
+                    self.assertEqual([item.name for item in meta.maps], ["rxcnt"])
+                    if mode == "llvm-aot":
+                        expected = {
+                            code.name: (
+                                code.address,
+                                image[
+                                    code.address - SLOT : code.address
+                                    - SLOT
+                                    + len(code.data)
+                                ],
+                            )
+                            for code in native
+                        }
+                    elif mode == "ebpf":
+                        expected = {"xdp": (0, image)}
+                        self.assertNotEqual(
+                            image,
+                            next(code.data for code in bpf if code.name == "xdp"),
+                        )
+                    else:
+                        code_len = meta.maps[0].map_vma - SLOT
+                        expected = {".text": (SLOT, image[:code_len])}
+                        self.assertEqual(image[code_len:], bytes(16))
+                seen = set()
+                at, payload = 0, b""
+                for line in listing.splitlines():
+                    match = re.fullmatch(r"([a-z0-9_.]+)  \(.+\)", line)
+                    if match:
+                        self.assertEqual(payload, b"")
+                        section = match.group(1)
+                        self.assertNotIn(section, seen)
+                        seen.add(section)
+                        at, payload = expected[section]
+                    else:
+                        offset, encoded, mnemonic = re.split(r" {2,}", line, maxsplit=2)
+                        raw = bytes.fromhex(encoded)
+                        self.assertEqual(int(offset, 16), at)
+                        self.assertTrue(payload.startswith(raw))
+                        self.assertNotEqual(mnemonic, "<unknown>")
+                        at, payload = at + len(raw), payload[len(raw) :]
+                self.assertEqual(payload, b"")
+                self.assertEqual(seen, expected.keys())
+                generation = read_state(state_path(root, name, "bpf"))["generation"]
+                if mode == "ebpf":
+                    generation += read_state(state_path(root, name, "ebpf-native"))[
+                        "generation"
+                    ]
+                if mode != "bpf":
+                    generation += read_state(state_path(root, name, mode))["generation"]
+                steps = section_text.split("#### Build steps", 1)[1]
+                for step in generation:
+                    self.assertIn(step["step"], steps)
+                    if "argv" in step:
+                        self.assertIn("$ " + shlex.join(step["argv"]), steps)
+                    else:
+                        params = json.dumps(
+                            step["parameters"], ensure_ascii=False, indent=2
+                        )
+                        self.assertIn(step["call"] + "\n" + params, steps)
+                self.assertIn("--target=bpf", generation[0]["argv"])
+                self.assertIn("-O2", generation[0]["argv"])
+                if mode != "bpf":
+                    subprocess.run([tool_bin_path(root), "scan", container], check=True)
+
+    def test_incremental_and_reports_are_not_inputs(self):
+        root, name = self.build_dir, "just_tx"
+        report = report_path(root, name)
+        original = report.read_bytes()
+        report.unlink()
+        self.assertEqual(len(load_index(self.program)["mode"]), 3)
+        for args in (self.aot_args, self.ebpf_args, self.jit_args):
+            run = run_build(*args, build_dir=root)
+            self.assertIn("ninja: no work to do.", run.stdout)
+            graph = (root / ".ninja" / "build.ninja").read_text()
+            self.assertNotIn("report.md", graph)
+        self.assertEqual(report.read_bytes(), original)
+        for args in (self.aot_args, self.ebpf_args, self.jit_args):
+            run = run_build(*args, "--force", build_dir=root)
+            self.assertIn("prevail just_tx", run.stdout)
+            self.assertEqual(len(load_index(self.program)["mode"]), 3)
+        render_reports(root, name, force=True)
+        self.assertEqual(report.read_bytes(), original)
+
+    def test_firmware_rebuild_only_retracts_invalid_mode(self):
+        root = self.build_dir
+        firmware = self.root / "other-firmware.elf"
+        firmware.write_bytes(self.firmware.read_bytes())
+        jit = ("jit", "-c", "just_drop", "--firmware", firmware)
+        aot = ("rv32imc", "-c", "just_drop", "--firmware", self.firmware)
+        run_build(*aot, build_dir=root)
+        run_build(*jit, build_dir=root)
+        program = root / "just_drop"
+        bpf = bpf_path(root, "just_drop")
+        bpf_time = bpf.stat().st_mtime_ns
+        original = container_path(root, "just_drop", "jit").read_bytes()
+        data = bytearray(xpm1_record())
+        struct.pack_into("<I", data, 8, SLOT + 0x1000)
+        firmware.write_bytes(firmware_elf(bytes(data)))
+        rebuilt = run_build(*jit, build_dir=root)
+        self.assertIn("host JIT:", rebuilt.stdout)
+        self.assertEqual(bpf.stat().st_mtime_ns, bpf_time)
+        self.assertNotEqual(
+            container_path(root, "just_drop", "jit").read_bytes(), original
+        )
+        firmware.write_bytes(b"broken firmware")
+        failure = run_build(*jit, build_dir=root, check=False)
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertEqual(
+            [row["name"] for row in load_index(program)["mode"]], ["llvm-aot"]
+        )
+        diagnostics = json.loads(
+            (root / ".ninja/just_drop/diagnostics.json").read_text()
+        )
+        self.assertEqual(set(diagnostics), {"preflight/jit"})
+        firmware.write_bytes(firmware_elf(bytes(data)))
+        run_build(*jit, build_dir=root)
+        self.assertEqual(
+            [row["name"] for row in load_index(program)["mode"]], ["llvm-aot", "jit"]
+        )
+
+    def test_rewritten_bytecode_must_fit_firmware_slot(self):
+        program = "just_tx"
+        _, payload = parse_container(
+            container_path(self.build_dir, program, "ebpf").read_bytes()
+        )
+        with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+            root = Path(tmp) / "build"
+            firmware = Path(tmp) / "limited.elf"
+            args = (
+                "rv32imc",
+                "-c",
+                program,
+                "--engine",
+                "rbpf",
+                "--firmware",
+                firmware,
             )
+            firmware.write_bytes(firmware_elf(xpm1_record(len(payload))))
+            run_build(*args, build_dir=root)
+            self.assertTrue(container_path(root, program, "ebpf").is_file())
+            firmware.write_bytes(firmware_elf(xpm1_record(len(payload) - 1)))
+            rejected = run_build(*args, build_dir=root, check=False)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("ImageExceedsSlot", rejected.stdout + rejected.stderr)
+            self.assertEqual(load_index(root / program)["mode"], [])
+            self.assertFalse(container_path(root, program, "ebpf").exists())
 
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.tmp.cleanup()
-
-    def test_firewall_lands_in_the_requested_dir(self) -> None:
-        bpf = self.jit_dir / "firewall" / "bpf"
-        self.assertTrue((bpf / "firewall_bpf.o").is_file())
-        self.assertTrue((bpf / "report.toml").is_file())
-        deliver = JitDeliverables.for_stem(self.jit_dir, "firewall", "firewall")
-        for path in (deliver.jit_bin, deliver.container, deliver.jit_toml):
-            self.assertTrue(path.is_file(), path)
-            self.assertTrue(path.is_relative_to(self.jit_dir), path)
-        self.assertFalse((self.jit_dir / "firewall" / "firewall.elf").exists())
-        self.assertFalse((self.jit_dir / "firewall" / "jit.bin").exists())
-
-    def test_disassembly_and_blacklist_match_jit_bin(self) -> None:
-        deliver = JitDeliverables.for_stem(self.jit_dir, "firewall", "firewall")
-        blob = deliver.jit_bin.read_bytes()
-        doc = tomllib.loads(deliver.jit_toml.read_text())
-        jit = doc["jit"]
-        self.assertEqual(jit["image_len"], len(blob))
-        tail = blob[jit["code_len"] :]
-        self.assertEqual(tail, b"\0" * len(tail))
-        self.assertEqual(len(tail), 16 * len(jit["map"]))
-        lines = [line for line in jit["disassembly"].splitlines() if line.strip()]
-        self.assertEqual(len(lines), jit["rv_insns"])
-        for line in lines:
-            addr_text, word_text, *mnemonic = line.split()
-            addr = int(addr_text.rstrip(":"), 16)
-            word = int(word_text, 16)
-            off = addr - jit["slot"]
-            self.assertEqual(int.from_bytes(blob[off : off + 4], "little"), word)
-            self.assertTrue(mnemonic)
-        blacklist = next(item for item in jit["map"] if item["name"] == "blacklist")
-        self.assertEqual(blacklist["storage"], "unknown")
-        reloc = next(item for item in jit["reloc"] if item["symbol"] == "blacklist")
-        self.assertEqual(reloc["target"], blacklist["vmr"])
-        self.assertEqual(reloc["kind"], "lddw")
-        raw = b"".join(int(word).to_bytes(4, "little") for word in reloc["result"])
-        site = reloc["patch_site"]
-        self.assertEqual(blob[site : site + len(raw)], raw)
-        self.assertNotEqual(blob[site], 0x18)
-        calls = [item for item in jit["reloc"] if item["kind"] == "call"]
-        self.assertTrue(calls)
-        for item in calls:
-            self.assertEqual(item["target"], jit["helper"])
-            call_raw = b"".join(int(word).to_bytes(4, "little") for word in item["result"])
-            at = item["patch_site"]
-            self.assertEqual(blob[at : at + len(call_raw)], call_raw)
-            self.assertNotEqual(blob[at], 0x18)
-
-    def test_scan_accepts_the_container(self) -> None:
-        deliver = JitDeliverables.for_stem(self.jit_dir, "firewall", "firewall")
-        proc = subprocess.run(
-            [str(tool_bin_path()), "scan", str(deliver.container)],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
+    def test_compiler_inputs_rebuild_bpf_and_native_code(self):
+        root = self.build_dir
+        source = self.root / "include_change.c"
+        source.write_text(
+            "#include <action.h>\n"
+            '__attribute__((section("xdp"))) int program(void *ctx) { return ACTION; }\n'
         )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        first = self.root / "first"
+        second = self.root / "second"
+        alias = self.root / "alias"
+        for directory, value in ((first, 1), (second, 2)):
+            directory.mkdir()
+            header = directory / "action.h"
+            header.write_text(f"#define ACTION {value}\n")
+            os.utime(header, (1, 1))
+        alias.mkdir()
+        link = alias / "action.h"
+        link.symlink_to(first / "action.h")
+        env = {
+            k: v for k, v in os.environ.items() if k not in ("CPATH", "C_INCLUDE_PATH")
+        }
+        args = ("--firmware", self.firmware, "--inputs", source)
 
-    def test_second_build_matches(self) -> None:
-        deliver = JitDeliverables.for_stem(self.jit_dir, "firewall", "firewall")
-        blob = deliver.jit_bin.read_bytes()
-        elf = deliver.container.read_bytes()
-        proc = run_build(
-            "jit",
-            "-c",
-            "firewall",
-            "--firmware",
-            str(self.firmware),
-            "--build-dir",
-            str(self.jit_dir),
-            "-f",
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(deliver.jit_bin.read_bytes(), blob)
-        self.assertEqual(deliver.container.read_bytes(), elf)
+        def code_bytes(directory):
+            paths = (
+                bpf_path(directory, source.stem),
+                native_object_path(directory, source.stem),
+            )
+            return tuple(executable_sections(path.read_bytes()) for path in paths)
 
-    def test_prevail_failure_removes_planted_deliverables(self) -> None:
-        self.oob_dir.mkdir(parents=True, exist_ok=True)
-        deliver = JitDeliverables.for_stem(self.oob_dir, "xdp_oob_packet", "xdp_oob_packet")
-        for path in deliver.outputs():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"stale")
-        proc = run_build(
-            "jit",
-            "--inputs",
-            str(ROOT / "tests" / "unused" / "xdp_oob_packet.c"),
-            "--firmware",
-            str(self.firmware),
-            "--build-dir",
-            str(self.oob_dir),
-        )
-        self.assertNotEqual(proc.returncode, 0, proc.stdout)
-        self.assertFalse(deliver.jit_bin.exists(), deliver.jit_bin)
-        self.assertFalse(deliver.container.exists(), deliver.container)
-        self.assertFalse(deliver.stamp.exists(), deliver.stamp)
-        self.assertFalse((deliver.jit_bin.parent / ".jit-stage").exists())
-        if deliver.jit_toml.is_file():
-            failed = tomllib.loads(deliver.jit_toml.read_text())
-            self.assertNotEqual(failed.get("status"), "success")
+        for variable in ("CPATH", "C_INCLUDE_PATH"):
+            with self.subTest(variable=variable):
+                run_build(
+                    *args, build_dir=root, env=dict(env, **{variable: str(first)})
+                )
+                before = code_bytes(root)
+                changed = dict(env, **{variable: str(second)})
+                run_build(*args, build_dir=root, env=changed)
+                fresh = self.root / ("fresh-" + variable)
+                run_build(*args, build_dir=fresh, env=changed)
+                self.assertNotEqual(code_bytes(root), before)
+                self.assertEqual(code_bytes(root), code_bytes(fresh))
 
-    def test_esp32c3_does_not_emit_jit_bin(self) -> None:
-        proc = run_build(
-            "esp32c3",
-            "-c",
-            "firewall",
-            "--firmware",
-            str(self.firmware),
-            "--build-dir",
-            str(self.mcu_dir),
-        )
-        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
-        rv32 = self.mcu_dir / "firewall" / "rv32"
-        self.assertTrue((rv32 / "firewall_rv32.o").is_file())
-        self.assertFalse((self.mcu_dir / "firewall" / "jit" / "firewall_jit.bin").exists())
-        text = (self.mcu_dir / ".ninja" / "build.ninja").read_text()
-        self.assertIn(": mcu_cc ", text)
-        self.assertNotIn(": jit_publish ", text)
+        linked = dict(env, CPATH=str(alias))
+        run_build(*args, build_dir=root, env=linked)
+        before = code_bytes(root)
+        link.unlink()
+        link.symlink_to(second / "action.h")
+        run_build(*args, build_dir=root, env=linked)
+        fresh = self.root / "fresh-symlink"
+        run_build(*args, build_dir=fresh, env=linked)
+        self.assertNotEqual(code_bytes(root), before)
+        self.assertEqual(code_bytes(root), code_bytes(fresh))
 
-    def test_rbpf_keeps_map_index_and_skips_jit(self) -> None:
-        proc = run_build(
-            "-c",
-            "firewall",
+    def test_public_snapshot_compiles_with_sdk_headers(self):
+        root = self.build_dir
+        for program in ("copy", "case_mark"):
+            with self.subTest(program=program):
+                run_build(
+                    "rv32imc",
+                    "-c",
+                    program,
+                    "--firmware",
+                    self.firmware,
+                    build_dir=root,
+                )
+                source = self.root / f"{program}.c"
+                source.write_bytes(source_path(root, program).read_bytes())
+                for flags, original in (
+                    (BPF_FLAGS, bpf_path(root, program)),
+                    (MCU_FLAGS, native_object_path(root, program)),
+                ):
+                    standalone = source.with_suffix(".o")
+                    subprocess.run(
+                        [CLANG, *flags, "-c", source, "-o", standalone],
+                        cwd=self.root,
+                        check=True,
+                    )
+                    self.assertEqual(
+                        executable_sections(standalone.read_bytes()),
+                        executable_sections(original.read_bytes()),
+                    )
+
+    def test_public_snapshot_preserves_header_inclusion(self):
+        fixtures = ROOT / "tests/unused/header_graph"
+        in_tree = fixtures / "once/header_graph.c"
+        external = self.root / "guarded-source"
+        external.mkdir()
+        shutil.copyfile(in_tree, external / in_tree.name)
+        for header in (fixtures / "guarded").glob("*.h"):
+            shutil.copyfile(header, external / header.name)
+        for layout, original in (
+            ("guarded", external / in_tree.name),
+            ("once", in_tree),
+        ):
+            with self.subTest(layout=layout):
+                root = self.root / f"{layout}-build"
+                run_build("bpf", "--inputs", original, build_dir=root)
+                snapshot = source_path(root, original.stem).read_bytes()
+                if layout == "once":
+                    self.assertIn(b"/* program-local header */", snapshot)
+                isolated = self.root / f"{layout}-recompile"
+                isolated.mkdir()
+                standalone = isolated / original.name
+                standalone.write_bytes(snapshot)
+                original_obj = isolated / "original.o"
+                published_obj = isolated / "published.o"
+                for src, obj in ((original, original_obj), (standalone, published_obj)):
+                    subprocess.run(
+                        [CLANG, *BPF_FLAGS, "-c", src, "-o", obj],
+                        cwd=isolated,
+                        check=True,
+                    )
+                expected = executable_sections(original_obj.read_bytes())
+                self.assertEqual(
+                    executable_sections(published_obj.read_bytes()), expected
+                )
+                self.assertEqual(
+                    executable_sections(bpf_path(root, original.stem).read_bytes()),
+                    expected,
+                )
+
+    def test_rbpf_classic_map_descriptors_keep_their_own_offsets(self):
+        root = self.build_dir
+        program = "two_classic_maps"
+        source = ROOT / f"tests/unused/{program}.c"
+        run_build(
+            "rv32imc",
             "--engine",
             "rbpf",
             "--firmware",
-            str(self.firmware),
-            "--build-dir",
-            str(self.rbpf_dir),
+            self.firmware,
+            "--inputs",
+            source,
+            build_dir=root,
         )
-        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
-        self.assertFalse((self.rbpf_dir / "firewall" / "jit" / "firewall_jit.bin").exists())
-        self.assertTrue((self.rbpf_dir / "firewall" / "bpf-xpost" / "firewall_bpf-xpost.elf").is_file())
-        text = (self.rbpf_dir / ".ninja" / "build.ninja").read_text()
-        self.assertIn("--map-index", text)
-        self.assertNotIn(": jit_publish ", text)
+        obj = bpf_path(root, program)
+        fields = ("map_type", "key_size", "value_size", "max_entries")
+        expected = {"count_by_case": (1, 4, 4, 5), "seq_log": (2, 4, 8, 7)}
+        self.assertEqual(
+            {
+                m["name"]: tuple(m[field] for field in fields)
+                for m in analyze(obj)["maps"]["items"]
+            },
+            expected,
+        )
+        meta, image = parse_container(
+            container_path(root, program, "ebpf").read_bytes()
+        )
+        self.assertEqual(
+            {
+                m.name: (
+                    m.map_type,
+                    sum(m.key_layout or (32,)) // 8,
+                    sum(m.value_layout) // 8,
+                    m.len,
+                )
+                for m in meta.maps
+            },
+            expected,
+        )
+        relocs = xdp_map_relocations(obj)
+        self.assertCountEqual([name for _, name in relocs], list(expected))
+        for at, name in relocs:
+            self.assertEqual(image[at], 0x18)
+            self.assertEqual(image[at + 1] >> 4, 1)
+            index = int.from_bytes(image[at + 4 : at + 8], "little")
+            self.assertEqual(meta.maps[index].name, name)
+            self.assertEqual(image[at + 12 : at + 16], bytes(4))
 
-    def test_reports_omit_absolute_paths_and_hash_bpf_o(self) -> None:
-        deliver = JitDeliverables.for_stem(self.jit_dir, "firewall", "firewall")
-        bpf_o = self.jit_dir / "firewall" / "bpf" / "firewall_bpf.o"
-        bpf_report = self.jit_dir / "firewall" / "bpf" / "report.toml"
-        texts = {
-            "jit report": deliver.jit_toml.read_text(),
-            "prevail.ok": deliver.stamp.read_text(),
-            "bpf report": bpf_report.read_text(),
-        }
-        for name, text in texts.items():
-            match = _ABSOLUTE.search(text)
-            self.assertIsNone(match, f"{name} contains {match.group(0) if match else ''}")
-        digest = hashlib.sha256(bpf_o.read_bytes()).hexdigest()
-        self.assertIn(f"bpf_sha256={digest}\n", texts["prevail.ok"])
-        self.assertIn("verifier_id=", texts["prevail.ok"])
-        doc = tomllib.loads(texts["jit report"])
-        self.assertEqual(doc["jit"]["bpf_o_sha256"], digest)
-        self.assertEqual(doc["jit"]["source"], "tests/xdp/firewall.c")
-        bpf_doc = tomllib.loads(texts["bpf report"])
-        self.assertEqual(bpf_doc["source"]["path"], "tests/xdp/firewall.c")
-        self.assertNotIn("aot_addr", texts["bpf report"])
+    def test_rbpf_resolves_actual_map_relocations(self):
+        root = self.build_dir
+        args = ("rv32imc", "--engine", "rbpf", "--firmware", self.firmware)
+        firewall = (ROOT / "tests/xdp/firewall.c").read_text()
+        two_maps = self.root / "two_maps.c"
+        two_maps.write_text(
+            firewall.replace(
+                'SEC("xdp")',
+                "struct {\n"
+                "    __uint(type, BPF_MAP_TYPE_ARRAY);\n"
+                "    __uint(max_entries, 1);\n"
+                "    __type(key, __u32);\n"
+                "    __type(value, __u32);\n"
+                '} ahead SEC(".maps");\n\n'
+                'SEC("xdp")',
+            )
+        )
+
+        for program, flags, map_names in (
+            ("copy", ("-c", "copy"), []),
+            ("incr", ("--inputs", ROOT / "tests/unused/incr.c"), ["workload"]),
+            ("firewall", ("-c", "firewall"), ["blacklist"]),
+            ("two_maps", ("--inputs", two_maps), ["ahead", "blacklist"]),
+        ):
+            with self.subTest(program=program):
+                run_build(*args, *flags, build_dir=root)
+                obj = bpf_path(root, program)
+                original = next(
+                    code.data
+                    for code in executable_sections(obj.read_bytes())
+                    if code.name == "xdp"
+                )
+                meta, image = parse_container(
+                    container_path(root, program, "ebpf").read_bytes()
+                )
+                self.assertEqual([m.name for m in meta.maps], map_names)
+                expected = bytearray(original)
+                if "blacklist" in map_names:
+                    index = map_names.index("blacklist")
+                    blacklist = meta.maps[index]
+                    self.assertEqual(blacklist.map_type, 1)
+                    self.assertEqual(blacklist.len, 256)
+                    self.assertEqual(blacklist.key_layout, (32,))
+                    self.assertEqual(blacklist.value_layout, (32,))
+                    offsets = [
+                        at
+                        for at, name in xdp_map_relocations(obj)
+                        if name == "blacklist"
+                    ]
+                    self.assertTrue(offsets)
+                    for at in offsets:
+                        self.assertEqual(original[at], 0x18)
+                        expected[at + 1] = (expected[at + 1] & 0xF) | 0x10
+                        expected[at + 4 : at + 8] = index.to_bytes(4, "little")
+                        expected[at + 12 : at + 16] = bytes(4)
+                self.assertEqual(image, expected)
+
+        source = self.root / "unbound_firewall.c"
+        source.write_text(
+            firewall.replace("__uint(max_entries, 256)", "__uint(max_entries, 257)")
+        )
+        failed = run_build(*args, "--inputs", source, build_dir=root, check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn('map reference "blacklist"', failed.stdout)
+        self.assertIn("has no container binding", failed.stdout)
+        self.assertFalse(container_path(root, source.stem, "ebpf").exists())
+
+    def test_rbpf_uses_the_configured_objdump_to_select_the_section(self):
+        path = os.pathsep.join(
+            part
+            for part in os.environ["PATH"].split(os.pathsep)
+            if not shutil.which("llvm-objdump", path=part)
+        )
+        tools = self.root / "tools"
+        tools.mkdir()
+        for command in ("ninja", "cargo", "rustc", "ld.lld"):
+            if (resolved := shutil.which(command)) and not shutil.which(
+                command, path=path
+            ):
+                (tools / command).symlink_to(resolved)
+        path = str(tools) + os.pathsep + path
+        self.assertIsNone(shutil.which("llvm-objdump", path=path))
+        log = tools / "objdump.log"
+        override = tools / "configured-objdump"
+        override.write_text(
+            "#!/bin/sh\n"
+            + f'printf "%s\\n" "$1" >> {shlex.quote(str(log))}\n'
+            + f'exec {shlex.quote(resolve_llvm_tool("llvm-objdump"))} "$@"\n'
+        )
+        override.chmod(0o755)
+        env = dict(os.environ, PATH=path, LIBBPF_MCU_OBJDUMP=str(override))
+        run_build(
+            "rv32imc",
+            "--engine",
+            "rbpf",
+            "--firmware",
+            self.firmware,
+            "-c",
+            "noop",
+            build_dir=self.build_dir,
+            env=env,
+        )
+        self.assertIn("-h", log.read_text().splitlines())
+        self.assertEqual(
+            [row["name"] for row in load_index(self.build_dir / "noop")["mode"]],
+            ["ebpf"],
+        )
+
+    def test_prevail_rejection_blocks_every_public_member(self):
+        source = ROOT / "tests/unused/xdp_oob_packet.c"
+        process = run_build(
+            "bpf",
+            "--inputs",
+            source,
+            build_dir=self.build_dir,
+            check=False,
+        )
+        self.assertNotEqual(process.returncode, 0)
+        self.assertFalse(
+            any(p.is_file() for p in (self.build_dir / source.stem).rglob("*"))
+        )
+        diagnostic = self.build_dir / ".ninja" / source.stem / "diagnostics.json"
+        recorded = json.loads(diagnostic.read_text())
+        self.assertEqual(set(recorded), {"prevail"})
+        self.assertIn(f"FAIL: xdp/{source.stem}", recorded["prevail"])
+        run_build("bpf", "-c", "just_drop", build_dir=self.build_dir)
+        self.assertEqual(json.loads(diagnostic.read_text()), recorded)
+        self.assertTrue(
+            any(
+                source.stem in log.read_text()
+                for log in (self.build_dir / ".ninja").glob("bpf-*.log")
+            )
+        )
 
 
 if __name__ == "__main__":

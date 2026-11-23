@@ -1,25 +1,21 @@
-#!/usr/bin/env python3
 """Canonical XPOST Compact ELF version 0 codec; see docs/xpost_compact_elf.proto."""
 from __future__ import annotations
 
-import argparse
 import hashlib
 import struct
-import tomllib
 from dataclasses import dataclass
-from pathlib import Path
 
 ELF32_EHDR_SIZE = 52
 ELF32_SHDR_SIZE = 40
 SHT_SIZE = 4 * ELF32_SHDR_SIZE
 META_OFFSET = ELF32_EHDR_SIZE + SHT_SIZE
 IMAGE_DIGEST_SIZE = 32
-MAX_CONTAINER_SIZE = 4096
+MAX_CONTAINER_SIZE = 8192
 MAX_META_SIZE = 1024
 MAX_MAPS = 8
 MAX_NAME = 31
 MAX_LAYOUT = 32
-MAX_ENTRIES = 64
+MAX_ENTRIES = 256
 XPOST_VERSION = 0
 SHT_XPOST_META = 0x80000001
 SHT_XPOST_IMAGE = 0x80000002
@@ -130,7 +126,7 @@ def build_container(image: bytes, metadata: ImageMetadataV0) -> bytes:
     names_off = image_off + len(image)
     digest_off = align4(names_off + len(SECTION_NAMES))
     if digest_off + IMAGE_DIGEST_SIZE > MAX_CONTAINER_SIZE:
-        raise ValueError("container exceeds 4096 bytes")
+        raise ValueError(f"container exceeds {MAX_CONTAINER_SIZE} bytes")
     if metadata.slot_address + len(image) > 0x100000000:
         raise ValueError("image address extent overflows ELF32")
     header = EHDR.pack(IDENT, 1, 243, 1, 0, 0, ELF32_EHDR_SIZE, 1, 52, 0, 0, 40, 4, 3)
@@ -208,86 +204,3 @@ def parse_container(data: bytes) -> tuple[ImageMetadataV0, bytes]:
     if expected[-32:] != data[-32:]:
         raise ValueError("raw image SHA-256 mismatch")
     return metadata, image
-
-
-def _map_type_number(value: object) -> int:
-    if type(value) is int:
-        return value
-    from btf import MAP_TYPE_NAME
-    by_name = {name: number for number, name in MAP_TYPE_NAME.items()}
-    if not isinstance(value, str) or value not in by_name:
-        raise ValueError(f"unknown map_type: {value!r}")
-    return by_name[value]
-
-
-def metadata_from_bpf_toml(path: Path, *, name: str, slot_address: int,
-                           helper_address: int, machine: int) -> ImageMetadataV0:
-    from btf import layout_bit_intervals
-    data = tomllib.loads(path.read_text())
-    maps = data.get("maps", {})
-    if not isinstance(maps, dict):
-        raise ValueError(f"{path}: maps must be TOML tables")
-    records = []
-    for map_name, item in maps.items():
-        if not isinstance(item, dict):
-            raise ValueError(f"{path}: map {map_name!r} must be a table")
-        try:
-            try:
-                kind = _map_type_number(item["map_type"])
-            except ValueError:
-                # Compact ELF V0 only HASH/ARRAY; skip RINGBUF etc.
-                continue
-            if kind not in (1, 2):
-                continue
-            max_entries = item["max_entries"]
-            if not isinstance(max_entries, int) or not 1 <= max_entries <= 64:
-                continue
-            layouts = []
-            for field in ("key", "value"):
-                bits = tuple(layout_bit_intervals(item[field]))
-                derived = sum(bits) // 8
-                if sum(bits) % 8:
-                    raise ValueError(f"{field} layout is not byte-aligned")
-                if f"{field}_size" in item:
-                    size = _integer(item[f"{field}_size"], 1, 256, f"{field}_size")
-                else:
-                    size = _integer(derived, 1, 256, f"{field}_size")
-                if sum(bits) != size * 8:
-                    raise ValueError(f"{field} layout does not match {field}_size")
-                _layout(bits, 64 if field == "key" else 256)
-                if kind == 2 and field == "key":
-                    if bits != (32,):
-                        raise ValueError("ARRAY requires an implicit u32 key")
-                    layouts.append(None)
-                else:
-                    layouts.append(bits)
-            if "map_vma" in item and "aot_addr" in item and item["map_vma"] != item["aot_addr"]:
-                raise ValueError("map_vma disagrees with linked aot_addr")
-            vma = item["map_vma"] if "map_vma" in item else item["aot_addr"]
-            records.append(MapDescriptorV0(map_name, kind, max_entries, vma, *layouts))
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"{path}: map {map_name!r}: {exc}") from exc
-    metadata = ImageMetadataV0(slot_address, helper_address, machine, name, tuple(records))
-    encode_metadata(metadata)
-    return metadata
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="xpost_elf")
-    parser.add_argument("--image", required=True, type=Path)
-    parser.add_argument("--bpf-toml", required=True, type=Path)
-    parser.add_argument("--out", required=True, type=Path)
-    parser.add_argument("--slot-address", "--link-addr", required=True, type=lambda v: int(v, 0))
-    parser.add_argument("--helper-address", required=True, type=lambda v: int(v, 0))
-    parser.add_argument("--machine", "--arch", default=1, type=lambda v: int(v, 0))
-    args = parser.parse_args()
-    metadata = metadata_from_bpf_toml(args.bpf_toml, name=args.image.name,
-                                     slot_address=args.slot_address,
-                                     helper_address=args.helper_address, machine=args.machine)
-    output = build_container(args.image.read_bytes(), metadata)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_bytes(output)
-
-
-if __name__ == "__main__":
-    main()

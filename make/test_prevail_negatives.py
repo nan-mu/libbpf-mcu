@@ -12,15 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 FAILED = ROOT / "tests" / "unused"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prevail_gate import prevail_bin  # noqa: E402
+from llvm_tools import resolve_llvm_tool  # noqa: E402
 
 PREVAIL = prevail_bin()
-CLANG = "clang"
+CLANG = resolve_llvm_tool("clang", prefer_homebrew=True)
 
-CASES = [
-    ("xdp_oob_packet.c", "xdp", None),
-    ("xdp_null_map_deref.c", "xdp", None),
-    ("xdp_uninit_key.c", "xdp", None),
-]
+CASES = ("xdp_oob_packet", "xdp_null_map_deref", "xdp_uninit_key")
 
 
 def compile_bpf(src: Path, out: Path) -> None:
@@ -45,14 +42,15 @@ def compile_bpf(src: Path, out: Path) -> None:
         raise RuntimeError(f"compile failed {src.name}:\n{proc.stderr}")
 
 
-def prevail_must_reject(obj: Path, section: str) -> None:
-    cmd = [str(PREVAIL), str(obj), "--section", section]
+def prevail_must_reject(obj: Path) -> None:
+    function = obj.stem
+    cmd = [str(PREVAIL), "--stack-size", "512", "--section", "xdp", "--function", function, str(obj)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    out = (proc.stdout or "") + (proc.stderr or "")
-    if proc.returncode == 0 and "PASS" in out:
-        raise RuntimeError(f"PREVAIL unexpectedly PASS for {obj.name}:\n{out}")
-    if "PASS" in out and "FAIL" not in out and proc.returncode == 0:
-        raise RuntimeError(f"PREVAIL unexpectedly accepted {obj.name}:\n{out}")
+    if proc.returncode != 1 or f"FAIL: xdp/{function}" not in proc.stdout.splitlines():
+        raise RuntimeError(
+            f"expected a verifier rejection for {function}, got exit {proc.returncode}\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
 
 
 def main() -> None:
@@ -62,12 +60,12 @@ def main() -> None:
     failed = 0
     with tempfile.TemporaryDirectory(prefix="bs-neg-") as tmp:
         tmp_path = Path(tmp)
-        for name, section, _fn in CASES:
-            src = FAILED / name
+        for name in CASES:
+            src = FAILED / f"{name}.c"
             obj = tmp_path / (src.stem + ".o")
             try:
                 compile_bpf(src, obj)
-                prevail_must_reject(obj, section)
+                prevail_must_reject(obj)
                 print(f"OK reject: {name}")
             except Exception as exc:
                 failed += 1

@@ -12,10 +12,13 @@ use clap::{Parser, Subcommand};
 use object::{Object, ObjectSection, ObjectSymbol};
 use xpost_elf::{SECTION_NAME, ScanOutcome, build_container, decode, scan_at};
 
-use bpf_meta::{metadata_from_value, with_aot_addrs};
+use bpf_meta::{metadata_from_value, read_maps, with_linked_maps};
 
 #[derive(Parser, Debug)]
-#[command(name = "xpost-mcu-elf", about = "XPM1 + Compact ELF helpers (xpost-elf)")]
+#[command(
+    name = "xpost-mcu-elf",
+    about = "XPM1 + Compact ELF helpers (xpost-elf)"
+)]
 struct Args {
     #[command(subcommand)]
     cmd: Cmd,
@@ -30,19 +33,22 @@ enum Cmd {
         /// Linked firmware ELF carrying `.xpost.mem`.
         firmware: PathBuf,
     },
-    /// Encode AOT image + bpf.toml into Compact ELF V0 (`<stem>.elf`).
+    /// Encode an image and its map bindings as Compact ELF V0.
     Pack {
         #[arg(long)]
         image: PathBuf,
         #[arg(long)]
-        bpf_toml: PathBuf,
-        /// Backend report whose map `aot_addr` values are applied in memory.
+        maps: PathBuf,
+        /// Linked AOT ELF supplying map VMAs.
         #[arg(long)]
-        addr_toml: Option<PathBuf>,
+        linked_elf: PathBuf,
         #[arg(long)]
         name: String,
         #[arg(long, value_parser = parse_u32)]
         slot_address: u32,
+        /// Maximum payload bytes available in the selected firmware slot.
+        #[arg(long, value_parser = parse_u32)]
+        slot_length: u32,
         #[arg(long, value_parser = parse_u32)]
         helper_address: u32,
         #[arg(long, default_value_t = 1, value_parser = parse_u32_as_u8)]
@@ -77,10 +83,11 @@ enum Cmd {
         #[arg(long)]
         obj: PathBuf,
         #[arg(long)]
-        bpf_toml: PathBuf,
-        /// Source path recorded in the jit report. Not compiled again.
-        #[arg(long)]
-        src: PathBuf,
+        maps: PathBuf,
+        #[arg(long, value_parser = parse_u32)]
+        slot_address: u32,
+        #[arg(long, value_parser = parse_u32)]
+        slot_length: u32,
         #[arg(long)]
         name: String,
         /// Directory named `.jit-stage`. The only place this command writes.
@@ -148,10 +155,11 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 fn pack(args: Cmd) -> Result<()> {
     let Cmd::Pack {
         image,
-        bpf_toml,
-        addr_toml,
+        maps,
+        linked_elf,
         name,
         slot_address,
+        slot_length,
         helper_address,
         machine,
         map_index,
@@ -166,13 +174,15 @@ fn pack(args: Cmd) -> Result<()> {
         bail!("--name must be non-empty ASCII");
     }
     let mut image_bytes = fs::read(&image).with_context(|| format!("read {}", image.display()))?;
-    let bpf_text = fs::read_to_string(&bpf_toml).with_context(|| format!("read {}", bpf_toml.display()))?;
-    let overlaid = if let Some(addr) = &addr_toml {
-        let addr_text = fs::read_to_string(addr).with_context(|| format!("read {}", addr.display()))?;
-        with_aot_addrs(&bpf_text, &addr_text, &bpf_toml.display().to_string())?
-    } else {
-        toml::from_str(&bpf_text).with_context(|| format!("parse {}", bpf_toml.display()))?
-    };
+    let overlaid = with_linked_maps(read_maps(&maps)?, &linked_elf)?;
+    let meta = metadata_from_value(
+        &overlaid,
+        &maps.display().to_string(),
+        &name,
+        slot_address,
+        helper_address,
+        machine,
+    )?;
     // A bytecode image reaches the interpreter with its map references
     // unresolved: the object file names each map by symbol and leaves the
     // instruction's immediate at zero. Writing the map's index into that
@@ -181,22 +191,14 @@ fn pack(args: Cmd) -> Result<()> {
     // lookup silently misses.
     if map_index {
         let obj = obj.context("--map-index needs --obj <bpf.o> to read relocations")?;
-        let patched = index_map_references(&image_bytes, &obj, &overlaid)?;
+        let patched = index_map_references(&image_bytes, &obj, &meta)?;
         image_bytes = patched;
     }
+    let blob = build_container(&image_bytes, &meta, Some(slot_length))
+        .map_err(|e| anyhow::anyhow!("build_container: {e:?}"))?;
     if let Some(export) = &export_image {
         write_atomic(export, &image_bytes)?;
     }
-    let meta = metadata_from_value(
-        &overlaid,
-        &bpf_toml.display().to_string(),
-        &name,
-        slot_address,
-        helper_address,
-        machine,
-    )?;
-    let blob = build_container(&image_bytes, &meta, None)
-        .map_err(|e| anyhow::anyhow!("build_container: {e:?}"))?;
     write_atomic(&out, blob.as_slice())?;
     Ok(())
 }
@@ -206,92 +208,59 @@ fn pack(args: Cmd) -> Result<()> {
 /// The index is the map's position in the same filtered, sorted order the
 /// container metadata uses, because that is the order the loader reads its
 /// binding table in. Getting the two orders out of step would silently point a
-/// reference at the wrong map, so both come from `bpf.toml` through the same
-/// metadata builder.
+/// reference at the wrong map, so both use the same metadata.
 fn index_map_references(
     image: &[u8],
     obj_path: &PathBuf,
-    overlaid: &toml::Value,
+    meta: &xpost_elf::ImageMetadataV0,
 ) -> Result<Vec<u8>> {
-    use object::{Object, ObjectSection, ObjectSymbol};
-
     let data = fs::read(obj_path).with_context(|| format!("read {}", obj_path.display()))?;
     let file = object::File::parse(&*data).context("parse bpf object")?;
 
-    let meta = metadata_from_value(overlaid, "bpf report", "probe", 0x1000, 0x1000, 1)?;
-    let order: Vec<String> = meta
-        .maps
-        .iter()
-        .map(|m| m.name.as_str().to_string())
-        .collect();
-    if order.is_empty() {
-        // Nothing to resolve. Leaving the image untouched is right: a program
-        // without maps cannot need one.
-        return Ok(image.to_vec());
+    let mut sections = file
+        .sections()
+        .filter(|section| matches!(section.name(), Ok("xdp" | "xdp1")) && section.size() != 0);
+    let section = sections.next().context("object has no XDP code")?;
+    if sections.next().is_some() || section.data()? != image {
+        bail!("image must match the object's single XDP section");
+    }
+    let mut out = image.to_vec();
+    for (offset, reloc) in section.relocations() {
+        let object::RelocationTarget::Symbol(index) = reloc.target() else {
+            bail!("unsupported XDP relocation target at {offset:#x}");
+        };
+        let symbol = file.symbol_by_index(index)?;
+        let name = symbol.name()?;
+        let is_map = symbol
+            .section_index()
+            .and_then(|index| file.section_by_index(index).ok())
+            .is_some_and(|section| matches!(section.name(), Ok("maps" | ".maps")));
+        if !is_map {
+            bail!("unresolved XDP relocation at {offset:#x} to {name:?}");
+        }
+        let idx = meta
+            .maps
+            .iter()
+            .position(|m| m.name.as_str() == name)
+            .with_context(|| {
+                format!("XDP map reference {name:?} at {offset:#x} has no container binding")
+            })?;
+        let at = usize::try_from(offset)?;
+        let end = at
+            .checked_add(16)
+            .context("map relocation offset overflow")?;
+        let lddw = out
+            .get_mut(at..end)
+            .context("map relocation outside XDP image")?;
+        if at % 8 != 0 || lddw[0] != 0x18 || lddw[8] != 0 {
+            bail!("map relocation at {offset:#x} does not target an lddw");
+        }
+        lddw[4..8].copy_from_slice(&(idx as u32).to_le_bytes());
+        lddw[12..16].fill(0);
+        // src = 1 marks the immediate as a map index.
+        lddw[1] = (lddw[1] & 0x0f) | 0x10;
     }
 
-    // The program section holds the instructions. `--only-section` extracted it
-    // before this call, so its first instruction is offset zero.
-    let mut out = image.to_vec();
-    let mut patched = 0usize;
-    // Relocations hang off the section they apply to, not off the `.rel*`
-    // section itself: `Section::relocations` reads the latter. So the walk is
-    // over program sections, and the filter is "a section whose name marks it as
-    // XDP code".
-    for section in file.sections() {
-        let Ok(section_name) = section.name() else {
-            continue;
-        };
-        if !(section_name == "xdp" || section_name.starts_with("xdp")) {
-            continue;
-        }
-        let relocs = section.relocations();
-        for (offset, reloc) in relocs {
-            // The relocation's target symbol is the map's name in the object.
-            // The symbol is the identity; the relocation kind is whatever the
-            // object crate maps `R_BPF_64_64` to, which is not a value this
-            // code should depend on.
-            let symbol = match reloc.target() {
-                object::RelocationTarget::Symbol(sym) => sym,
-                _ => continue,
-            };
-            let name = match file.symbol_by_index(symbol).and_then(|s| Ok(s.name()?.to_string())) {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            let Some(idx) = order.iter().position(|m| m == &name) else {
-                // A relocation to something that is not a map in this image: a
-                // map the container omits (ring buffer, for example). Skipping it
-                // is right, because the program cannot reach it either.
-                eprintln!(
-                    "xpost-mcu-elf: reloc at {offset:#x} -> `{name}`, not a recorded map; skipped"
-                );
-                continue;
-            };
-            let at = offset as usize;
-            if at + 8 > out.len() {
-                bail!("relocation at {offset:#x} is past the image ({} bytes)", out.len());
-            }
-            if out[at] != 0x18 {
-                bail!(
-                    "relocation at {offset:#x} is not an lddw (opcode {:#04x})",
-                    out[at]
-                );
-            }
-            out[at + 4..at + 8].copy_from_slice(&(idx as u32).to_le_bytes());
-            out[at + 12..at + 16].copy_from_slice(&0u32.to_le_bytes());
-            // src = 1 marks "this immediate is a map index", which the loader
-            // uses to tell a map reference from an ordinary constant.
-            out[at + 1] |= 1 << 4;
-            patched += 1;
-        }
-    }
-    if patched == 0 {
-        bail!(
-            "no map relocations found for {}; the image carries {order:?} but no reference to them",
-            obj_path.display()
-        );
-    }
     Ok(out)
 }
 
@@ -299,15 +268,17 @@ fn pack_jit_cmd(args: Cmd) -> Result<()> {
     let Cmd::PackJit {
         firmware,
         obj,
-        bpf_toml,
-        src,
+        maps,
+        slot_address,
+        slot_length,
         name,
         stage,
     } = args
     else {
         unreachable!()
     };
-    let artifact = jit_image::JitArtifact::assemble(&firmware, &obj, &bpf_toml, &src, &name)?;
+    let artifact =
+        jit_image::JitArtifact::assemble(&firmware, &obj, &maps, &name, slot_address, slot_length)?;
     artifact.write_stage(&stage)?;
     Ok(())
 }

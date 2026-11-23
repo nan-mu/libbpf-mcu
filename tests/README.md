@@ -4,8 +4,8 @@ Test and validation source for libbpf-mcu.
 
 ## Categories
 
-- **xdp/**: Programs used by `xpost/examples` (vendored AOT / HAL counterparts).
-  Default build inputs.
+- **xdp/**: Default compute and networking programs. Shared headers live beside the programs that include them.
+- **diagnostics/**: Opt-in `helper_loop`, `merge_try` and `xdp_drop` probes.
 - **unused/**: Archived or negative cases; excluded from default builds.
 
 ## Layout
@@ -13,9 +13,12 @@ Test and validation source for libbpf-mcu.
 ```
 tests/
 ├── xdp/
+│   ├── exb2/
 │   ├── just_drop.c
 │   ├── just_tx.c
 │   └── firewall.c
+├── diagnostics/
+│   └── …
 └── unused/
     └── …
 ```
@@ -27,4 +30,4 @@ tests/
 
 ## Usage
 
-Default `build` skips anything under `unused/` (`make/build.py`).
+Use `pixi run build -c helper_loop` for an opt-in diagnostic. Select archived sources explicitly with `--inputs`. The [benchmark contracts](../docs/benchmarks.md) list the active workloads and the archived fixtures.

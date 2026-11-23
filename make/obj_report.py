@@ -1,372 +1,211 @@
-"""Generate object reports (.toml) via llvm-objdump.
-
-Shared skeleton for all targets:
-  source / size → [xdp] → [text?] → optional BTF maps/CORE (bpf only).
-"""
+"""Render a human report from the exact executable bytes and recorded calls."""
 
 from __future__ import annotations
 
-import argparse
+import json
 import re
+import shlex
+import struct
 import subprocess
-import sys
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
-from prevail_gate import published_path
+from layout import write_if_changed
 
-SECTION_LINE = re.compile(
-    r"^\s*(\d+)\s+(\S+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s*(.*?)\s*$"
-)
-
-# llvm-objdump -t: `403818cc g     O .maps	00000010 arr_map`
-MAPS_SYM_LINE = re.compile(
-    r"^([0-9a-fA-F]+)\s+\S+\s+\S+\s+\.?maps\s+[0-9a-fA-F]+\s+(\S+)\s*$"
-)
-
-# Sections with no value in the architecture report (tooling / ELF / reloc / dump noise).
-_SKIP_EXACT = frozenset(
-    {
-        ".strtab",
-        ".symtab",
-        ".llvm_addrsig",
-        ".comment",
-        ".eh_frame",
-        ".relaxdp",
-        ".note.GNU-stack",
-        ".maps",
-        "license",
-        ".BTF",
-        ".BTF.ext",
-    }
-)
+ELF32 = struct.Struct("<16sHHIIIIIHHHHHH")
+ELF64 = struct.Struct("<16sHHIQQQIHHHHHH")
+SECTION32 = struct.Struct("<10I")
+SECTION64 = struct.Struct("<IIQQQQIIQQ")
+BPF, RISCV = 247, 243
 
 
-def run_objdump(objdump: str, args: list[str]) -> str:
-    result = subprocess.run(
-        [objdump, *args], capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0:
-        sys.stderr.write(result.stderr or result.stdout)
-        sys.exit(result.returncode or 1)
-    return result.stdout
+@dataclass(frozen=True)
+class CodeSection:
+    name: str
+    address: int
+    data: bytes
 
 
-def skip_section(name: str) -> bool:
-    if name in _SKIP_EXACT:
-        return True
-    if name.startswith((".debug_", ".rel", ".rela", ".note")):
-        return True
-    if name.endswith(".attributes") or name.endswith("_attributes"):
-        return True
-    return False
-
-
-def section_key(name: str) -> str:
-    return name.lstrip(".")
-
-
-def parse_sections(objdump: str, obj: Path, *, keep_empty: bool = False) -> list[dict]:
-    text = run_objdump(objdump, ["-h", str(obj)])
+def executable_sections(data: bytes) -> list[CodeSection]:
+    if data[:4] != b"\x7fELF" or data[5] != 1:
+        raise ValueError("expected a little-endian ELF")
+    header, section = {1: (ELF32, SECTION32), 2: (ELF64, SECTION64)}[data[4]]
+    *_, offset, _, _, _, _, size, count, names_index = header.unpack_from(data)
+    if size != section.size or not 0 < names_index < count:
+        raise ValueError("invalid ELF section table")
+    rows = [section.unpack_from(data, offset + i * size) for i in range(count)]
+    names_offset, names_size = rows[names_index][4:6]
+    names = data[names_offset : names_offset + names_size]
     sections = []
-    for line in text.splitlines():
-        match = SECTION_LINE.match(line)
-        if not match:
+    for name, kind, flags, address, start, length, *_ in rows:
+        if kind != 1 or not flags & 4 or not length:
             continue
-        name = match.group(2)
-        size = int(match.group(3), 16)
-        vma = int(match.group(4), 16)
-        typ = match.group(5).strip()
-        if skip_section(name):
-            continue
-        if size == 0 and not keep_empty:
-            continue
-        sections.append({"name": name, "size": size, "vma": vma, "type": typ})
+        end = names.index(b"\0", name)
+        if start + length > len(data):
+            raise ValueError("ELF code lies outside the file")
+        sections.append(
+            CodeSection(names[name:end].decode(), address, data[start : start + length])
+        )
     return sections
 
 
-def find_section(sections: list[dict], *names: str) -> dict | None:
-    want = set(names)
-    for sec in sections:
-        if sec["name"] in want or section_key(sec["name"]) in want:
-            return sec
-    return None
+def code_elf(code: CodeSection, machine: int) -> bytes:
+    """Give objdump a single executable section containing the supplied bytes."""
+    elf, section, elf_class = (
+        (ELF64, SECTION64, 2) if machine == BPF else (ELF32, SECTION32, 1)
+    )
+    ident = b"\x7fELF" + bytes((elf_class, 1, 1)) + bytes(9)
+    names = b"\0" + code.name.encode() + b"\0.shstrtab\0"
+    start = elf.size + 3 * section.size
+    return b"".join(
+        [
+            elf.pack(
+                ident,
+                1 if machine == BPF else 2,
+                machine,
+                1,
+                code.address,
+                0,
+                elf.size,
+                0,
+                elf.size,
+                0,
+                0,
+                section.size,
+                3,
+                2,
+            ),
+            bytes(section.size),
+            section.pack(1, 1, 6, code.address, start, len(code.data), 0, 0, 4, 0),
+            section.pack(
+                len(names) - len(b".shstrtab\0"),
+                3,
+                0,
+                0,
+                start + len(code.data),
+                len(names),
+                0,
+                0,
+                1,
+                0,
+            ),
+            code.data,
+            names,
+        ]
+    )
 
 
-INSN_LINE = re.compile(
-    r"^(\s*)(\d+):\t(?:[0-9a-fA-F]{2}(?:\s+[0-9a-fA-F]{2})*)\t(.*)$"
-)
+INSN = re.compile(r"^\s*([0-9a-fA-F]+):\s*([\da-fA-F ]+?)\t+\s*(.+)$")
 
 
-def format_disasm(objdump: str, obj: Path, name: str) -> str:
-    """Disassembly with insn index + mnemonic; opcode hex bytes stripped when present."""
-    text = run_objdump(objdump, ["-d", "-j", name, str(obj)])
-    lines = []
-    started = False
+def format_disasm(
+    objdump: str, obj: Path, code: CodeSection, *, bpf: bool, compressed: bool = False
+) -> str:
+    cmd = [objdump, "-d", "-z", "--section=" + code.name]
+    if not bpf:
+        cmd.append("--mattr=+m," + ("+c" if compressed else "-c"))
+    text = subprocess.check_output([*cmd, str(obj)], text=True)
+    label = "section byte offset" if bpf else "linked address"
+    lines = [f"{code.name}  ({label})"]
+    offset = 0
     for line in text.splitlines():
-        if line.startswith("Disassembly of section"):
-            started = True
+        if not (match := INSN.fullmatch(line)):
             continue
-        if not started or not line.strip():
-            continue
-        match = INSN_LINE.match(line)
-        if match:
-            indent, idx, mnemonic = match.groups()
-            lines.append(f"{indent}{idx}:\t{mnemonic.rstrip()}")
+        printed, raw, assembly = match.groups()
+        if bpf:
+            position = int(printed) * 8
+            decoded = bytes.fromhex(raw)
         else:
-            # Label / other non-insn lines (e.g. `0000... <sym>:`).
-            lines.append(line.rstrip())
-    return "\n".join(lines)
+            position = int(printed, 16) - code.address
+            chunks = raw.split()
+            decoded = (
+                int(chunks[0], 16).to_bytes(len(chunks[0]) // 2, "little")
+                if len(chunks) == 1
+                else bytes.fromhex(raw)
+            )
+        if offset != position or code.data[offset : offset + len(decoded)] != decoded:
+            raise ValueError(
+                f"{code.name}+{offset:#x}: disassembler bytes differ from code"
+            )
+        at = offset if bpf else code.address + offset
+        lines.append(f"{at:08x}  {decoded.hex(' '):<47}  {' '.join(assembly.split())}")
+        offset += len(decoded)
+    if offset != len(code.data):
+        raise ValueError(
+            f"{code.name}: decoded {offset} of {len(code.data)} code bytes"
+        )
+    return "\n".join(lines) + "\n"
 
 
-def toml_escape(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace('"""', '\\"""')
-        .replace("\r\n", "\n")
-    )
+def disassemble_payload(objdump: str, code: CodeSection, machine: int) -> str:
+    with tempfile.TemporaryDirectory(prefix="libbpf-disasm-") as tmp:
+        elf = Path(tmp) / "payload.elf"
+        elf.write_bytes(code_elf(code, machine))
+        return format_disasm(objdump, elf, code, bpf=machine == BPF)
 
 
-def toml_string(value: str) -> str:
-    escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\t", "\\t")
-    )
-    return f'"{escaped}"'
+MACHINES = {
+    "bpf": (
+        "Little-endian eBPF. The listing shows the executable sections of the "
+        "original Clang object. Addresses are byte offsets within each section."
+    ),
+    "llvm-aot": (
+        "RV32IMC, ILP32, no FPU. LLVM compiles the C source for the MCU. "
+        "The listing shows the linked instructions at their firmware slot addresses."
+    ),
+    "ebpf": (
+        "Little-endian eBPF for the rBPF interpreter on RV32IMC. The container payload "
+        "uses map indices. Addresses are byte offsets in the rewritten program."
+    ),
+    "jit": (
+        "ILP32, no FPU. The host JIT translates eBPF to the RV32IM subset of RV32IMC. "
+        "The listing covers the linked instructions at their firmware slot addresses "
+        "and ends before map storage."
+    ),
+}
 
 
-def append_multiline(lines: list[str], field: str, payload: str) -> None:
-    lines.append(f'{field} = """\n{toml_escape(payload)}\n"""')
-
-
-def append_header(lines: list[str], source: Path, size: int) -> None:
-    lines.append(f'source = "{source}"')
-    lines.append(f"size = {size}")
-    lines.append("")
-
-
-def _asm_block(
-    lines: list[str],
-    table: str,
-    objdump: str,
-    obj: Path,
-    sec: dict | None,
-    with_content: bool,
-    *,
-    omit_if_empty: bool = False,
-) -> None:
-    size = int(sec["size"]) if sec else 0
-    if omit_if_empty and size == 0:
-        return
-    lines.append(f"[{table}]")
-    lines.append(f"size = {size}")
-    if with_content and sec and size > 0:
-        append_multiline(lines, "asm", format_disasm(objdump, obj, sec["name"]))
-    else:
-        lines.append('asm = ""')
-    lines.append("")
+def fenced(text: str, language: str) -> str:
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    newline = "" if text.endswith(("\r", "\n")) else "\n"
+    return f"{fence}{language}\n{text}{newline}{fence}"
 
 
 def write_report(
-    obj: Path,
-    source: Path,
-    out: Path,
-    objdump: str,
-    with_content: bool,
-    btf_toml_lines: list[str] | None = None,
-    *,
-    header: bool = True,
+    path: Path, source: str, snapshot: bytes, sections: list[tuple[str, str, list[dict]]]
 ) -> None:
-    sections = parse_sections(objdump, obj, keep_empty=True)
-    xdp = find_section(sections, "xdp", "xdp1", ".xdp")
-    text = find_section(sections, "text", ".text")
-
-    lines: list[str] = []
-    if header:
-        append_header(lines, source, obj.stat().st_size)
-    _asm_block(lines, "xdp", objdump, obj, xdp, with_content)
-    _asm_block(
-        lines, "text", objdump, obj, text, with_content, omit_if_empty=True
-    )
-    if btf_toml_lines is not None:
-        lines.extend(btf_toml_lines)
-    out.write_text("\n".join(lines).rstrip() + "\n")
-
-
-def parse_maps_aot_addrs(objdump: str, obj: Path) -> dict[str, int]:
-    """Map symbol name → absolute VMA for objects linked into `.maps`."""
-    text = run_objdump(objdump, ["-t", str(obj)])
-    out: dict[str, int] = {}
-    for line in text.splitlines():
-        match = MAPS_SYM_LINE.match(line)
-        if not match:
-            continue
-        name = match.group(2)
-        if name.startswith("$"):
-            continue
-        addr = int(match.group(1), 16)
-        if addr == 0:
-            continue
-        out[name] = addr
-    return out
-
-
-def append_map_tail(out: Path, source: Path) -> None:
-    lines = source.read_text().splitlines(keepends=True)
-    start = next(
-        (
-            index
-            for index, line in enumerate(lines)
-            if line.startswith("[maps.") or line.startswith("[CORE]")
-        ),
-        None,
-    )
-    if start is None:
-        return
-    tail = "".join(lines[start:]).strip()
-    if not tail:
-        return
-    out.write_text(out.read_text().rstrip() + "\n\n" + tail + "\n")
-
-
-def merge_aot_addrs_into_toml(path: Path, addrs: dict[str, int]) -> int:
-    """Insert/update `aot_addr = 0x…` under matching `[maps.*]` tables.
-
-    Returns the number of map tables touched.
-    """
-    if not addrs:
-        return 0
-
-    text = path.read_text()
-    parts = re.split(r"(?=^\[)", text, flags=re.M)
-    updated = 0
-    new_parts: list[str] = []
-
-    for part in parts:
-        header = re.match(r"^\[maps\.([^\]]+)\]\s*\n", part)
-        if not header:
-            new_parts.append(part)
-            continue
-
-        name = header.group(1)
-        if name not in addrs:
-            new_parts.append(part)
-            continue
-
-        addr_line = f"aot_addr = {addrs[name]:#x}"
-        if re.search(r"^aot_addr\s*=", part, flags=re.M):
-            part = re.sub(
-                r"^aot_addr\s*=\s*.*$",
-                addr_line,
-                part,
-                count=1,
-                flags=re.M,
-            )
-        elif re.search(r"^estimated_bytes\s*=", part, flags=re.M):
-            part = re.sub(
-                r"(^estimated_bytes\s*=\s*.*$)",
-                rf"\1\n{addr_line}",
-                part,
-                count=1,
-                flags=re.M,
-            )
-        elif re.search(r"^max_entries\s*=", part, flags=re.M):
-            part = re.sub(
-                r"(^max_entries\s*=\s*.*$)",
-                rf"\1\n{addr_line}",
-                part,
-                count=1,
-                flags=re.M,
-            )
-        else:
-            lines = part.splitlines(keepends=True)
-            lines.insert(1, addr_line + "\n")
-            part = "".join(lines)
-
-        updated += 1
-        new_parts.append(part)
-
-    path.write_text("".join(new_parts))
-    return updated
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="obj_report")
-    parser.add_argument("--obj", required=True, type=Path)
-    parser.add_argument("--src", required=True, type=Path)
-    parser.add_argument("--out", required=True, type=Path)
-    parser.add_argument("--objdump", default=None)
-    parser.add_argument("--no-content", action="store_true")
-    parser.add_argument(
-        "--btf",
-        action="store_true",
-        help="Analyze .BTF/.BTF.ext and append [maps.*]/[CORE]",
-    )
-    parser.add_argument("--body-only", action="store_true")
-    parser.add_argument(
-        "--maps-from",
-        type=Path,
-        default=None,
-        help="Copy [maps.*] and [CORE] from this report onto --out",
-    )
-    parser.add_argument(
-        "--merge-aot-addrs",
-        action="store_true",
-        help="Stamp .maps VMAs as aot_addr into --out, not into the BPF report",
-    )
-    args = parser.parse_args()
-
-    from llvm_tools import resolve_llvm_tool
-
-    objdump = args.objdump or resolve_llvm_tool("llvm-objdump")
-
-    obj = args.obj.resolve()
-    out = args.out.resolve()
-    btf_toml_lines = None
-    if args.btf:
-        from btf import analyze, format_btf_toml, layout_byte_size
-
-        try:
-            report = analyze(obj)
-            # Fail closed: every map layout must match declared sizes.
-            for item in (report.get("maps") or {}).get("items") or []:
-                name = item.get("name", "")
-                key_sz = int(item.get("key_size", 0))
-                val_sz = int(item.get("value_size", 0))
-                key_layout = str(item.get("key", ""))
-                val_layout = str(item.get("value", ""))
-                if layout_byte_size(key_layout) != key_sz:
-                    raise ValueError(
-                        f"map `{name}` key layout size mismatch "
-                        f"({layout_byte_size(key_layout)} != {key_sz})"
-                    )
-                if layout_byte_size(val_layout) != val_sz:
-                    raise ValueError(
-                        f"map `{name}` value layout size mismatch "
-                        f"({layout_byte_size(val_layout)} != {val_sz})"
-                    )
-            btf_toml_lines = format_btf_toml(report)
-        except Exception as exc:
-            sys.stderr.write(f"obj_report: BTF 分析失败 ({obj}): {exc}\n")
-            sys.exit(1)
-
-    write_report(
-        obj=obj,
-        source=published_path(args.src),
-        out=out,
-        objdump=objdump,
-        with_content=not args.no_content,
-        btf_toml_lines=btf_toml_lines,
-        header=not args.body_only,
-    )
-    if args.maps_from:
-        append_map_tail(out, args.maps_from)
-    if args.merge_aot_addrs:
-        addrs = parse_maps_aot_addrs(objdump, obj)
-        if addrs and out.is_file():
-            merge_aot_addrs_into_toml(out, addrs)
-
-
-if __name__ == "__main__":
-    main()
+    blocks = [
+        "# Build report",
+        "## Source",
+        fenced(source, "text"),
+        fenced(snapshot.decode("utf-8"), "c"),
+    ]
+    if snapshot and not snapshot.endswith((b"\r", b"\n")):
+        blocks.append("The source file ends without a newline.")
+    architectures = {"eBPF": [], "RV32IMC": []}
+    for mode, listing, generation in sections:
+        group = architectures["eBPF" if mode in ("bpf", "ebpf") else "RV32IMC"]
+        group.extend(
+            [
+                f"### {mode}",
+                MACHINES[mode],
+                "#### Machine code and assembly",
+                fenced(listing, "text"),
+                "#### Build steps",
+            ]
+        )
+        calls = []
+        for step in generation:
+            if "argv" in step:
+                details = "$ " + shlex.join(step["argv"])
+            else:
+                params = json.dumps(step["parameters"], ensure_ascii=False, indent=2)
+                details = step["call"] + "\n" + params
+            calls.append(step["step"] + "\n" + details)
+        group.append(fenced("\n\n".join(calls), "text"))
+    for architecture, group in architectures.items():
+        if group:
+            blocks.extend([f"## {architecture}", *group])
+    write_if_changed(path, ("\n\n".join(blocks) + "\n").encode("utf-8"))

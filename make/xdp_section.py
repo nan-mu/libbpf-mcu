@@ -11,16 +11,16 @@ Usage: `xdp_section.py --obj build/<stem>/bpf.o --out build/<stem>/xdp.bin`
 
 import argparse
 import subprocess
-import sys
+import os
 from pathlib import Path
 
 from llvm_tools import resolve_llvm_tool
 
 
-def sections(obj: Path) -> list[tuple[str, int]]:
+def sections(obj: Path, objdump: str) -> list[tuple[str, int]]:
     """(name, size) for every section the object reports."""
     out = subprocess.run(
-        [resolve_llvm_tool("llvm-objdump"), "-h", str(obj)],
+        [objdump, "-h", str(obj)],
         capture_output=True,
         text=True,
         check=True,
@@ -38,16 +38,17 @@ def sections(obj: Path) -> list[tuple[str, int]]:
     return found
 
 
-def program_section(obj: Path) -> str:
+def program_section(obj: Path, objdump: str) -> str:
     """The one section holding the XDP program.
 
     A declaration-form mismatch between `xdp` and `xdp1` is a fact about the
     source, so the name is read rather than assumed.
     """
-    names = [name for name, size in sections(obj) if name in ("xdp", "xdp1") and size > 0]
+    headers = sections(obj, objdump)
+    names = [name for name, size in headers if name in ("xdp", "xdp1") and size > 0]
     if not names:
         raise SystemExit(
-            f"{obj}: no xdp section with code; sections are {[n for n, _ in sections(obj)]}"
+            f"{obj}: no xdp section with code; sections are {[n for n, _ in headers]}"
         )
     if len(names) > 1:
         raise SystemExit(f"{obj}: more than one xdp section {names}; refusing to guess")
@@ -60,7 +61,10 @@ def main() -> None:
     p.add_argument("--out", required=True, type=Path)
     args = p.parse_args()
 
-    section = program_section(args.obj)
+    section = program_section(
+        args.obj,
+        os.environ.get("LIBBPF_MCU_OBJDUMP") or resolve_llvm_tool("llvm-objdump"),
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [

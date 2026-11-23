@@ -26,14 +26,6 @@ static __always_inline __u32 load_u32(const __u8 *p)
 	       ((__u32)p[3] << 24);
 }
 
-static __always_inline void store_u32(__u8 *p, __u32 v)
-{
-	p[0] = (__u8)v;
-	p[1] = (__u8)(v >> 8);
-	p[2] = (__u8)(v >> 16);
-	p[3] = (__u8)(v >> 24);
-}
-
 static __always_inline int ctx_view(struct xdp_md *ctx, __u8 **payload,
 				    __u32 *avail, __u32 *param)
 {
@@ -48,38 +40,28 @@ static __always_inline int ctx_view(struct xdp_md *ctx, __u8 **payload,
 	return 0;
 }
 
-static __always_inline __u32 fib_u32(__u32 n)
-{
-	__u32 a = 0, b = 1, i;
-
-	if (n == 0)
-		return 0;
-	for (i = 1; i < n; i++) {
-		__u32 c = a + b;
-		a = b;
-		b = c;
-	}
-	return b;
-}
-
 SEC("xdp")
-int fib(struct xdp_md *ctx)
+int memcpy_xdp(struct xdp_md *ctx)
 {
 	__u8 *payload;
+	__u8 *end = (__u8 *)(long)ctx->data_end;
 	__u32 avail, param;
+	int i;
 
 	if (ctx_view(ctx, &payload, &avail, &param))
 		return XDP_ABORTED;
-	/* RV32 OR-merges this with the check inside ctx_view. eBPF does not. */
-	asm volatile("" ::: "memory");
-	if (avail < 4)
+	/* The 24-byte payload holds two regions of up to 12 bytes each.
+	 * Check the upper bound directly so PREVAIL can bound the writes.
+	 * A zero length skips every write and returns XDP_ABORTED below. */
+	if (payload + 24 > end || avail < 24 || param > 12)
 		return XDP_ABORTED;
-	if (param > 47)
-		param = 47;
-	/* Keep the clamp in a register. eBPF otherwise emits i < 47 inside the loop. */
-	asm volatile("" : "+r"(param));
-	store_u32(payload, fib_u32(param));
-	return XDP_PASS;
+#pragma unroll
+	for (i = 0; i < 12; i++) {
+		if ((__u32)i >= param)
+			continue;
+		payload[param + i] = payload[i];
+	}
+	return param ? XDP_PASS : XDP_ABORTED;
 }
 
 char LICENSE[] SEC("license") = "GPL";

@@ -8,11 +8,12 @@ scalar u24le;    // 3 bytes
 scalar u32le;    // 4 bytes
 // bytes[N] means exactly N bytes; align4(n) = (n + 3) & ~3.
 
-// ESP32-C3 profile limits (reject, never truncate):
-// complete file <= 4096 bytes; metadata <= 1024 bytes; maps <= 8;
+// ESP32-C3 profile limits from XPOST revision 94bfe6d8, xpost-elf/src/encode.rs.
+// The device builder also enforces its configured image capacity.
+// complete file <= 8192 bytes; metadata <= 1024 bytes; maps <= 8;
 // names: 1..31 ASCII bytes excluding NUL, no embedded NUL;
 // each layout: <= 32 descriptors; each descriptor: 1..255 bits;
-// key storage <= 64 bytes; value storage <= 256 bytes; capacity: 1..64.
+// key storage <= 64 bytes; value storage <= 256 bytes; capacity: 1..256.
 // Descriptor intervals >255 bits are unsupported; do not split them.
 // Layout intervals follow the compiler's final memory layout, including
 // inter-field and tail padding, without loader-inserted padding. Array fields
@@ -88,7 +89,7 @@ message XpostMetaV0 {
 message MapDescriptorV0 {
   CString4 name;
   u8 map_type;       // Linux BPF enum: HASH=1, ARRAY=2; others unsupported here
-  u24le len;         // requested capacity, 1..64 in this profile
+  u24le len;         // requested capacity, 1..256 in this profile
   u32le map_vma;     // nonzero, 4-byte-aligned linked .maps symbol address
                      // Equals the image-side helper map argument; initial bind
                      // reference only, NOT the identity or runtime storage address.

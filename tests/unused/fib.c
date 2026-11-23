@@ -26,6 +26,14 @@ static __always_inline __u32 load_u32(const __u8 *p)
 	       ((__u32)p[3] << 24);
 }
 
+static __always_inline void store_u32(__u8 *p, __u32 v)
+{
+	p[0] = (__u8)v;
+	p[1] = (__u8)(v >> 8);
+	p[2] = (__u8)(v >> 16);
+	p[3] = (__u8)(v >> 24);
+}
+
 static __always_inline int ctx_view(struct xdp_md *ctx, __u8 **payload,
 				    __u32 *avail, __u32 *param)
 {
@@ -40,27 +48,40 @@ static __always_inline int ctx_view(struct xdp_md *ctx, __u8 **payload,
 	return 0;
 }
 
+#define FIB_MAX_N 47U
+
+static __always_inline __u32 fib_u32(__u32 n)
+{
+	__u32 a = 0, b = 1, i;
+
+	if (n == 0)
+		return 0;
+	/* Keep the trip-count bound explicit for PREVAIL. */
+	for (i = 1; i < FIB_MAX_N && i < n; i++) {
+		__u32 c = a + b;
+		a = b;
+		b = c;
+	}
+	return b;
+}
+
 SEC("xdp")
-int memcpy_xdp(struct xdp_md *ctx)
+int fib(struct xdp_md *ctx)
 {
 	__u8 *payload;
-	__u8 *end = (__u8 *)(long)ctx->data_end;
 	__u32 avail, param;
-	int i;
 
 	if (ctx_view(ctx, &payload, &avail, &param))
 		return XDP_ABORTED;
-	/* Exec value is 32 bytes, so the payload is 24. param <= 12 matches
-	 * the old param <= avail/2 bound on that value. Unroll keeps every
-	 * packet offset constant for PREVAIL. */
-	if (payload + 24 > end || avail < 24 || param == 0 || param > 12)
+	/* RV32 OR-merges this with the check inside ctx_view. eBPF does not. */
+	asm volatile("" ::: "memory");
+	if (avail < 4)
 		return XDP_ABORTED;
-#pragma unroll
-	for (i = 0; i < 12; i++) {
-		if ((__u32)i >= param)
-			continue;
-		payload[param + i] = payload[i];
-	}
+	if (param > FIB_MAX_N)
+		param = FIB_MAX_N;
+	/* Keep the clamp and loop bound visible through BPF optimization. */
+	asm volatile("" : "+r"(param));
+	store_u32(payload, fib_u32(param));
 	return XDP_PASS;
 }
 

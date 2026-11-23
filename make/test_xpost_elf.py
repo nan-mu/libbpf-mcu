@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import struct
 import subprocess
@@ -14,8 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from xpost_elf import (
-    ImageMetadataV0, MapDescriptorV0, build_container, parse_container,
-    metadata_from_bpf_toml, SECTION_NAMES,
+    MAX_CONTAINER_SIZE, MAX_ENTRIES, ImageMetadataV0, MapDescriptorV0, build_container, parse_container,
+    SECTION_NAMES,
 )
 
 
@@ -105,19 +106,19 @@ class CompactElfTests(unittest.TestCase):
 
     def test_exact_container_limit(self):
         meta = replace(self.meta, maps=(), name='x')
-        # 52 EHDR + 160 SHT + 12 metadata + 3804 image + 36 names + 32 digest.
-        data = build_container(bytes(3804), meta)
-        self.assertEqual(len(data), 4096)
+        max_image = MAX_CONTAINER_SIZE - (52 + 160 + 12 + 36 + 32)
+        data = build_container(bytes(max_image), meta)
+        self.assertEqual(len(data), MAX_CONTAINER_SIZE)
         parse_container(data)
-        with self.assertRaisesRegex(ValueError, '4096'):
-            build_container(bytes(3805), meta)
+        with self.assertRaisesRegex(ValueError, str(MAX_CONTAINER_SIZE)):
+            build_container(bytes(max_image + 1), meta)
 
     def test_profile_rejections(self):
         bad_maps = [
             replace(self.map, name=''), replace(self.map, name='a'*32),
             replace(self.map, name='a\0b'), replace(self.map, name='汉'),
             replace(self.map, map_type=27), replace(self.map, map_type=0),
-            replace(self.map, len=0), replace(self.map, len=65),
+            replace(self.map, len=0), replace(self.map, len=MAX_ENTRIES + 1),
             replace(self.map, map_vma=0), replace(self.map, map_vma=5),
             replace(self.map, key_layout=(32,)), replace(self.map, value_layout=None),
             replace(self.map, value_layout=()), replace(self.map, value_layout=(0,)),
@@ -144,32 +145,6 @@ class CompactElfTests(unittest.TestCase):
         meta = replace(self.meta, maps=(replace(self.map, value_layout=(255, 1)),))
         self.assertEqual(parse_container(build_container(self.image, meta))[0], meta)
 
-    def test_toml_layouts_and_link_address(self):
-        text = '''[maps.stats]
-map_type = "BPF_MAP_TYPE_ARRAY"
-key_size = 4
-value_size = 8
-max_entries = 16
-aot_addr = 0x40380100
-key = "u32 index"
-value = "u32 a\\nu32 b"
-'''
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)/'bpf.toml'
-            def load(s):
-                path.write_text(s)
-                return metadata_from_bpf_toml(path, name='example', slot_address=0x40380000,
-                                              helper_address=0x40381000, machine=1)
-            self.assertEqual(load(text), self.meta)
-            for bad in [text.replace('value_size = 8', 'value_size = 4'),
-                        text.replace('key = "u32 index"', ''),
-                        text.replace('aot_addr = 0x40380100', ''),
-                        text + 'map_vma = 0x40380104\n',
-                        text.replace('u32 a\\nu32 b', 'u8 blob[32]').replace('value_size = 8', 'value_size = 32')]:
-                with self.subTest(bad=bad), self.assertRaises(ValueError):
-                    load(bad)
-
-
 class CompilerIntegrationTests(unittest.TestCase):
     def test_compiled_bitfield_map_to_native_container(self):
         llvm = Path('/opt/homebrew/opt/llvm/bin')
@@ -178,8 +153,8 @@ class CompilerIntegrationTests(unittest.TestCase):
         clang, objcopy, objdump, readelf = [tool(n) for n in ('clang', 'llvm-objcopy', 'llvm-objdump', 'llvm-readelf')]
         if not all((clang, objcopy, objdump, readelf)):
             self.skipTest('LLVM clang/objcopy/objdump/readelf required')
-        from btf import analyze, format_btf_toml
-        from obj_report import parse_maps_aot_addrs, merge_aot_addrs_into_toml
+        from build import ensure_tool
+        from build_steps import write_maps
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             src = root/'sample.c'
@@ -187,27 +162,28 @@ class CompilerIntegrationTests(unittest.TestCase):
 struct key { unsigned a:3; unsigned b:5; unsigned tail; };
 struct { int (*type)[1]; int (*max_entries)[4]; struct key *key; unsigned *value; }
 stats __attribute__((section(".maps"), used));
-extern unsigned helper_dispatcher(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned);
+extern unsigned consume_map(unsigned long, unsigned long);
 unsigned _start(void) {
     struct key k = {0};
-    return helper_dispatcher(1, (unsigned long)&stats, (unsigned long)&k, 0, 0, 0);
+    return consume_map((unsigned long)&stats, (unsigned long)&k);
 }
 _Static_assert(sizeof(struct key) == 8, "key size");
 _Static_assert(_Alignof(struct key) <= 4, "key alignment");
 ''')
             def run(*args):
-                return subprocess.run(args, check=True, capture_output=True, text=True).stdout
+                proc = subprocess.run(args, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, f"{args}\n{proc.stderr}")
+                return proc.stdout
             bpf = root/'bpf.o'
             run(clang, '--target=bpf', '-O2', '-g', '-c', str(src), '-o', str(bpf))
-            report = analyze(bpf)
-            toml = root/'bpf.toml'
-            toml.write_text('\n'.join(format_btf_toml(report)))
+            maps = root/'maps.toml'
+            write_maps([], bpf, maps)
             obj = root/'native.o'
             run(clang, '--target=riscv32-unknown-none-elf', '-march=rv32imc', '-mabi=ilp32',
                 '-O2', '-ffreestanding', '-c', str(src), '-o', str(obj))
             ld = root/'slot.ld'
             ld.write_text('''ENTRY(_start)
-helper_dispatcher = 0x40381000;
+consume_map = 0x40381000;
 SECTIONS { . = 0x40380000; .text : { *(.text*) } .maps : ALIGN(4) { *(.maps) } }
 ''')
             elf = root/'native.elf'
@@ -215,34 +191,32 @@ SECTIONS { . = 0x40380000; .text : { *(.text*) } .maps : ALIGN(4) { *(.maps) } }
                 '-Wl,-T,'+str(ld), str(obj), '-o', str(elf))
             raw = root/'sample.bin'
             run(objcopy, '-O', 'binary', str(elf), str(raw))
-            addresses = parse_maps_aot_addrs(objdump, elf)
-            self.assertIn('stats', addresses)
-            merge_aot_addrs_into_toml(toml, addresses)
             out = root/'sample.elf'
-            rust_bin = Path(__file__).resolve().parents[2] / 'xpost' / 'xpost-build'
-            manifest = rust_bin / 'Cargo.toml'
-            if not manifest.is_file():
-                self.skipTest(f'xpost-build missing: {manifest}')
-            import platform
-            system = platform.system().lower()
-            machine = platform.machine().lower()
-            if system == 'darwin' and machine in ('arm64', 'aarch64'):
-                triple = 'aarch64-apple-darwin'
-            elif system == 'darwin':
-                triple = 'x86_64-apple-darwin'
-            elif machine in ('arm64', 'aarch64'):
-                triple = 'aarch64-unknown-linux-gnu'
-            else:
-                triple = 'x86_64-unknown-linux-gnu'
-            run('cargo', 'run', '--manifest-path', str(manifest),
-                '--target', triple, '--release', '--bin', 'xpost-compact-elf', '--',
-                '--image', str(raw), '--bpf-toml', str(toml), '--out', str(out),
-                '--name', 'sample',
-                '--slot-address', '0x40380000', '--helper-address', '0x40381000')
+            pack = ensure_tool(root)
+            address = json.loads(run(pack, "symbol", elf, "stats"))["addr"]
+            args = [
+                pack, 'pack', '--image', raw, '--linked-elf', elf,
+                '--out', out, '--name', 'sample', '--slot-address', '0x40380000',
+                '--helper-address', '0x40381000',
+            ]
+            exported = root/'rewritten.bin'
+            size = len(raw.read_bytes())
+            rejected = subprocess.run([*args, '--maps', maps, '--slot-length', str(size - 1),
+                                       '--export-image', exported], capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertFalse(out.exists())
+            self.assertFalse(exported.exists())
+            args.extend(['--slot-length', str(size)])
+            run(*args, '--maps', maps)
+            report = root/'no-maps.toml'
+            report.write_text('[source]\npath = "sample.c"\n[assembly]\nlisting = "example"\n')
+            rejected = subprocess.run([*args, '--maps', report], capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('expected a private [maps] input', rejected.stderr)
             metadata, image = parse_container(out.read_bytes())
             self.assertEqual(image, raw.read_bytes())
             self.assertEqual(metadata.maps[0].key_layout, (3, 5, 24, 32))
-            self.assertEqual(metadata.maps[0].map_vma, addresses['stats'])
+            self.assertEqual(metadata.maps[0].map_vma, address)
             output = run(readelf, '-h', '-S', str(out))
             for name in ('.xpost.meta', '.xpost.image', '.shstrtab'):
                 self.assertIn(name, output)

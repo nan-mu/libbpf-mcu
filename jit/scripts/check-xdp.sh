@@ -1,9 +1,12 @@
 #!/bin/sh
-# Compile tests/xdp C to eBPF, run PREVAIL, then compare the JIT image with
-# the eBPF reference. The exit status is the number of JIT failures.
+# Compile the selected C fixtures to eBPF, run PREVAIL, then compare the JIT
+# image with the eBPF reference. Required packet cases also check known output.
 # unsupported and inconclusive are recorded and neither is a pass.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+if [ -z "${CLANG:-}" ] && [ -x /opt/homebrew/opt/llvm/bin/clang ]; then
+  CLANG=/opt/homebrew/opt/llvm/bin/clang
+fi
 CLANG="${CLANG:-clang}"
 PREVAIL="${PREVAIL:-$ROOT/prevail/bin/prevail}"
 if [ ! -x "$PREVAIL" ]; then
@@ -20,13 +23,38 @@ OUT="$ROOT/build/jit-check"
 mkdir -p "$OUT"
 printf 'program\tprevail\tjit\tline\n' > "$OUT/report.tsv"
 fail=0
-for name in div2 xdp_drop case_mark just_drop just_tx firewall bitswap bsort; do
-  src="$ROOT/tests/xdp/$name.c"
+FIXTURES="$ROOT/tests/fixtures"
+record_check() {
+  check_name=$1
+  required=$2
+  shift 2
+  log="$OUT/$(printf '%s' "$check_name" | tr / .).check"
+  set +e
+  cargo run --quiet --release --manifest-path "$ROOT/jit/Cargo.toml" -- \
+    check "$@" >"$log" 2>"$log.err"
+  code=$?
+  set -e
+  case $code in
+    0) jit=pass ;;
+    2) jit=unsupported ;;
+    *) jit=fail ;;
+  esac
+  if grep -q 'status=inconclusive' "$log"; then
+    jit=inconclusive
+  fi
+  if [ "$jit" = fail ] || { [ "$required" = yes ] && [ "$jit" != pass ]; }; then
+    fail=$((fail + 1))
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$check_name" "$prevail" "$jit" "$(cat "$log")" >> "$OUT/report.tsv"
+}
+while IFS= read -r source <&3; do
+  src="$ROOT/$source"
+  name=$(basename "$src" .c)
   obj="$OUT/$name.bpf.o"
   "$CLANG" --target=bpf -O2 -g -Wall -Wno-missing-declarations -fno-stack-protector \
     -I "$ROOT/include-bpf" -include vmlinux.h -c "$src" -o "$obj"
   set +e
-  python3 "$ROOT/make/prevail_gate.py" --obj "$obj" --stamp "$OUT/$name.prevail.ok" \
+  python3 "$ROOT/make/prevail_gate.py" --obj "$obj" \
     >"$OUT/$name.prevail.out" 2>&1
   prev=$?
   set -e
@@ -34,6 +62,7 @@ for name in div2 xdp_drop case_mark just_drop just_tx firewall bitswap bsort; do
     prevail=pass
   else
     prevail=fail
+    fail=$((fail + 1))
   fi
   packet=00000000000000000000000008004500002c00000000401100007f0000017f000001
   if [ "$name" = div2 ]; then
@@ -42,24 +71,29 @@ for name in div2 xdp_drop case_mark just_drop just_tx firewall bitswap bsort; do
     packet=112233445566aabbccddeeff0800450000000000000000110000c00002017f0000010400040000080000000000000000000000000000000000000000
   elif [ "$name" = bitswap ]; then
     packet=0000000001000000785634120000000000000000000000000000000000000000
-  elif [ "$name" = bsort ]; then
-    packet=0000000004000000040000000100000003000000020000000000000000000000
   fi
-  set +e
-  cargo run --quiet --release --manifest-path "$ROOT/jit/Cargo.toml" -- \
-    check "$obj" --packet "$packet" >"$OUT/$name.check" 2>"$OUT/$name.check.err"
-  code=$?
-  set -e
-  line=$(cat "$OUT/$name.check")
-  case $code in
-    0) jit=pass ;;
-    2) jit=unsupported ;;
-    *) jit=fail; fail=$((fail + 1)) ;;
+  case "$name" in
+    bsort|noop|copy)
+      record_check "$name" yes "$obj" --packet-file "$FIXTURES/exb2/$name.input.bin" \
+        --expect-packet-file "$FIXTURES/exb2/$name.expected.bin" --expect-return 2
+      if [ "$name" = bsort ]; then
+        short="$OUT/bsort.short.bin"
+        dd if="$FIXTURES/exb2/bsort.input.bin" of="$short" bs=1 count=8 2>/dev/null
+        record_check bsort/short yes "$obj" --packet-file "$short" --expect-unchanged --expect-return 0
+      fi ;;
+    case_mark|just_tx)
+      set --
+      if [ "$name" = just_tx ]; then
+        set -- --expect-array-u32 rxcnt 17 1
+      fi
+      record_check "$name" yes "$obj" --packet-file "$FIXTURES/network/$name.input.bin" \
+        --expect-packet-file "$FIXTURES/network/$name.expected.bin" --expect-return 3 "$@"
+      if [ "$name" = just_tx ]; then
+        set -- --expect-array-u32 rxcnt 17 0
+      fi
+      record_check "$name/short" yes "$obj" --packet "$packet" --expect-unchanged --expect-return 2 "$@" ;;
+    *) record_check "$name" no "$obj" --packet "$packet" ;;
   esac
-  if grep -q 'status=inconclusive' "$OUT/$name.check"; then
-    jit=inconclusive
-  fi
-  printf '%s\t%s\t%s\t%s\n' "$name" "$prevail" "$jit" "$line" >> "$OUT/report.tsv"
-done
+done 3< "$ROOT/jit/scripts/xdp-sources.txt"
 cat "$OUT/report.tsv"
 exit "$fail"
