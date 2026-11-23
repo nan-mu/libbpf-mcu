@@ -1,15 +1,49 @@
 //! Convert private BTF map inputs into Compact ELF metadata.
 
+use std::{fs, path::Path};
+
 use anyhow::{Context, Result, bail};
 use toml::Value;
 
 use xpost_elf::{ImageMetadataV0, MAX_ENTRIES, MAX_LAYOUT, MAX_MAPS, MAX_NAME, MapDescriptorV0};
 
+/// Read the map definitions emitted by BTF extraction.
+pub fn read_maps(path: &Path) -> Result<Value> {
+    let display = path.display();
+    let text = fs::read_to_string(path).with_context(|| format!("read {display}"))?;
+    let root: Value = toml::from_str(&text).with_context(|| format!("parse {display}"))?;
+    let Some(maps) = root
+        .as_table()
+        .filter(|root| root.len() == 1)
+        .and_then(|root| root.get("maps"))
+        .and_then(Value::as_table)
+    else {
+        bail!("{display}: expected a private [maps] input");
+    };
+    let fields = [
+        "map_type",
+        "max_entries",
+        "key_size",
+        "value_size",
+        "key",
+        "value",
+    ];
+    for (name, map) in maps {
+        let Some(map) = map.as_table() else {
+            bail!("{display}: map {name:?} must be a table");
+        };
+        if map.len() != fields.len() || fields.iter().any(|key| !map.contains_key(*key)) {
+            bail!("{display}: map {name:?} must contain only BTF map definition fields");
+        }
+    }
+    Ok(root)
+}
+
 /// Overlay map VMAs directly from the linked ELF, restricted to its maps section.
-pub fn with_linked_maps(mut root: Value, path: &std::path::Path) -> Result<Value> {
+pub fn with_linked_maps(mut root: Value, path: &Path) -> Result<Value> {
     use object::{Object, ObjectSection, ObjectSymbol};
 
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let elf = object::File::parse(&*bytes).context("parse linked AOT ELF")?;
     if let Some(Value::Table(maps)) = root.get_mut("maps") {
         for symbol in elf.symbols() {
@@ -78,13 +112,9 @@ fn map_descriptor(
     map_name: &str,
     fields: &toml::map::Map<String, Value>,
 ) -> Result<Option<MapDescriptorV0>> {
-    let Some(kind) = map_type_number(
-        fields
-            .get("map_type")
-            .ok_or_else(|| anyhow::anyhow!("missing map_type"))?,
-    )?
-    else {
-        return Ok(None);
+    let kind = match int_field(fields, "map_type")? {
+        kind @ (1 | 2) => kind as u8,
+        _ => return Ok(None),
     };
     let max_entries = int_field(fields, "max_entries")?;
     if !(1..=MAX_ENTRIES).contains(&max_entries) {
@@ -107,8 +137,8 @@ fn map_descriptor(
     check_layout(&key_bits, 64)?;
     check_layout(&value_bits, 256)?;
 
-    let key_size = size_bytes(fields, "key_size", &key_bits)?;
-    let value_size = size_bytes(fields, "value_size", &value_bits)?;
+    let key_size = int_field(fields, "key_size")? as usize;
+    let value_size = int_field(fields, "value_size")? as usize;
     if key_bits.iter().map(|&b| usize::from(b)).sum::<usize>() != key_size * 8 {
         bail!("key layout does not match key_size");
     }
@@ -126,21 +156,10 @@ fn map_descriptor(
     };
     let value_layout = Some(layout_vec(&value_bits)?);
 
-    let vma = match (fields.get("map_vma"), fields.get("aot_addr")) {
-        (Some(mv), Some(aa)) => {
-            let a = toml_u32(mv)?;
-            let b = toml_u32(aa)?;
-            if a != b {
-                bail!("map_vma disagrees with linked aot_addr");
-            }
-            a
-        }
-        (Some(mv), None) => toml_u32(mv)?,
-        (None, Some(aa)) => toml_u32(aa)?,
-        (None, None) => return Ok(None),
+    let Some(vma) = fields.get("map_vma") else {
+        return Ok(None);
     };
-
-    let _ = map_name;
+    let vma = toml_u32(vma)?;
     Ok(Some(MapDescriptorV0 {
         name: heapless_name(map_name)?,
         map_type: kind,
@@ -149,44 +168,6 @@ fn map_descriptor(
         key_layout,
         value_layout,
     }))
-}
-
-fn size_bytes(fields: &toml::map::Map<String, Value>, key: &str, bits: &[u8]) -> Result<usize> {
-    let from_layout = {
-        let sum: usize = bits.iter().map(|&b| usize::from(b)).sum();
-        if sum % 8 != 0 {
-            bail!("{key}: layout bit sum {sum} is not byte-aligned");
-        }
-        sum / 8
-    };
-    match fields.get(key) {
-        None => {
-            if !(1..=256).contains(&from_layout) {
-                bail!("{key}: derived size {from_layout} out of 1..256");
-            }
-            Ok(from_layout)
-        }
-        Some(v) => {
-            let n = toml_u32(v)? as usize;
-            if !(1..=256).contains(&n) {
-                bail!("{key} must be in 1..256");
-            }
-            Ok(n)
-        }
-    }
-}
-
-fn map_type_number(v: &Value) -> Result<Option<u8>> {
-    match v {
-        Value::Integer(i) if *i == 1 || *i == 2 => Ok(Some(*i as u8)),
-        Value::Integer(_) => Ok(None),
-        Value::String(s) => match s.as_str() {
-            "BPF_MAP_TYPE_HASH" | "HASH" => Ok(Some(1)),
-            "BPF_MAP_TYPE_ARRAY" | "ARRAY" => Ok(Some(2)),
-            _ => Ok(None),
-        },
-        _ => bail!("unknown map_type: {v:?}"),
-    }
 }
 
 fn int_field(fields: &toml::map::Map<String, Value>, key: &str) -> Result<u32> {

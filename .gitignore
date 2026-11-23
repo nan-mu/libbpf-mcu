@@ -11,3 +11,4 @@ jit/oracle/target/
 jit/oracle/build/
 jit/oracle/results.json
 /.build.lock
+/packages/

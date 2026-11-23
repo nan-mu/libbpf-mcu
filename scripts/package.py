@@ -31,7 +31,7 @@ from layout import (  # noqa: E402
 
 SCHEMA = "libbpf-mcu.release-plan.v2"
 DEFAULT_PLAN = ROOT / "release" / "programs.toml"
-DEFAULT_OUT = ROOT / "build" / "packages"
+DEFAULT_OUT = ROOT / "packages"
 
 
 @dataclass(frozen=True)

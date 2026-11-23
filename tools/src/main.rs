@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use object::{Object, ObjectSection, ObjectSymbol};
 use xpost_elf::{SECTION_NAME, ScanOutcome, build_container, decode, scan_at};
 
-use bpf_meta::{metadata_from_value, with_linked_maps};
+use bpf_meta::{metadata_from_value, read_maps, with_linked_maps};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -170,12 +170,7 @@ fn pack(args: Cmd) -> Result<()> {
         bail!("--name must be non-empty ASCII");
     }
     let mut image_bytes = fs::read(&image).with_context(|| format!("read {}", image.display()))?;
-    let maps_text =
-        fs::read_to_string(&maps).with_context(|| format!("read {}", maps.display()))?;
-    let overlaid = with_linked_maps(
-        toml::from_str(&maps_text).context("parse BTF map input")?,
-        &linked_elf,
-    )?;
+    let overlaid = with_linked_maps(read_maps(&maps)?, &linked_elf)?;
     let meta = metadata_from_value(
         &overlaid,
         &maps.display().to_string(),

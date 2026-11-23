@@ -69,7 +69,7 @@ pixi run python make/layout.py verify --build-dir build
 pixi run package
 ```
 
-`pixi run clean` removes the default build root. The package task builds the versioned `release/programs.toml` configuration and verifies one 7z per program offline. The checked-in configuration includes the 17 raw BPF programs. Deployment requires maintainer-confirmed firmware for each selected mode. To publish verified archives locally as a GitHub Release, follow the [publication procedure](docs/artifacts.md#publish-program-artifacts).
+`pixi run clean` removes the default build root. The package task builds the versioned `release/programs.toml` configuration and verifies one 7z per program offline in `packages/`. The checked-in configuration includes the 17 raw BPF programs. Deployment requires maintainer-confirmed firmware for each selected mode. To publish verified archives locally as a GitHub Release, follow the [publication procedure](docs/artifacts.md#publish-program-artifacts).
 
 ## License
 

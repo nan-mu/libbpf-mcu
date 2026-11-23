@@ -15,7 +15,7 @@ use toml::Value;
 use xpost_elf::{SECTION_NAME, ScanOutcome, build_container, decode, scan_at, sha256};
 use xpost_jit::{LinkIn, RelocKind, check_rv32im, compile, link, load_bpf};
 
-use crate::bpf_meta::metadata_from_value;
+use crate::bpf_meta::{metadata_from_value, read_maps};
 
 /// Bytes reserved per map inside the image, matching the AOT link's `.maps`
 /// placeholder. The firmware never reads them: it binds the address to real
@@ -50,8 +50,7 @@ impl JitArtifact {
         let loaded = load_bpf(obj, None).map_err(|e| anyhow::anyhow!("{e}"))?;
         let image = compile(&loaded.insns, &loaded.symbols).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        let text = fs::read_to_string(maps).with_context(|| format!("read {}", maps.display()))?;
-        let doc: Value = toml::from_str(&text).context("parse BTF map input")?;
+        let doc = read_maps(maps)?;
         let provisional: HashMap<String, u32> = doc
             .get("maps")
             .and_then(Value::as_table)

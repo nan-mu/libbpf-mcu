@@ -1,6 +1,6 @@
 # Program artifacts and local releases
 
-The supported MCU is ESP32-C3 with RV32IMC, ILP32, and no FPU. The Rust host tool uses the sibling XPOST workspace's `xpost-elf` crate for XPM1 and Compact ELF V0. The local verifier checks the same wire format and payload digest.
+The supported MCU is ESP32-C3 with RV32IMC, ILP32, and no FPU. The Rust host tool uses the sibling XPOST workspace's `xpost-elf` crate for XPM1 and Compact ELF V0. The local verifier checks the same wire format and payload digest. The 8192-byte container ceiling and 256-entry map limit mirror XPOST revision `94bfe6d8`. The device builder uses the same map limit and checks the configured image cell capacity. [XPOST encoder](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/xpost-elf/src/encode.rs#L8-L17) · [Device image and map builder](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/src/xdp/image/builder.rs#L209-L266) · [Device storage default](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/src/xdp/table/storage.rs#L17-L21)
 
 ## Program layout
 
@@ -65,7 +65,7 @@ path = "firmware/just_tx-jit.elf"
 sha256 = "<64 lowercase hex digits>"
 ```
 
-Install `7zz` or `7z` and run the package task. The default output directory is `build/packages/`. A developer can pass `--plan` with a test configuration and choose a separate `--out` directory. The command accepts development worktrees and uses no GitHub credentials. Provision the build tools and dependency caches before running on a disconnected host.
+Install `7zz` or `7z` and run the package task. The default output directory is `packages/` at the checkout root, where archives survive `pixi run clean`. A developer can pass `--plan` with a test configuration and choose a separate `--out` directory. The command accepts development worktrees and uses no GitHub credentials. Provision the build tools and dependency caches before running on a disconnected host.
 
 ```sh
 pixi run package --out /path/to/fresh-archive-directory

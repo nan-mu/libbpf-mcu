@@ -35,7 +35,7 @@ def run(generation: list[dict], step: str, argv: list) -> None:
 
 
 def write_maps(generation: list[dict], obj: Path, maps: Path) -> None:
-    lines = []
+    lines = ["[maps]"]
     for item in analyze(obj)["maps"]["items"]:
         lines.append(f"[maps.{q(item['name'])}]")
         for field in (
