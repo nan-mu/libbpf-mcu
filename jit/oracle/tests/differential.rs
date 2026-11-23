@@ -28,10 +28,6 @@ const PROGRAMS: &[(&str, &str)] = &[
         "bitswap",
         "0000000001000000785634120000000000000000000000000000000000000000",
     ),
-    (
-        "bsort",
-        "0000000004000000040000000100000003000000020000000000000000000000",
-    ),
 ];
 
 /// Extra inputs that reach paths the check-xdp.sh packets do not: a map hit,
@@ -50,11 +46,50 @@ const EXTRA: &[(&str, &str, &str)] = &[
         "00000000000000000000000008004500002c0000000040110000030000007f000001",
     ),
     ("xdp_drop", "short", "0000"),
-    ("bsort", "empty", "0000000000000000"),
 ];
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn exb2_packets() {
+    let fixtures = root().join("../../tests/fixtures/exb2");
+    for name in ["bsort", "noop", "copy"] {
+        let input = std::fs::read(fixtures.join(format!("{name}.input.bin"))).unwrap();
+        let expected = std::fs::read(fixtures.join(format!("{name}.expected.bin"))).unwrap();
+        assert_eq!(input.len(), 8258);
+        assert_eq!(expected.len(), input.len());
+        let obj = root().join("build").join(format!("{name}.bpf.o"));
+        let src = xpost_jit::load_bpf(&obj, None).unwrap();
+        for (label, packet, expected, action) in [
+            ("full", input.as_slice(), expected.as_slice(), 2),
+            ("short", &input[..8], &input[..8], 0),
+        ] {
+            let outcome = run::check_program(&src.insns, &src.symbols, packet);
+            let data = run::DATA as usize;
+            let matches = |side: &run::Side| {
+                side.mem
+                    .as_deref()
+                    .and_then(|mem| mem.get(data..data + expected.len()))
+                    == Some(expected)
+            };
+            println!(
+                "{name}/{label} status={} jit_r0={:?} jit_bytes={} rbpf_r0={:?} rbpf_bytes={} len={} {}",
+                outcome.status.as_str(), outcome.jit.r0, matches(&outcome.jit),
+                outcome.oracle.r0, matches(&outcome.oracle), expected.len(), outcome.detail
+            );
+            assert_eq!(
+                outcome.status,
+                Status::Pass,
+                "{name}/{label}: {}",
+                outcome.detail
+            );
+            assert_eq!(outcome.jit.r0, Some(action));
+            assert_eq!(outcome.oracle.r0, Some(action));
+            assert!(matches(&outcome.jit) && matches(&outcome.oracle));
+        }
+    }
 }
 
 fn program_suite(cases: &mut Vec<J>) {

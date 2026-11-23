@@ -11,6 +11,60 @@ use crate::compile::{self, Image};
 use crate::host_abi::{self, write_map, KIND_ARRAY};
 use crate::rv_vm;
 
+pub const FLAT_LEN: usize = 0x4_0000;
+pub const DATA: u32 = 0x1000;
+pub const CTX: u32 = 0x100;
+const MAP0: u32 = 0x4000;
+const STORE0: u32 = 0x8000;
+const STORE_STRIDE: u32 = 0x800;
+
+pub struct PacketWorld {
+    pub mem: Vec<u8>,
+    pub maps: HashMap<String, u32>,
+    pub watch: Vec<Range<usize>>,
+}
+
+pub fn packet_world(
+    packet: &[u8],
+    symbols: &HashMap<u64, String>,
+) -> Result<PacketWorld, &'static str> {
+    let mut mem = vec![0; FLAT_LEN];
+    let end = (DATA as usize)
+        .checked_add(packet.len())
+        .filter(|&end| end <= MAP0 as usize)
+        .ok_or("packet exceeds the test data region")?;
+    let mut names: Vec<_> = symbols.values().collect();
+    names.sort_unstable();
+    names.dedup();
+    let capacity = (bpf_vm::FRAME as usize - 512 - STORE0 as usize) / STORE_STRIDE as usize;
+    if names.len() > capacity {
+        return Err("map storage exceeds the test map region");
+    }
+    let mut maps = HashMap::new();
+    let mut watch = vec![DATA as usize..end];
+    for (n, name) in names.into_iter().enumerate() {
+        let vmr = MAP0 + n as u32 * 0x40;
+        let storage = STORE0 + n as u32 * STORE_STRIDE;
+        // Both engines use the same host ARRAY model for every map.
+        write_map(&mut mem, vmr, KIND_ARRAY, 4, 8, 256, storage)
+            .map_err(|_| "map descriptor does not fit")?;
+        maps.insert(name.clone(), vmr);
+        watch.push(vmr as usize..vmr as usize + 24);
+        watch.push(storage as usize..(storage + STORE_STRIDE) as usize);
+    }
+    let ctx = CTX as usize;
+    mem[ctx..ctx + 4].copy_from_slice(&DATA.to_le_bytes());
+    mem[ctx + 4..ctx + 8].copy_from_slice(&(end as u32).to_le_bytes());
+    mem[watch[0].clone()].copy_from_slice(packet);
+    assert_eq!(&mem[watch[0].clone()], packet);
+    Ok(PacketWorld { mem, maps, watch })
+}
+
+pub struct ExpectedPacket<'a> {
+    pub r0: u64,
+    pub bytes: &'a [u8],
+}
+
 pub struct Report {
     pub status: &'static str,
     pub detail: String,
@@ -20,51 +74,36 @@ pub struct Report {
 }
 
 pub fn check_packet(insns: &[Insn], symbols: &HashMap<u64, String>, packet: &[u8]) -> Report {
-    let mut mem = vec![0u8; 0x4_0000];
-    let data = 0x1000usize;
-    let ctx = 0x1800usize;
-    let end = match data.checked_add(packet.len()) {
-        Some(end) if end <= mem.len() && ctx + 24 <= mem.len() => end,
-        _ => {
+    check_packet_with_expected(insns, symbols, packet, None)
+}
+
+pub fn check_packet_with_expected(
+    insns: &[Insn],
+    symbols: &HashMap<u64, String>,
+    packet: &[u8],
+    expected: Option<ExpectedPacket<'_>>,
+) -> Report {
+    let world = match packet_world(packet, symbols) {
+        Ok(world) => world,
+        Err(detail) => {
             return Report {
                 status: "fail",
-                detail: "packet does not fit".into(),
+                detail: detail.into(),
                 r0: None,
                 rv_bytes: 0,
                 relocs: 0,
             };
         }
     };
-    mem[data..end].copy_from_slice(packet);
-    mem[ctx..ctx + 4].copy_from_slice(&0x1000u32.to_le_bytes());
-    mem[ctx + 4..ctx + 8].copy_from_slice(&(0x1000u32 + packet.len() as u32).to_le_bytes());
-    let mut maps = HashMap::new();
-    let mut watch = vec![data..end];
-    let mut n = 0u32;
-    for name in symbols.values() {
-        if maps.contains_key(name) {
-            continue;
-        }
-        let vmr = 0x3000 + n * 0x40;
-        let storage = 0x8000 + n * 0x800;
-        // The host model is an ARRAY of 256 eight-byte values for every map.
-        // It does not read the object's map section, so a HASH program meets
-        // array semantics here. JIT and reference share this model, so the
-        // comparison stays a comparison of lowering.
-        if write_map(&mut mem, vmr, KIND_ARRAY, 4, 8, 256, storage).is_err() {
-            return Report {
-                status: "fail",
-                detail: "map descriptor does not fit".into(),
-                r0: None,
-                rv_bytes: 0,
-                relocs: 0,
-            };
-        }
-        maps.insert(name.clone(), vmr);
-        watch.push(storage as usize..storage as usize + 0x800);
-        n += 1;
-    }
-    compare(insns, symbols, &maps, &mem, ctx as u32, &watch)
+    compare_inner(
+        insns,
+        symbols,
+        &world.maps,
+        &world.mem,
+        CTX,
+        &world.watch,
+        expected,
+    )
 }
 
 pub fn compare(
@@ -74,6 +113,18 @@ pub fn compare(
     mem: &[u8],
     r1: u32,
     watch: &[Range<usize>],
+) -> Report {
+    compare_inner(insns, symbols, maps, mem, r1, watch, None)
+}
+
+fn compare_inner(
+    insns: &[Insn],
+    symbols: &HashMap<u64, String>,
+    maps: &HashMap<String, u32>,
+    mem: &[u8],
+    r1: u32,
+    watch: &[Range<usize>],
+    expected: Option<ExpectedPacket<'_>>,
 ) -> Report {
     let image = match compile::compile(insns, symbols) {
         Ok(image) => image,
@@ -149,6 +200,25 @@ pub fn compare(
         (Ok(bpf_r0), Ok(rv)) => (bpf_r0, rv),
     };
     let rv_r0 = u64::from(rv.a0) | (u64::from(rv.a1) << 32);
+    let mut detail = format!("r0 {bpf_r0:#x}");
+    if let Some(expected) = expected {
+        let range = watch[0].clone();
+        let bpf_match = bpf_mem[range.clone()] == *expected.bytes;
+        let rv_match = rv.mem[range] == *expected.bytes;
+        detail = format!(
+            "input=exact reference_r0={bpf_r0:#x} reference_bytes={bpf_match} rv32_r0={rv_r0:#x} rv32_bytes={rv_match} expected_r0={:#x} len={}",
+            expected.r0, expected.bytes.len()
+        );
+        if bpf_r0 != expected.r0 || rv_r0 != expected.r0 || !bpf_match || !rv_match {
+            return Report {
+                status: "fail",
+                detail,
+                r0: Some(bpf_r0),
+                rv_bytes: code.len() * 4,
+                relocs,
+            };
+        }
+    }
     if rv_r0 != bpf_r0 {
         return Report {
             status: "fail",
@@ -180,7 +250,7 @@ pub fn compare(
     }
     Report {
         status: "pass",
-        detail: format!("r0 {bpf_r0:#x}"),
+        detail,
         r0: Some(bpf_r0),
         rv_bytes: code.len() * 4,
         relocs,

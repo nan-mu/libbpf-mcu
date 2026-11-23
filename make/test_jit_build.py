@@ -14,7 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from build import tool_bin_path
+from btf import analyze
+from build import BPF_FLAGS, CLANG, MCU_FLAGS, tool_bin_path
 from build_state import read_state, render_reports
 from layout import (
     ROOT,
@@ -34,6 +35,18 @@ from xpost_mem import MAGIC, WIRE_SIZE
 HELPER = 0x40380000
 SLOT = 0x40380200
 SLOT_LEN = 0xE00
+
+
+def xdp_map_relocations(obj: Path) -> list[tuple[int, str]]:
+    objdump = resolve_llvm_tool("llvm-objdump")
+    relocs = subprocess.check_output([objdump, "-r", obj], text=True)
+    section = relocs.split("RELOCATION RECORDS FOR [xdp]:\n")[1].split("\n\n", 1)[0]
+    return [
+        (int(offset, 16), name)
+        for offset, name in re.findall(
+            r"^([0-9a-f]+)\s+R_BPF_64_64\s+(\w+)$", section, re.M
+        )
+    ]
 
 
 def xpm1_record(slot_len: int = SLOT_LEN) -> bytes:
@@ -127,7 +140,14 @@ class ProgramBuildTests(unittest.TestCase):
 
     def test_exact_executable_bytes_and_source(self):
         root, name = self.build_dir, "just_tx"
-        original = (ROOT / "tests/xdp/just_tx.c").read_bytes()
+        source = ROOT / "tests/xdp/just_tx.c"
+        header = source.with_name("just_tx_core.h")
+        original = source.read_bytes().replace(
+            b'#include "just_tx_core.h"\n',
+            b"/* Begin tests/xdp/just_tx_core.h */\n"
+            + header.read_bytes()
+            + b"/* End tests/xdp/just_tx_core.h */\n",
+        )
         self.assertEqual(original, source_path(root, name).read_bytes())
         native_state = read_state(state_path(root, name, "llvm-aot"))
         native = executable_sections(Path(native_state["linked_elf"]).read_bytes())
@@ -363,10 +383,86 @@ class ProgramBuildTests(unittest.TestCase):
         self.assertNotEqual(code_bytes(root), before)
         self.assertEqual(code_bytes(root), code_bytes(fresh))
 
+    def test_public_snapshot_compiles_with_sdk_headers(self):
+        root = self.build_dir
+        for program in ("copy", "case_mark"):
+            with self.subTest(program=program):
+                run_build(
+                    "rv32imc",
+                    "-c",
+                    program,
+                    "--firmware",
+                    self.firmware,
+                    build_dir=root,
+                )
+                source = self.root / f"{program}.c"
+                source.write_bytes(source_path(root, program).read_bytes())
+                for flags, original in (
+                    (BPF_FLAGS, bpf_path(root, program)),
+                    (MCU_FLAGS, native_object_path(root, program)),
+                ):
+                    standalone = source.with_suffix(".o")
+                    subprocess.run(
+                        [CLANG, *flags, "-c", source, "-o", standalone],
+                        cwd=self.root,
+                        check=True,
+                    )
+                    self.assertEqual(
+                        executable_sections(standalone.read_bytes()),
+                        executable_sections(original.read_bytes()),
+                    )
+
+    def test_rbpf_classic_map_descriptors_keep_their_own_offsets(self):
+        root = self.build_dir
+        program = "two_classic_maps"
+        source = ROOT / f"tests/unused/{program}.c"
+        run_build(
+            "rv32imc",
+            "--engine",
+            "rbpf",
+            "--firmware",
+            self.firmware,
+            "--inputs",
+            source,
+            build_dir=root,
+        )
+        obj = bpf_path(root, program)
+        fields = ("map_type", "key_size", "value_size", "max_entries")
+        expected = {"count_by_case": (1, 4, 4, 5), "seq_log": (2, 4, 8, 7)}
+        self.assertEqual(
+            {
+                m["name"]: tuple(m[field] for field in fields)
+                for m in analyze(obj)["maps"]["items"]
+            },
+            expected,
+        )
+        meta, image = parse_container(
+            container_path(root, program, "ebpf").read_bytes()
+        )
+        self.assertEqual(
+            {
+                m.name: (
+                    m.map_type,
+                    sum(m.key_layout or (32,)) // 8,
+                    sum(m.value_layout) // 8,
+                    m.len,
+                )
+                for m in meta.maps
+            },
+            expected,
+        )
+        relocs = xdp_map_relocations(obj)
+        self.assertCountEqual([name for _, name in relocs], list(expected))
+        for at, name in relocs:
+            self.assertEqual(image[at], 0x18)
+            self.assertEqual(image[at + 1] >> 4, 1)
+            index = int.from_bytes(image[at + 4 : at + 8], "little")
+            self.assertEqual(meta.maps[index].name, name)
+            self.assertEqual(image[at + 12 : at + 16], bytes(4))
+
     def test_rbpf_resolves_actual_map_relocations(self):
         root = self.build_dir
         args = ("rv32imc", "--engine", "rbpf", "--firmware", self.firmware)
-        objdump = resolve_llvm_tool("llvm-objdump")
         firewall = (ROOT / "tests/xdp/firewall.c").read_text()
         two_maps = self.root / "two_maps.c"
         two_maps.write_text(
@@ -408,18 +504,13 @@ class ProgramBuildTests(unittest.TestCase):
                     self.assertEqual(blacklist.len, 256)
                     self.assertEqual(blacklist.key_layout, (32,))
                     self.assertEqual(blacklist.value_layout, (32,))
-                    relocs = subprocess.check_output([objdump, "-r", obj], text=True)
-                    xdp_relocations = relocs.split("RELOCATION RECORDS FOR [xdp]:\n")[
-                        1
-                    ].split("\n\n", 1)[0]
-                    offsets = re.findall(
-                        r"^([0-9a-f]+)\s+R_BPF_64_64\s+blacklist$",
-                        xdp_relocations,
-                        re.M,
-                    )
+                    offsets = [
+                        at
+                        for at, name in xdp_map_relocations(obj)
+                        if name == "blacklist"
+                    ]
                     self.assertTrue(offsets)
-                    for offset in offsets:
-                        at = int(offset, 16)
+                    for at in offsets:
                         self.assertEqual(original[at], 0x18)
                         expected[at + 1] = (expected[at + 1] & 0xF) | 0x10
                         expected[at + 4 : at + 8] = index.to_bytes(4, "little")

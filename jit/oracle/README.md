@@ -140,9 +140,11 @@ ABI does.
 against the constant. A prologue change fails loudly instead of misaligning the
 two stacks.
 
-The stack window `[MODEL_FP-512, MODEL_FP)` is also a compared region, so a
-wrong JIT stack offset is now observable. The JIT's saved registers and scratch
-words live above `MODEL_FP`, outside it.
+Packet and map regions are compared byte for byte. Private BPF stack spills can
+hold different address representations for the same packet pointer. The helper
+bridge still reads stack keys and compares normalized helper arguments and map
+effects. The `bsort`, `noop`, and `copy` cases also check each engine against a
+known response for the entire 8258-byte frame.
 
 Under `mcu`, `register_allowed_memory` and `register_helper` are inert;
 permission comes from `McuEnv::check_access` and helpers from

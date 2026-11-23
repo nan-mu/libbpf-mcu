@@ -128,6 +128,8 @@ fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
     let mut input: Option<PathBuf> = None;
     let mut section: Option<String> = None;
     let mut packet = vec![0u8; 64];
+    let mut expected_packet = None;
+    let mut expected_return = None;
     let mut rest = args.peekable();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -143,6 +145,25 @@ fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
                     .ok_or_else(|| "missing value for --packet".to_string())?;
                 packet = parse_hex(&hex)?;
             }
+            "--packet-file" | "--expect-packet-file" => {
+                let path = rest
+                    .next()
+                    .ok_or_else(|| format!("missing value for {arg}"))?;
+                let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
+                if arg == "--packet-file" {
+                    packet = bytes;
+                } else {
+                    expected_packet = Some(bytes);
+                }
+            }
+            "--expect-return" => {
+                let value = rest.next().ok_or("missing value for --expect-return")?;
+                expected_return = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid return value {value}"))?,
+                );
+            }
             other if other.starts_with('-') => return Err(format!("unknown flag {other}")),
             other => {
                 if input.is_some() {
@@ -152,9 +173,14 @@ fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
             }
         }
     }
+    let expected = match (expected_packet.as_deref(), expected_return) {
+        (None, None) => None,
+        (Some(bytes), Some(r0)) => Some(xpost_jit::ExpectedPacket { r0, bytes }),
+        _ => return Err("use --expect-packet-file and --expect-return together".into()),
+    };
     let input = input.ok_or_else(|| "missing input path".to_string())?;
     let src = load_bpf(&input, section.as_deref()).map_err(|e| e.to_string())?;
-    let report = xpost_jit::check_packet(&src.insns, &src.symbols, &packet);
+    let report = xpost_jit::check_packet_with_expected(&src.insns, &src.symbols, &packet, expected);
     println!(
         "status={} section={} bpf_insns={} rv_bytes={} relocs={} r0={} detail={}",
         report.status,
@@ -187,5 +213,5 @@ fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
 }
 
 fn usage() -> String {
-    "usage: xpost-jit compile <in> -o <out.rv32> [--section name] [--repeat n] [--disasm]\n       xpost-jit check <bpf.o> [--section name] [--packet hex]\n       xpost-jit matrix".into()
+    "usage: xpost-jit compile <in> -o <out.rv32> [--section name] [--repeat n] [--disasm]\n       xpost-jit check <bpf.o> [--section name] [--packet hex | --packet-file path]\n                      [--expect-packet-file path --expect-return value]\n       xpost-jit matrix".into()
 }

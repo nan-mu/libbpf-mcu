@@ -2,17 +2,6 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
-const PROGRAMS: &[&str] = &[
-    "div2",
-    "xdp_drop",
-    "case_mark",
-    "just_drop",
-    "just_tx",
-    "firewall",
-    "bitswap",
-    "bsort",
-];
-
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest.join("../..").canonicalize().unwrap();
@@ -30,8 +19,14 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CLANG");
-    for name in PROGRAMS {
-        let src = root.join("tests/xdp").join(format!("{name}.c"));
+    let sources = root.join("jit/scripts/xdp-sources.txt");
+    println!("cargo:rerun-if-changed={}", sources.display());
+    for path in ["tests/xdp", "tests/unused/exec_common.h", "include-bpf"] {
+        println!("cargo:rerun-if-changed={}", root.join(path).display());
+    }
+    for path in std::fs::read_to_string(sources).unwrap().lines() {
+        let src = root.join(path);
+        let name = src.file_stem().unwrap().to_str().unwrap();
         let obj = out.join(format!("{name}.bpf.o"));
         println!("cargo:rerun-if-changed={}", src.display());
         let status = Command::new(&clang)
@@ -53,8 +48,4 @@ fn main() {
             .unwrap_or_else(|e| panic!("spawn {clang}: {e}"));
         assert!(status.success(), "clang failed on {}", src.display());
     }
-    println!(
-        "cargo:rerun-if-changed={}",
-        root.join("include-bpf/vmlinux.h").display()
-    );
 }

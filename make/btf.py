@@ -179,15 +179,15 @@ class Reader:
         return out
 
 
-def elf_section(data: bytes, name: str) -> bytes | None:
-    """Return section bytes for `name` from a little-endian ELF64 REL object."""
+def elf_sections(data: bytes) -> dict[str, bytes]:
+    """Read BTF and the map sections, resolving section offsets in .rel.BTF."""
     if len(data) < 64 or data[:4] != b"\x7fELF":
         raise ValueError("not an ELF file")
     if data[4] != 2 or data[5] != 1:
         raise ValueError("only ELF64 little-endian is supported")
 
     (
-        _e_type,
+        e_type,
         _e_machine,
         _e_version,
         _e_entry,
@@ -202,30 +202,56 @@ def elf_section(data: bytes, name: str) -> bytes | None:
         e_shstrndx,
     ) = struct.unpack_from("<HHIQQQIHHHHHH", data, 16)
 
-    if e_shentsize < 64 or e_shnum == 0:
+    if e_shentsize < 64 or e_shnum == 0 or e_shoff + e_shentsize * e_shnum > len(data):
         raise ValueError("invalid ELF section header table")
 
-    def shdr(i: int) -> tuple[int, int, int]:
+    def shdr(i: int) -> tuple:
+        if not 0 <= i < e_shnum:
+            raise ValueError("invalid ELF section index")
         off = e_shoff + i * e_shentsize
-        sh_name, _sh_type, _sh_flags, _sh_addr, sh_offset, sh_size = struct.unpack_from(
-            "<IIQQQQ", data, off
-        )
-        return sh_name, sh_offset, sh_size
+        return struct.unpack_from("<IIQQQQIIQQ", data, off)
 
-    _str_name, str_off, str_size = shdr(e_shstrndx)
-    shstr = data[str_off : str_off + str_size]
+    def contents(header: tuple) -> bytes:
+        offset, size = header[4:6]
+        if offset + size > len(data):
+            raise ValueError("ELF section exceeds file size")
+        return data[offset : offset + size]
 
-    def cstr(off: int) -> str:
-        end = shstr.find(b"\0", off)
-        if end < 0:
-            end = len(shstr)
-        return shstr[off:end].decode("utf-8", errors="replace")
+    shstr = contents(shdr(e_shstrndx))
+    headers = [shdr(i) for i in range(e_shnum)]
+    names = [btf_str(shstr, header[0]) for header in headers]
+    wanted = (".BTF", ".BTF.ext", "maps", ".maps")
+    sections = {
+        name: contents(header) for name, header in zip(names, headers) if name in wanted
+    }
+    if e_type != 1 or ".BTF" not in sections:  # ET_REL
+        return sections
 
-    for i in range(e_shnum):
-        sh_name, sh_offset, sh_size = shdr(i)
-        if cstr(sh_name) == name:
-            return data[sh_offset : sh_offset + sh_size]
-    return None
+    btf_index = names.index(".BTF")
+    btf = bytearray(sections[".BTF"])
+    for header in headers:
+        _, kind, _, _, _, _, link, target, _, size = header
+        if kind != 9 or target != btf_index:  # SHT_REL, sh_info is target section
+            continue
+        symbols = shdr(link)
+        symbol_size = symbols[-1]
+        if symbols[1] != 2 or symbol_size != 24 or size != 16:  # SHT_SYMTAB
+            raise ValueError("invalid ELF .BTF relocation or symbol table")
+        symtab = contents(symbols)
+        for offset, info in struct.iter_unpack("<QQ", contents(header)):
+            kind = info & 0xFFFFFFFF
+            symbol = (info >> 32) * symbol_size
+            if kind not in (3, 4):  # R_BPF_64_ABS32, R_BPF_64_NODYLD32
+                raise ValueError(f"unsupported .BTF relocation type {kind}")
+            if offset + 4 > len(btf) or symbol + symbol_size > len(symtab):
+                raise ValueError("ELF .BTF relocation outside section or symbol table")
+            _, _, _, section, value, _ = struct.unpack_from("<IBBHQQ", symtab, symbol)
+            addend = struct.unpack_from("<I", btf, offset)[0]
+            if not 0 < section < e_shnum or value + addend > 0xFFFFFFFF:
+                raise ValueError("invalid section-relative .BTF relocation")
+            struct.pack_into("<I", btf, offset, value + addend)
+    sections[".BTF"] = bytes(btf)
+    return sections
 
 
 def btf_str(strtab: bytes, off: int) -> str:
@@ -350,7 +376,9 @@ def parse_btf(data: bytes) -> tuple[list[dict[str, Any]], bytes]:
     return types, strtab
 
 
-def skip_mods(types: list[dict[str, Any]], type_id: int, *, typedefs: bool = True) -> int:
+def skip_mods(
+    types: list[dict[str, Any]], type_id: int, *, typedefs: bool = True
+) -> int:
     """Follow const/volatile/restrict/type_tag (and optionally typedef) chains."""
     seen = set()
     while type_id and type_id not in seen:
@@ -440,7 +468,9 @@ def primitive_name(types: list[dict[str, Any]], type_id: int) -> str:
     return "u8"
 
 
-def layout_lines(types: list[dict[str, Any]], type_id: int, indent: int = 4) -> list[str]:
+def layout_lines(
+    types: list[dict[str, Any]], type_id: int, indent: int = 4
+) -> list[str]:
     """Flatten compiler bit offsets, retaining each field/gap as one interval.
 
     This is layout notation, not C source. For example `u3 flag` records a
@@ -455,7 +485,9 @@ def layout_lines(types: list[dict[str, Any]], type_id: int, indent: int = 4) -> 
     if kind == BTF_KIND_UNION:
         raise ValueError("overlapping union layout is unsupported")
     if kind == BTF_KIND_PTR:
-        raise ValueError("pointer-bearing map layout is target-dependent and unsupported")
+        raise ValueError(
+            "pointer-bearing map layout is target-dependent and unsupported"
+        )
     if kind == BTF_KIND_STRUCT:
         lines = []
         cursor = 0
@@ -486,7 +518,9 @@ def layout_lines(types: list[dict[str, Any]], type_id: int, indent: int = 4) -> 
             else:
                 nested = layout_lines(types, mid, indent)
                 if mt["kind"] != BTF_KIND_STRUCT:
-                    nested = [re.sub(r"\bv$", member["name"] or "_", line) for line in nested]
+                    nested = [
+                        re.sub(r"\bv$", member["name"] or "_", line) for line in nested
+                    ]
                 lines.extend(nested)
                 width = sum(layout_bit_intervals("\n".join(nested)))
             cursor = offset + width
@@ -573,12 +607,13 @@ def estimate_bytes(
 
 
 def extract_maps(
-    types: list[dict[str, Any]], maps_blob: bytes | None = None
+    types: list[dict[str, Any]], sections: dict[str, bytes]
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for t in types[1:]:
         if t["kind"] != BTF_KIND_DATASEC or t.get("name") not in (".maps", "maps"):
             continue
+        maps_blob = sections.get(t["name"])
         for var_info in t.get("vars", []):
             var_id = var_info["type"]
             if var_id <= 0 or var_id >= len(types):
@@ -621,10 +656,13 @@ def extract_maps(
             # Classic `struct bpf_map_def` — field values live in the maps blob.
             if map_type is None and maps_blob is not None:
                 off = int(var_info.get("offset", 0))
-                if off + 16 <= len(maps_blob):
-                    map_type, key_size, value_size, max_entries = struct.unpack_from(
-                        "<IIII", maps_blob, off
+                if var_info["size"] < 16 or off + var_info["size"] > len(maps_blob):
+                    raise ValueError(
+                        f"map `{map_name}` descriptor exceeds its ELF section"
                     )
+                map_type, key_size, value_size, max_entries = struct.unpack_from(
+                    "<IIII", maps_blob, off
+                )
 
             if map_type is None:
                 continue
@@ -683,7 +721,9 @@ def extract_maps(
             item: dict[str, Any] = {
                 "name": map_name,
                 "map_type": map_type,
-                "map_type_name": MAP_TYPE_NAME.get(map_type, f"BPF_MAP_TYPE_{map_type}"),
+                "map_type_name": MAP_TYPE_NAME.get(
+                    map_type, f"BPF_MAP_TYPE_{map_type}"
+                ),
                 "max_entries": max_entries,
                 "key_size": key_size,
                 "value_size": value_size,
@@ -697,7 +737,9 @@ def extract_maps(
     return {"total_estimated_bytes": total, "items": items}
 
 
-def parse_core(data: bytes, types: list[dict[str, Any]], strtab: bytes) -> list[dict[str, Any]]:
+def parse_core(
+    data: bytes, types: list[dict[str, Any]], strtab: bytes
+) -> list[dict[str, Any]]:
     r = Reader(data)
     magic, version, _flags, hdr_len = r.read("<HBBI")
     if magic != 0xEB9F:
@@ -744,17 +786,16 @@ def parse_core(data: bytes, types: list[dict[str, Any]], strtab: bytes) -> list[
 
 
 def analyze(obj_path: Path) -> dict[str, Any]:
-    data = obj_path.read_bytes()
-    btf_data = elf_section(data, ".BTF")
+    sections = elf_sections(obj_path.read_bytes())
+    btf_data = sections.get(".BTF")
     if btf_data is None:
         raise ValueError(f".BTF section not found in {obj_path} (compile with -g)")
 
     types, strtab = parse_btf(btf_data)
-    maps_blob = elf_section(data, "maps") or elf_section(data, ".maps")
-    maps = extract_maps(types, maps_blob)
+    maps = extract_maps(types, sections)
 
     core: list[dict[str, Any]] = []
-    ext = elf_section(data, ".BTF.ext")
+    ext = sections.get(".BTF.ext")
     if ext is not None:
         core = parse_core(ext, types, strtab)
 

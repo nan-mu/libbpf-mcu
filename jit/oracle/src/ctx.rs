@@ -180,9 +180,6 @@ pub fn adapt(insns: &[Insn]) -> Result<Adapted, String> {
             widened,
         });
     }
-    if patched.is_empty() {
-        return Err("no ctx access found; the program does not match the XDP shape".into());
-    }
     Ok(Adapted {
         insns: out,
         patched,

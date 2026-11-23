@@ -15,18 +15,11 @@ use std::ops::Range;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use xpost_jit::isa::*;
-use xpost_jit::{compile, link, Insn, LinkIn, HELPER, KIND_ARRAY};
+use xpost_jit::{compile, link, packet_world, Insn, LinkIn, PacketWorld, HELPER};
+pub use xpost_jit::{CTX, DATA, FLAT_LEN};
 
 use crate::ctx;
 use crate::rv::{self, Call};
-
-pub const FLAT_LEN: usize = 0x4_0000;
-pub const DATA: u32 = 0x1000;
-pub const CTX: u32 = 0x1800;
-pub const MAP0: u32 = 0x3000;
-pub const MAP_STRIDE: u32 = 0x40;
-pub const STORE0: u32 = 0x8000;
-pub const STORE_STRIDE: u32 = 0x800;
 
 /// The JIT's BPF frame pointer. `run_rv` enters at sp = 0x3_0000 and the
 /// prologue subtracts align16(9 saved regs * 4 + 10 scratch words * 4 + 512) =
@@ -55,47 +48,9 @@ impl Status {
     }
 }
 
-pub struct Setup {
-    pub maps: Vec<(String, u32)>,
-    pub watch: Vec<Range<usize>>,
-}
-
-/// The host map model, copied from `jit/src/check.rs`: every map is an ARRAY of
-/// 256 eight-byte values, whatever the object's `.maps` section declares.
-fn build_world(packet: &[u8], symbols: &HashMap<u64, String>, with_ctx: bool) -> (Vec<u8>, Setup) {
-    let mut mem = vec![0u8; FLAT_LEN];
-    let end = DATA as usize + packet.len();
-    mem[DATA as usize..end].copy_from_slice(packet);
-    if with_ctx {
-        put32(&mut mem, CTX as usize, DATA);
-        put32(&mut mem, CTX as usize + 4, DATA + packet.len() as u32);
-    }
-    let mut names: Vec<&String> = symbols.values().collect();
-    names.sort();
-    names.dedup();
-    let mut maps = Vec::new();
-    let mut watch = vec![
-        DATA as usize..end,
-        (MODEL_FP - MODEL_STACK) as usize..MODEL_FP as usize,
-    ];
-    for (n, name) in names.into_iter().enumerate() {
-        let vmr = MAP0 + n as u32 * MAP_STRIDE;
-        let storage = STORE0 + n as u32 * STORE_STRIDE;
-        xpost_jit::write_map(&mut mem, vmr, KIND_ARRAY, 4, 8, 256, storage).unwrap();
-        watch.push(vmr as usize..vmr as usize + 24);
-        watch.push(storage as usize..storage as usize + STORE_STRIDE as usize);
-        maps.push((name.clone(), vmr));
-    }
-    (mem, Setup { maps, watch })
-}
-
-fn put32(mem: &mut [u8], at: usize, v: u32) {
-    mem[at..at + 4].copy_from_slice(&v.to_le_bytes());
-}
-
 /// The regions a program-level case compares, identical on both sides.
 pub fn program_watch(packet: &[u8], symbols: &HashMap<u64, String>) -> Vec<Range<usize>> {
-    build_world(packet, symbols, false).1.watch
+    packet_world(packet, symbols).map_or_else(|_| Vec::new(), |world| world.watch)
 }
 
 pub fn encode(insns: &[Insn]) -> Vec<u8> {
@@ -515,8 +470,7 @@ fn jit_frame_pointer() -> Result<u32, String> {
     ];
     let no_symbols: HashMap<u64, String> = HashMap::new();
     let no_maps: HashMap<String, u32> = HashMap::new();
-    let (code, _, _, helper) =
-        compile_link(&insns, &no_symbols, &no_maps).map_err(|s| s.term)?;
+    let (code, _, _, helper) = compile_link(&insns, &no_symbols, &no_maps).map_err(|s| s.term)?;
     let (side, _) = execute_jit(&code, CTX, vec![0u8; FLAT_LEN], helper);
     side.trace
         .first()
@@ -525,17 +479,31 @@ fn jit_frame_pointer() -> Result<u32, String> {
 }
 
 pub fn check_program(insns: &[Insn], symbols: &HashMap<u64, String>, packet: &[u8]) -> Outcome {
-    let (world, setup) = build_world(packet, symbols, true);
-    let maps: HashMap<String, u32> = setup.maps.iter().cloned().collect();
+    let PacketWorld { mem, maps, watch } = match packet_world(packet, symbols) {
+        Ok(world) => world,
+        Err(reason) => {
+            return finish(
+                Side::harness(reason.into()),
+                Side::harness(reason.into()),
+                &[],
+                &[],
+                0,
+                0,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            );
+        }
+    };
     let (jit, rv_bytes, relocs, split) = match compile_link(insns, symbols, &maps) {
         Ok((code, rv_bytes, relocs, helper)) => {
-            let (side, split) = execute_jit(&code, CTX, world, helper);
+            let (side, split) = execute_jit(&code, CTX, mem, helper);
             (side, rv_bytes, relocs, split)
         }
         Err(side) => (side, 0, 0, None),
     };
     let (oracle, patches, stack_patches) = run_oracle(insns, symbols, packet);
-    let watch = setup.watch;
     finish(
         jit,
         oracle,
@@ -584,19 +552,19 @@ fn run_oracle(
             )
         }
     };
-    let (world, setup) = build_world(packet, symbols, false);
+    let PacketWorld { mem, maps, .. } = match packet_world(packet, symbols) {
+        Ok(world) => world,
+        Err(reason) => return (Side::harness(reason.into()), adapted.patched, Vec::new()),
+    };
     let mut ctx_buf = [0u8; 48];
-    let base = install(
-        world,
-        vec![(ctx_buf.as_ptr() as u64, ctx_buf.len() as u64)],
-    );
+    let base = install(mem, vec![(ctx_buf.as_ptr() as u64, ctx_buf.len() as u64)]);
     let mut stack_buf = vec![0u8; MODEL_STACK as usize];
     install_stack(&stack_buf);
     let mut prog = adapted.insns;
     for (off, name) in symbols {
         let pc = (off / 8) as usize;
-        let vmr = match setup.maps.iter().find(|(n, _)| n == name) {
-            Some((_, v)) => *v,
+        let vmr = match maps.get(name) {
+            Some(&v) => v,
             None => {
                 let (_, _, sp, _) = uninstall();
                 return (
@@ -674,10 +642,7 @@ fn run_probe_oracle(insns: &[Insn], scratch_len: usize) -> Side {
     let bytes = encode(insns);
     let mem = vec![0u8; scratch_len.max(64)];
     let mut stack_buf = vec![0u8; MODEL_STACK as usize];
-    install(
-        Vec::new(),
-        vec![(mem.as_ptr() as u64, mem.len() as u64)],
-    );
+    install(Vec::new(), vec![(mem.as_ptr() as u64, mem.len() as u64)]);
     install_stack(&stack_buf);
     let result = guard(|| -> Result<u64, String> {
         let vm = rbpf::EbpfVmMbuff::new(Some(&bytes)).map_err(|e| e.to_string())?;
@@ -788,11 +753,7 @@ fn finish(
                             .iter()
                             .take(8)
                             .map(|o| {
-                                format!(
-                                    "+{o:#x} {:02x}/{:02x}",
-                                    j[jw.start + o],
-                                    r[ow.start + o]
-                                )
+                                format!("+{o:#x} {:02x}/{:02x}", j[jw.start + o], r[ow.start + o])
                             })
                             .collect();
                         diffs.push(format!(

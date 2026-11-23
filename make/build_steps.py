@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from pathlib import Path
 from btf import analyze
 from build_state import parse_depfile, record, update_diagnostic
 from layout import (
+    ROOT,
     LayoutError,
     bpf_path,
     container_path,
@@ -83,12 +85,54 @@ def compile_c(generation, src, obj, dep, clang, flags) -> list[Path]:
     ]
 
 
+QUOTED_INCLUDE_OR_COMMENT = re.compile(
+    rb'/\*[\s\S]*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''
+    rb'|^[ \t]*#[ \t]*include[ \t]*"(?P<header>[^"\n]+)"[ \t]*(?:\r?\n|$)',
+    re.MULTILINE,
+)
+
+
+def source_snapshot(src: Path) -> tuple[bytes, list[Path]]:
+    """Inline quoted program headers while keeping SDK includes and conditions."""
+    headers = []
+
+    def expand(path: Path, stack: tuple[Path, ...]) -> bytes:
+        def inline(match: re.Match[bytes]) -> bytes:
+            name = match["header"]
+            if name is None:
+                return match[0]
+            header = path.parent / os.fsdecode(name)
+            target = header.resolve()
+            if not target.is_relative_to(ROOT / "tests") or not header.is_file():
+                return match[0]
+            if target in stack:
+                raise LayoutError(f"cyclic program include: {header}")
+            headers.append(header)
+            label = os.fsencode(target.relative_to(ROOT))
+            content = expand(header, (*stack, target))
+            if content and not content.endswith(b"\n"):
+                content += b"\n"
+            return (
+                b"/* Begin "
+                + label
+                + b" */\n"
+                + content
+                + b"/* End "
+                + label
+                + b" */\n"
+            )
+
+        return QUOTED_INCLUDE_OR_COMMENT.sub(inline, path.read_bytes())
+
+    return expand(src, (src.resolve(),)), headers
+
+
 def build_bpf(
     root: Path, src: Path, config: dict, config_path: Path, state: Path
 ) -> None:
     program = src.stem
     obj, snapshot = state.with_name(f"{program}_bpf.o"), state.with_name(f"{program}.c")
-    original = src.read_bytes()
+    original, included = source_snapshot(src)
     generation = []
     headers = compile_c(
         generation,
@@ -98,12 +142,14 @@ def build_bpf(
         config["clang"],
         config["flags"],
     )
-    if src.read_bytes() != original:
-        raise LayoutError(f"{src} changed during BPF compilation")
+    if source_snapshot(src) != (original, included):
+        raise LayoutError(
+            f"{src} or its program headers changed during BPF compilation"
+        )
     write_if_changed(snapshot, original)
     record(
         state,
-        inputs=[src, config_path, config["clang"], *headers],
+        inputs=[src, config_path, config["clang"], *headers, *included],
         outputs=[obj, snapshot],
         generation=generation,
         source=str(src),
@@ -164,14 +210,17 @@ def build_native(
     obj = out / f"{name}_rv32.o"
     debug = out / f"{name}_rv32.debug.elf"
     snapshot = source_path(root, name).read_bytes()
-    if src.read_bytes() != snapshot:
+    original, included = source_snapshot(src)
+    if original != snapshot:
         raise LayoutError(f"{src} differs from the BPF source snapshot")
     generation = list(cfg["firmware_calls"])
     headers = compile_c(
         generation, src, obj, state.with_name("headers.d"), cfg["clang"], cfg["flags"]
     )
-    if src.read_bytes() != snapshot:
-        raise LayoutError(f"{src} changed during MCU compilation")
+    if source_snapshot(src) != (original, included):
+        raise LayoutError(
+            f"{src} or its program headers changed during MCU compilation"
+        )
     run(
         generation,
         "link",
