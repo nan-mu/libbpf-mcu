@@ -141,6 +141,24 @@ fn desc(mem: &[u8], map: u32) -> Option<Desc> {
     })
 }
 
+/// Read a u32 from the test model's ARRAY using its actual descriptor stride.
+pub(crate) fn read_array_u32(mem: &[u8], map: u32, key: u32) -> Option<u32> {
+    let layout = desc(mem, map)?;
+    if layout.kind != KIND_ARRAY
+        || layout.key_size != 4
+        || layout.value_size < 4
+        || key >= layout.max_entries
+    {
+        return None;
+    }
+    get_u32(
+        mem,
+        layout
+            .storage
+            .checked_add(key.checked_mul(layout.value_size)?)?,
+    )
+}
+
 fn find_hash(mem: &mut [u8], desc: &Desc, key: u32, insert: bool) -> Option<u32> {
     let stride = hash_stride(desc)? as u32;
     let key_size = desc.key_size as usize;

@@ -125,8 +125,9 @@ class PublicationTests(unittest.TestCase):
 
     def test_new_source_with_same_stem_withdraws_previous_build_on_preflight_failure(self):
         self.build()
-        self.assertEqual(source_path(self.build_dir, self.source.stem).read_bytes(),
-                         self.source.read_bytes())
+        snapshot = source_path(self.build_dir, self.source.stem).read_bytes()
+        self.assertIn(self.header.read_bytes(), snapshot)
+        self.assertNotIn(b'#include "action: #$.h"', snapshot)
         other = self.root / self.source.name
         other.write_text("int unrelated;\n")
         self.build(other, target="jit", options=["--firmware", str(self.root / "absent.elf")],

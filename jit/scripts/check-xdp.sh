@@ -1,6 +1,6 @@
 #!/bin/sh
 # Compile the selected C fixtures to eBPF, run PREVAIL, then compare the JIT
-# image with the eBPF reference. Required EXB2 cases also check known output.
+# image with the eBPF reference. Required packet cases also check known output.
 # unsupported and inconclusive are recorded and neither is a pass.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
@@ -23,9 +23,29 @@ OUT="$ROOT/build/jit-check"
 mkdir -p "$OUT"
 printf 'program\tprevail\tjit\tline\n' > "$OUT/report.tsv"
 fail=0
-FIXTURES="$ROOT/tests/fixtures/exb2"
-cargo_check() {
-  cargo run --quiet --release --manifest-path "$ROOT/jit/Cargo.toml" -- check "$@"
+FIXTURES="$ROOT/tests/fixtures"
+record_check() {
+  check_name=$1
+  required=$2
+  shift 2
+  log="$OUT/$(printf '%s' "$check_name" | tr / .).check"
+  set +e
+  cargo run --quiet --release --manifest-path "$ROOT/jit/Cargo.toml" -- \
+    check "$@" >"$log" 2>"$log.err"
+  code=$?
+  set -e
+  case $code in
+    0) jit=pass ;;
+    2) jit=unsupported ;;
+    *) jit=fail ;;
+  esac
+  if grep -q 'status=inconclusive' "$log"; then
+    jit=inconclusive
+  fi
+  if [ "$jit" = fail ] || { [ "$required" = yes ] && [ "$jit" != pass ]; }; then
+    fail=$((fail + 1))
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$check_name" "$prevail" "$jit" "$(cat "$log")" >> "$OUT/report.tsv"
 }
 while IFS= read -r source <&3; do
   src="$ROOT/$source"
@@ -52,43 +72,28 @@ while IFS= read -r source <&3; do
   elif [ "$name" = bitswap ]; then
     packet=0000000001000000785634120000000000000000000000000000000000000000
   fi
-  required=no
-  set -- "$obj" --packet "$packet"
   case "$name" in
     bsort|noop|copy)
-      required=yes
-      set -- "$obj" --packet-file "$FIXTURES/$name.input.bin" \
-        --expect-packet-file "$FIXTURES/$name.expected.bin" --expect-return 2 ;;
+      record_check "$name" yes "$obj" --packet-file "$FIXTURES/exb2/$name.input.bin" \
+        --expect-packet-file "$FIXTURES/exb2/$name.expected.bin" --expect-return 2
+      if [ "$name" = bsort ]; then
+        short="$OUT/bsort.short.bin"
+        dd if="$FIXTURES/exb2/bsort.input.bin" of="$short" bs=1 count=8 2>/dev/null
+        record_check bsort/short yes "$obj" --packet-file "$short" --expect-unchanged --expect-return 0
+      fi ;;
+    case_mark|just_tx)
+      set --
+      if [ "$name" = just_tx ]; then
+        set -- --expect-array-u32 rxcnt 17 1
+      fi
+      record_check "$name" yes "$obj" --packet-file "$FIXTURES/network/$name.input.bin" \
+        --expect-packet-file "$FIXTURES/network/$name.expected.bin" --expect-return 3 "$@"
+      if [ "$name" = just_tx ]; then
+        set -- --expect-array-u32 rxcnt 17 0
+      fi
+      record_check "$name/short" yes "$obj" --packet "$packet" --expect-unchanged --expect-return 2 "$@" ;;
+    *) record_check "$name" no "$obj" --packet "$packet" ;;
   esac
-  set +e
-  cargo_check "$@" >"$OUT/$name.check" 2>"$OUT/$name.check.err"
-  code=$?
-  set -e
-  line=$(cat "$OUT/$name.check")
-  case $code in
-    0) jit=pass ;;
-    2) jit=unsupported ;;
-    *) jit=fail ;;
-  esac
-  if grep -q 'status=inconclusive' "$OUT/$name.check"; then
-    jit=inconclusive
-  fi
-  if [ "$jit" = fail ] || { [ "$required" = yes ] && [ "$jit" != pass ]; }; then
-    fail=$((fail + 1))
-  fi
-  printf '%s\t%s\t%s\t%s\n' "$name" "$prevail" "$jit" "$line" >> "$OUT/report.tsv"
-  if [ "$name" = bsort ]; then
-    short="$OUT/bsort.short.bin"
-    dd if="$FIXTURES/bsort.input.bin" of="$short" bs=1 count=8 2>/dev/null
-    if cargo_check "$obj" --packet-file "$short" \
-         --expect-packet-file "$short" --expect-return 0 >"$OUT/bsort.short.check"; then
-      jit=pass
-    else
-      jit=fail
-      fail=$((fail + 1))
-    fi
-    printf '%s\t%s\t%s\t%s\n' bsort/short "$prevail" "$jit" "$(cat "$OUT/bsort.short.check")" >> "$OUT/report.tsv"
-  fi
 done 3< "$ROOT/jit/scripts/xdp-sources.txt"
 cat "$OUT/report.tsv"
 exit "$fail"

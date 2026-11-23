@@ -26,7 +26,7 @@ A fresh `pixi run build` currently builds and verifies raw BPF for every default
 
 The machine contract is `libbpf-mcu.program-index.v3`. It records the program, source snapshot, original BPF ELF and one `[[mode]]` per deployment. Each deployment records its container. LLVM AOT also records the native relocatable object. Each referenced file has a canonical relative path, byte length and SHA-256. Use `pixi run python make/layout.py verify --build-dir DIR` on a build root or an extracted program directory to check the indexed bytes and ELF format.
 
-The top-level C snapshot incorporates the program's quoted repository headers from `tests/`. It keeps the conditional branches for host, eBPF and RV32 compilation. Recompile it with the corresponding SDK headers and build flags. The report embeds these same source bytes, and the index hashes them.
+The top-level C snapshot incorporates quoted program headers resolved relative to the including file, including for sources selected outside the repository. It preserves comments, conditional branches for host, eBPF and RV32 compilation, and references to the target SDK. Recompile it with the corresponding SDK headers and build flags. The report embeds these same source bytes, and the index hashes them.
 
 PREVAIL checks the original Clang object before the build exposes any program files, including in BPF-only builds. A rejected program requires investigation. In a deployment, the firmware supplies the slot address and capacity. The packer checks the final image size after map rewriting or native linking. Intermediate binaries, linked debug ELFs, linker scripts, dependency fingerprints and failure diagnostics belong to the build root’s private `.ninja/` directory.
 

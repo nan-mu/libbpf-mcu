@@ -412,6 +412,36 @@ class ProgramBuildTests(unittest.TestCase):
                         executable_sections(original.read_bytes()),
                     )
 
+    def test_public_snapshot_includes_local_headers_for_explicit_sources(self):
+        fixtures = ROOT / "tests/unused/source_snapshot"
+        external = self.root / "external-source"
+        external.mkdir()
+        for name in ("external_input.c", "action.h"):
+            shutil.copyfile(fixtures / name, external / name)
+        isolated = self.root / "standalone-source"
+        isolated.mkdir()
+        for original in (fixtures / "repo_comment.c", external / "external_input.c"):
+            with self.subTest(program=original.stem):
+                run_build("bpf", "--inputs", original, build_dir=self.build_dir)
+                program = original.stem
+                snapshot = source_path(self.build_dir, program).read_bytes()
+                self.assertIn(b"#define SNAPSHOT_ACTION XDP_DROP", snapshot)
+                self.assertNotIn(b'#include "action.h"', snapshot)
+                if program == "repo_comment":
+                    self.assertIn(b"/* program-local header */", snapshot)
+                standalone = isolated / original.name
+                standalone.write_bytes(snapshot)
+                obj = standalone.with_suffix(".o")
+                subprocess.run(
+                    [CLANG, *BPF_FLAGS, "-c", standalone, "-o", obj],
+                    cwd=isolated,
+                    check=True,
+                )
+                self.assertEqual(
+                    executable_sections(obj.read_bytes()),
+                    executable_sections(bpf_path(self.build_dir, program).read_bytes()),
+                )
+
     def test_rbpf_classic_map_descriptors_keep_their_own_offsets(self):
         root = self.build_dir
         program = "two_classic_maps"

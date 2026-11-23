@@ -129,7 +129,9 @@ fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
     let mut section: Option<String> = None;
     let mut packet = vec![0u8; 64];
     let mut expected_packet = None;
+    let mut expect_unchanged = false;
     let mut expected_return = None;
+    let mut expected_array = None;
     let mut rest = args.peekable();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -164,6 +166,20 @@ fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
                         .map_err(|_| format!("invalid return value {value}"))?,
                 );
             }
+            "--expect-unchanged" => expect_unchanged = true,
+            "--expect-array-u32" => {
+                let name = rest.next().ok_or("missing ARRAY name")?;
+                let key = rest.next().ok_or("missing ARRAY key")?;
+                let value = rest.next().ok_or("missing ARRAY value")?;
+                expected_array = Some((
+                    name,
+                    key.parse()
+                        .map_err(|_| format!("invalid ARRAY key {key}"))?,
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid ARRAY value {value}"))?,
+                ));
+            }
             other if other.starts_with('-') => return Err(format!("unknown flag {other}")),
             other => {
                 if input.is_some() {
@@ -173,10 +189,32 @@ fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
             }
         }
     }
-    let expected = match (expected_packet.as_deref(), expected_return) {
-        (None, None) => None,
-        (Some(bytes), Some(r0)) => Some(xpost_jit::ExpectedPacket { r0, bytes }),
-        _ => return Err("use --expect-packet-file and --expect-return together".into()),
+    if expect_unchanged && expected_packet.is_some() {
+        return Err("use either --expect-packet-file or --expect-unchanged".into());
+    }
+    let expected_bytes = if expect_unchanged {
+        Some(packet.as_slice())
+    } else {
+        expected_packet.as_deref()
+    };
+    let expected = match (expected_bytes, expected_return) {
+        (None, None) if expected_array.is_none() => None,
+        (Some(bytes), Some(r0)) => Some(xpost_jit::ExpectedPacket {
+            r0,
+            bytes,
+            array: expected_array.as_ref().map(|(name, key, value)| {
+                xpost_jit::ExpectedArrayValue {
+                    name,
+                    key: *key,
+                    value: *value,
+                }
+            }),
+        }),
+        _ => {
+            return Err(
+                "pair --expect-return with --expect-packet-file or --expect-unchanged".into(),
+            )
+        }
     };
     let input = input.ok_or_else(|| "missing input path".to_string())?;
     let src = load_bpf(&input, section.as_deref()).map_err(|e| e.to_string())?;
@@ -213,5 +251,5 @@ fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
 }
 
 fn usage() -> String {
-    "usage: xpost-jit compile <in> -o <out.rv32> [--section name] [--repeat n] [--disasm]\n       xpost-jit check <bpf.o> [--section name] [--packet hex | --packet-file path]\n                      [--expect-packet-file path --expect-return value]\n       xpost-jit matrix".into()
+    "usage: xpost-jit compile <in> -o <out.rv32> [--section name] [--repeat n] [--disasm]\n       xpost-jit check <bpf.o> [--section name] [--packet hex | --packet-file path]\n                      [--expect-return value (--expect-packet-file path | --expect-unchanged)\n                       [--expect-array-u32 name key value]]\n       xpost-jit matrix".into()
 }

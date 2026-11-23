@@ -63,6 +63,45 @@ pub fn packet_world(
 pub struct ExpectedPacket<'a> {
     pub r0: u64,
     pub bytes: &'a [u8],
+    pub array: Option<ExpectedArrayValue<'a>>,
+}
+
+pub struct ExpectedArrayValue<'a> {
+    pub name: &'a str,
+    pub key: u32,
+    pub value: u32,
+}
+
+pub struct PacketObservation {
+    pub r0: Option<u64>,
+    pub bytes_match: bool,
+    pub array_value: Option<u32>,
+}
+
+impl ExpectedPacket<'_> {
+    pub fn observe(
+        &self,
+        r0: Option<u64>,
+        mem: Option<&[u8]>,
+        packet: Range<usize>,
+        maps: &HashMap<String, u32>,
+    ) -> PacketObservation {
+        let array_value = self.array.as_ref().and_then(|array| {
+            let addr = *maps.get(array.name)?;
+            host_abi::read_array_u32(mem?, addr, array.key)
+        });
+        PacketObservation {
+            r0,
+            bytes_match: mem.and_then(|mem| mem.get(packet)) == Some(self.bytes),
+            array_value,
+        }
+    }
+
+    pub fn matches(&self, actual: &PacketObservation) -> bool {
+        actual.r0 == Some(self.r0)
+            && actual.bytes_match
+            && actual.array_value == self.array.as_ref().map(|array| array.value)
+    }
 }
 
 pub struct Report {
@@ -203,13 +242,19 @@ fn compare_inner(
     let mut detail = format!("r0 {bpf_r0:#x}");
     if let Some(expected) = expected {
         let range = watch[0].clone();
-        let bpf_match = bpf_mem[range.clone()] == *expected.bytes;
-        let rv_match = rv.mem[range] == *expected.bytes;
+        let reference = expected.observe(Some(bpf_r0), Some(&bpf_mem), range.clone(), maps);
+        let native = expected.observe(Some(rv_r0), Some(&rv.mem), range, maps);
         detail = format!(
-            "input=exact reference_r0={bpf_r0:#x} reference_bytes={bpf_match} rv32_r0={rv_r0:#x} rv32_bytes={rv_match} expected_r0={:#x} len={}",
-            expected.r0, expected.bytes.len()
+            "input=exact reference_r0={bpf_r0:#x} reference_bytes={} rv32_r0={rv_r0:#x} rv32_bytes={} expected_r0={:#x} len={}",
+            reference.bytes_match, native.bytes_match, expected.r0, expected.bytes.len()
         );
-        if bpf_r0 != expected.r0 || rv_r0 != expected.r0 || !bpf_match || !rv_match {
+        if let Some(array) = &expected.array {
+            detail.push_str(&format!(
+                " {}[{}] reference_array={:?} rv32_array={:?} expected_array={}",
+                array.name, array.key, reference.array_value, native.array_value, array.value
+            ));
+        }
+        if !expected.matches(&reference) || !expected.matches(&native) {
             return Report {
                 status: "fail",
                 detail,

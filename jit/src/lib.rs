@@ -43,7 +43,7 @@ pub mod isa {
 pub use bpf::{decode_insns, Insn};
 pub use bpf_vm::execute;
 pub use check::{check_packet, compare, Report};
-pub use check::{check_packet_with_expected, ExpectedPacket};
+pub use check::{check_packet_with_expected, ExpectedArrayValue, ExpectedPacket};
 #[doc(hidden)]
 pub use check::{packet_world, PacketWorld, CTX, DATA, FLAT_LEN};
 pub use compile::{compile, frame_bytes, link, Image, JitError, LinkIn, Reloc, RelocKind};

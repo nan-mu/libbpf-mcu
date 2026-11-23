@@ -7,27 +7,31 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
 use xpost_jit::isa::*;
-use xpost_jit::Insn;
+use xpost_jit::{packet_world, ExpectedArrayValue, ExpectedPacket, Insn};
 use xpost_jit_oracle::report::{self, J};
 use xpost_jit_oracle::run::{self, Status};
-use xpost_jit_oracle::{fuzz, probes, unhex};
+use xpost_jit_oracle::{fuzz, hex, probes, unhex};
 
 const DEFAULT_PACKET: &str = "00000000000000000000000008004500002c00000000401100007f0000017f000001";
 
 const PROGRAMS: &[(&str, &str)] = &[
     ("div2", "0800000002000000"),
     ("xdp_drop", DEFAULT_PACKET),
-    (
-        "case_mark",
-        "112233445566aabbccddeeff0800450000000000000000110000c00002017f00000104000400000800000000000000000000000000000000000000000000",
-    ),
     ("just_drop", DEFAULT_PACKET),
-    ("just_tx", DEFAULT_PACKET),
     ("firewall", DEFAULT_PACKET),
     (
         "bitswap",
         "0000000001000000785634120000000000000000000000000000000000000000",
     ),
+];
+
+const NETWORK: &[(&str, &str, usize)] = &[
+    (
+        "case_mark",
+        "112233445566aabbccddeeff0800450000000000000000110000c00002017f00000104000400000800000000000000000000000000000000000000000000",
+        82,
+    ),
+    ("just_tx", DEFAULT_PACKET, 74),
 ];
 
 /// Extra inputs that reach paths the check-xdp.sh packets do not: a map hit,
@@ -52,81 +56,166 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-#[test]
-fn exb2_packets() {
+fn exb2_packets(cases: &mut Vec<J>) {
     let fixtures = root().join("../../tests/fixtures/exb2");
     for name in ["bsort", "noop", "copy"] {
         let input = std::fs::read(fixtures.join(format!("{name}.input.bin"))).unwrap();
         let expected = std::fs::read(fixtures.join(format!("{name}.expected.bin"))).unwrap();
         assert_eq!(input.len(), 8258);
-        assert_eq!(expected.len(), input.len());
-        let obj = root().join("build").join(format!("{name}.bpf.o"));
-        let src = xpost_jit::load_bpf(&obj, None).unwrap();
         for (label, packet, expected, action) in [
             ("full", input.as_slice(), expected.as_slice(), 2),
             ("short", &input[..8], &input[..8], 0),
         ] {
-            let outcome = run::check_program(&src.insns, &src.symbols, packet);
-            let data = run::DATA as usize;
-            let matches = |side: &run::Side| {
-                side.mem
-                    .as_deref()
-                    .and_then(|mem| mem.get(data..data + expected.len()))
-                    == Some(expected)
-            };
-            println!(
-                "{name}/{label} status={} jit_r0={:?} jit_bytes={} rbpf_r0={:?} rbpf_bytes={} len={} {}",
-                outcome.status.as_str(), outcome.jit.r0, matches(&outcome.jit),
-                outcome.oracle.r0, matches(&outcome.oracle), expected.len(), outcome.detail
+            run_program(
+                cases,
+                name,
+                label,
+                packet,
+                Some(ExpectedPacket {
+                    r0: action,
+                    bytes: expected,
+                    array: None,
+                }),
             );
-            assert_eq!(
-                outcome.status,
-                Status::Pass,
-                "{name}/{label}: {}",
-                outcome.detail
+        }
+    }
+}
+
+fn network_packets(cases: &mut Vec<J>) {
+    let fixtures = root().join("../../tests/fixtures/network");
+    for &(name, short, len) in NETWORK {
+        let input = std::fs::read(fixtures.join(format!("{name}.input.bin"))).unwrap();
+        let expected = std::fs::read(fixtures.join(format!("{name}.expected.bin"))).unwrap();
+        let short = unhex(short);
+        assert_eq!(input.len(), len);
+        for (label, packet, bytes, r0, count) in [
+            ("full", input.as_slice(), expected.as_slice(), 3, 1),
+            ("short", short.as_slice(), short.as_slice(), 2, 0),
+        ] {
+            let array = (name == "just_tx").then_some(ExpectedArrayValue {
+                name: "rxcnt",
+                key: 17,
+                value: count,
+            });
+            run_program(
+                cases,
+                name,
+                label,
+                packet,
+                Some(ExpectedPacket { r0, bytes, array }),
             );
-            assert_eq!(outcome.jit.r0, Some(action));
-            assert_eq!(outcome.oracle.r0, Some(action));
-            assert!(matches(&outcome.jit) && matches(&outcome.oracle));
         }
     }
 }
 
 fn program_suite(cases: &mut Vec<J>) {
     for (name, packet_hex) in PROGRAMS {
-        run_program(cases, name, "check-xdp", packet_hex);
+        run_program(cases, name, "check-xdp", &unhex(packet_hex), None);
     }
     for (name, label, packet_hex) in EXTRA {
-        run_program(cases, name, label, packet_hex);
+        run_program(cases, name, label, &unhex(packet_hex), None);
     }
+    exb2_packets(cases);
+    network_packets(cases);
 }
 
-fn run_program(cases: &mut Vec<J>, name: &str, label: &str, packet_hex: &str) {
+fn run_program(
+    cases: &mut Vec<J>,
+    name: &str,
+    label: &str,
+    packet: &[u8],
+    expected: Option<ExpectedPacket<'_>>,
+) {
     let obj = root().join("build").join(format!("{name}.bpf.o"));
-    let packet = unhex(packet_hex);
+    let name = format!("{name}/{label}");
+    let packet_hex = hex(packet);
     let src = match xpost_jit::load_bpf(&obj, None) {
         Ok(s) => s,
         Err(e) => {
             cases.push(J::Obj(vec![
                 ("suite", J::str("program")),
-                ("name", J::str(format!("{name}/{label}"))),
+                ("name", J::str(name)),
                 ("input", J::str(packet_hex)),
-                ("status", J::str("unsupported")),
+                (
+                    "status",
+                    J::str(if expected.is_some() {
+                        "fail"
+                    } else {
+                        "unsupported"
+                    }),
+                ),
                 ("detail", J::str(format!("load_bpf: {e}"))),
             ]));
             return;
         }
     };
-    let outcome = run::check_program(&src.insns, &src.symbols, &packet);
-    let watch = run::program_watch(&packet, &src.symbols);
+    let mut outcome = run::check_program(&src.insns, &src.symbols, packet);
+    let layout = packet_world(packet, &src.symbols).ok();
+    let watch = layout
+        .as_ref()
+        .map_or(&[][..], |world| world.watch.as_slice());
     let pairs: Vec<_> = watch.iter().map(|w| (w.clone(), w.clone())).collect();
-    cases.push(report::case(
-        "program",
-        &format!("{name}/{label}"),
-        packet_hex,
-        &outcome,
-        &pairs,
-    ));
+    let expectation = expected.map(|expected| {
+        let no_maps = HashMap::new();
+        let maps = layout.as_ref().map_or(&no_maps, |world| &world.maps);
+        let observe = |side: &run::Side| {
+            let data = run::DATA as usize;
+            expected.observe(
+                side.r0,
+                side.mem.as_deref(),
+                data..data + packet.len(),
+                maps,
+            )
+        };
+        let jit = observe(&outcome.jit);
+        let oracle = observe(&outcome.oracle);
+        let mut detail = format!(
+            "expected r0={} bytes={} jit_r0={:?} jit_bytes={} rbpf_r0={:?} rbpf_bytes={}",
+            expected.r0,
+            expected.bytes.len(),
+            jit.r0,
+            jit.bytes_match,
+            oracle.r0,
+            oracle.bytes_match,
+        );
+        let array = expected.array.as_ref().map_or(J::Null, |array| {
+            detail.push_str(&format!(
+                " {}[{}] expected={} jit={:?} rbpf={:?}",
+                array.name, array.key, array.value, jit.array_value, oracle.array_value,
+            ));
+            J::Obj(vec![
+                ("map", J::str(array.name)),
+                ("key", J::Num(i64::from(array.key))),
+                ("expected", J::Num(i64::from(array.value))),
+                (
+                    "jit",
+                    jit.array_value.map_or(J::Null, |v| J::Num(i64::from(v))),
+                ),
+                (
+                    "oracle",
+                    oracle.array_value.map_or(J::Null, |v| J::Num(i64::from(v))),
+                ),
+            ])
+        });
+        if outcome.status != Status::Pass || !expected.matches(&jit) || !expected.matches(&oracle) {
+            outcome.status = Status::Fail;
+            outcome.blame = "open";
+            outcome.diffs.push(detail.clone());
+        }
+        outcome.detail = format!("{}; {detail}", outcome.detail);
+        J::Obj(vec![
+            ("return", J::Num(expected.r0 as i64)),
+            ("size_bytes", J::Num(expected.bytes.len() as i64)),
+            ("jit_bytes_match", J::Bool(jit.bytes_match)),
+            ("oracle_bytes_match", J::Bool(oracle.bytes_match)),
+            ("array", array),
+        ])
+    });
+    let mut case = report::case("program", &name, &packet_hex, &outcome, &pairs);
+    if let (Some(expectation), J::Obj(fields)) = (expectation, &mut case) {
+        fields.push(("expectation", expectation));
+    }
+    cases.push(case);
 }
 
 fn probe_suite(cases: &mut Vec<J>) {

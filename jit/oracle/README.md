@@ -143,8 +143,11 @@ two stacks.
 Packet and map regions are compared byte for byte. Private BPF stack spills can
 hold different address representations for the same packet pointer. The helper
 bridge still reads stack keys and compares normalized helper arguments and map
-effects. The `bsort`, `noop`, and `copy` cases also check each engine against a
-known response for the entire 8258-byte frame.
+effects. `results.json` includes full and short cases for `bsort`, `noop`, and
+`copy`, with each engine checked against a known response. The `case_mark` and
+`just_tx` fixtures check complete response bytes, and `just_tx` checks
+`rxcnt[17]` separately on each engine. Use `python3 jit/oracle/query.py
+jit/oracle/results.json bsort 10 pass` to see both sort cases.
 
 Under `mcu`, `register_allowed_memory` and `register_helper` are inert;
 permission comes from `McuEnv::check_access` and helpers from

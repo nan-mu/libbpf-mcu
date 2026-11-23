@@ -87,7 +87,8 @@ def compile_c(generation, src, obj, dep, clang, flags) -> list[Path]:
 
 QUOTED_INCLUDE_OR_COMMENT = re.compile(
     rb'/\*[\s\S]*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''
-    rb'|^[ \t]*#[ \t]*include[ \t]*"(?P<header>[^"\n]+)"[ \t]*(?:\r?\n|$)',
+    rb'|^[ \t]*#[ \t]*include[ \t]*"(?P<header>[^"\n]+)"'
+    rb"(?P<trailer>[ \t]*(?:/\*[\s\S]*?\*/[ \t]*)*(?://[^\r\n]*)?)(?:\r?\n|$)",
     re.MULTILINE,
 )
 
@@ -95,6 +96,7 @@ QUOTED_INCLUDE_OR_COMMENT = re.compile(
 def source_snapshot(src: Path) -> tuple[bytes, list[Path]]:
     """Inline quoted program headers while keeping SDK includes and conditions."""
     headers = []
+    sdk_roots = (ROOT / "include", ROOT / "include-bpf")
 
     def expand(path: Path, stack: tuple[Path, ...]) -> bytes:
         def inline(match: re.Match[bytes]) -> bytes:
@@ -103,17 +105,22 @@ def source_snapshot(src: Path) -> tuple[bytes, list[Path]]:
                 return match[0]
             header = path.parent / os.fsdecode(name)
             target = header.resolve()
-            if not target.is_relative_to(ROOT / "tests") or not header.is_file():
+            if not header.is_file() or any(
+                target.is_relative_to(sdk) for sdk in sdk_roots
+            ):
                 return match[0]
             if target in stack:
                 raise LayoutError(f"cyclic program include: {header}")
             headers.append(header)
-            label = os.fsencode(target.relative_to(ROOT))
+            relative = target.relative_to(ROOT) if target.is_relative_to(ROOT) else name
+            label = os.fsencode(relative)
+            trailer = match["trailer"].lstrip(b" \t")
             content = expand(header, (*stack, target))
             if content and not content.endswith(b"\n"):
                 content += b"\n"
             return (
-                b"/* Begin "
+                (trailer + b"\n" if trailer else b"")
+                + b"/* Begin "
                 + label
                 + b" */\n"
                 + content
