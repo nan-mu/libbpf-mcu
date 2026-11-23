@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from btf import analyze
-from build_state import parse_depfile, record
+from build_state import parse_depfile, record, update_diagnostic
 from layout import (
     LayoutError,
     bpf_path,
@@ -78,7 +78,7 @@ def compile_c(generation, src, obj, dep, clang, flags) -> list[Path]:
         ],
     )
     return [
-        Path(path.replace("$$", "$")).resolve()
+        Path(path.replace("$$", "$")).absolute()
         for path in parse_depfile(dep.read_text())
     ]
 
@@ -235,7 +235,7 @@ def build_ebpf(root: Path, program: str, cfg: dict, config: Path, state: Path) -
     write_maps(generation, obj, maps)
     basis = state_path(root, program, "ebpf-native")
     debug = read_state(basis)["linked_elf"]
-    section = program_section(obj)
+    section = program_section(obj, cfg["objdump"])
     raw = state.with_name("section.bin")
     image = state.with_name("rewritten.bin")
     packed = state.with_name("container.elf")
@@ -354,7 +354,9 @@ def main() -> None:
         elif args.mode == "jit":
             build_jit(args.root, args.src.stem, cfg, args.config, state)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        update_diagnostic(args.root, args.src.stem, args.mode, str(exc))
         sys.exit(f"{args.src.stem}/{args.mode}: {exc}")
+    update_diagnostic(args.root, args.src.stem, args.mode, None)
 
 
 if __name__ == "__main__":

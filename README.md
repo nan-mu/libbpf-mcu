@@ -66,7 +66,7 @@ The project defines three Pixi tasks. Use `-h` or `--help` on any task.
 
 | Build option | Meaning |
 | --- | --- |
-| `-c STEM`, `--crate STEM` | Select a unique C source stem under `tests/`. Without a selection, build every source except `tests/unused/`. |
+| `-c STEM`, `--crate STEM` | Select a unique C source stem under `tests/`, including `tests/diagnostics/`. The default build excludes diagnostics and `tests/unused/`. |
 | `--inputs FILE [FILE ...]` | Select C sources by path, mutually exclusive with `-c`. Quote each path containing spaces once. |
 | `--build-dir DIR` | Choose the whole output root (default `build/`). |
 | `--force` | Rerun the selected build graph, including verification. |
@@ -76,6 +76,8 @@ The project defines three Pixi tasks. Use `-h` or `--help` on any task.
 | `--image-name NAME` | Set the internal deployment image name. Archive filenames follow the program stem. |
 
 Each successful program has a machine-readable `index.toml`, a single human-readable `report.md`, and its original C file. Its `objects/` directory holds relocatable objects. Its `containers/` directory holds the selected firmware-bound deployments. The report groups built modes by architecture (eBPF and RV32IMC), with the source, machine descriptions, instruction bytes, disassembly, and build steps. See the [program artifact reference](docs/artifacts.md).
+
+The default build includes the seven EXB2 compute benchmarks and five networking programs. See the [benchmark contracts and source history](docs/benchmarks.md).
 
 ## Verification and Release archives
 

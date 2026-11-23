@@ -214,90 +214,53 @@ fn index_map_references(
     obj_path: &PathBuf,
     meta: &xpost_elf::ImageMetadataV0,
 ) -> Result<Vec<u8>> {
-    use object::{Object, ObjectSection, ObjectSymbol};
-
     let data = fs::read(obj_path).with_context(|| format!("read {}", obj_path.display()))?;
     let file = object::File::parse(&*data).context("parse bpf object")?;
 
-    let order: Vec<String> = meta
-        .maps
-        .iter()
-        .map(|m| m.name.as_str().to_string())
-        .collect();
-    if order.is_empty() {
-        // Nothing to resolve. Leaving the image untouched is right: a program
-        // without maps cannot need one.
-        return Ok(image.to_vec());
+    let mut sections = file
+        .sections()
+        .filter(|section| matches!(section.name(), Ok("xdp" | "xdp1")) && section.size() != 0);
+    let section = sections.next().context("object has no XDP code")?;
+    if sections.next().is_some() || section.data()? != image {
+        bail!("image must match the object's single XDP section");
+    }
+    let mut out = image.to_vec();
+    for (offset, reloc) in section.relocations() {
+        let object::RelocationTarget::Symbol(index) = reloc.target() else {
+            bail!("unsupported XDP relocation target at {offset:#x}");
+        };
+        let symbol = file.symbol_by_index(index)?;
+        let name = symbol.name()?;
+        let is_map = symbol
+            .section_index()
+            .and_then(|index| file.section_by_index(index).ok())
+            .is_some_and(|section| matches!(section.name(), Ok("maps" | ".maps")));
+        if !is_map {
+            bail!("unresolved XDP relocation at {offset:#x} to {name:?}");
+        }
+        let idx = meta
+            .maps
+            .iter()
+            .position(|m| m.name.as_str() == name)
+            .with_context(|| {
+                format!("XDP map reference {name:?} at {offset:#x} has no container binding")
+            })?;
+        let at = usize::try_from(offset)?;
+        let end = at
+            .checked_add(16)
+            .context("map relocation offset overflow")?;
+        let lddw = out
+            .get_mut(at..end)
+            .context("map relocation outside XDP image")?;
+        if at % 8 != 0 || lddw[0] != 0x18 || lddw[8] != 0 {
+            bail!("map relocation at {offset:#x} does not target an lddw");
+        }
+        lddw[4..8].copy_from_slice(&(idx as u32).to_le_bytes());
+        lddw[12..16].fill(0);
+        // src = 1 marks the immediate as a map index.
+        lddw[1] = (lddw[1] & 0x0f) | 0x10;
     }
 
-    // The program section holds the instructions. `--only-section` extracted it
-    // before this call, so its first instruction is offset zero.
-    let mut out = image.to_vec();
-    let mut patched = 0usize;
-    // Relocations hang off the section they apply to, not off the `.rel*`
-    // section itself: `Section::relocations` reads the latter. So the walk is
-    // over program sections, and the filter is "a section whose name marks it as
-    // XDP code".
-    for section in file.sections() {
-        let Ok(section_name) = section.name() else {
-            continue;
-        };
-        if !(section_name == "xdp" || section_name.starts_with("xdp")) {
-            continue;
-        }
-        let relocs = section.relocations();
-        for (offset, reloc) in relocs {
-            // The relocation's target symbol is the map's name in the object.
-            // The symbol is the identity; the relocation kind is whatever the
-            // object crate maps `R_BPF_64_64` to, which is not a value this
-            // code should depend on.
-            let symbol = match reloc.target() {
-                object::RelocationTarget::Symbol(sym) => sym,
-                _ => continue,
-            };
-            let name = match file
-                .symbol_by_index(symbol)
-                .and_then(|s| Ok(s.name()?.to_string()))
-            {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            let Some(idx) = order.iter().position(|m| m == &name) else {
-                // A relocation to something that is not a map in this image: a
-                // map the container omits (ring buffer, for example). Skipping it
-                // is right, because the program cannot reach it either.
-                eprintln!(
-                    "xpost-mcu-elf: reloc at {offset:#x} -> `{name}`, not a recorded map; skipped"
-                );
-                continue;
-            };
-            let at = offset as usize;
-            if at + 16 > out.len() {
-                bail!(
-                    "relocation at {offset:#x} is past the image ({} bytes)",
-                    out.len()
-                );
-            }
-            if out[at] != 0x18 {
-                bail!(
-                    "relocation at {offset:#x} is not an lddw (opcode {:#04x})",
-                    out[at]
-                );
-            }
-            out[at + 4..at + 8].copy_from_slice(&(idx as u32).to_le_bytes());
-            out[at + 12..at + 16].copy_from_slice(&0u32.to_le_bytes());
-            // src = 1 marks "this immediate is a map index", which the loader
-            // uses to tell a map reference from an ordinary constant.
-            out[at + 1] |= 1 << 4;
-            patched += 1;
-        }
-    }
-    if patched == 0 {
-        bail!(
-            "no map relocations found for {}; the image carries {order:?} but no reference to them",
-            obj_path.display()
-        );
-    }
     Ok(out)
 }
 

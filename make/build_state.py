@@ -42,7 +42,7 @@ def parse_depfile(text: str) -> list[str]:
     separator = re.search(r":(?=\s|$)", text)
     if separator is None:
         raise LayoutError("invalid Clang depfile")
-    rest = text[separator.end():]
+    rest = text[separator.end() :]
     paths, current = [], []
     escaped = False
     for char in rest:
@@ -188,8 +188,6 @@ def reconcile(
     root: Path,
     program: str,
     hidden: tuple[str, ...] = (),
-    failure: str = "",
-    attempted: tuple[str, ...] = (),
 ) -> dict:
     """Update selection from current bytes, leaving diagnostics in the work directory."""
     states = {mode: state_path(root, program, mode) for mode in PRIVATE_MODES}
@@ -226,23 +224,28 @@ def reconcile(
         index_path.unlink(missing_ok=True)
         report.unlink(missing_ok=True)
     else:
-        modes = tuple(mode for mode in MODES if mode not in reasons and mode not in hidden)
+        modes = tuple(
+            mode for mode in MODES if mode not in reasons and mode not in hidden
+        )
         before = index_path.read_bytes() if index_path.exists() else None
         write_index(index_path, make_index(index_path.parent, program, modes))
         if before != index_path.read_bytes():
             report.unlink(missing_ok=True)
-    diagnostics = states["bpf"].parent.parent / "diagnostics.json"
-    old = read_state(diagnostics) if diagnostics.is_file() else {}
-    for mode, reason in reasons.items():
-        if states[mode].is_file() or (failure and mode in attempted):
-            old[mode] = failure if reason == "no successful build" else reason
-    for mode in states.keys() - reasons.keys():
-        old.pop(mode, None)
-    if old:
-        write_if_changed(diagnostics, (json.dumps(old, indent=2) + "\n").encode())
-    else:
-        diagnostics.unlink(missing_ok=True)
     return reasons
+
+
+def update_diagnostic(root: Path, program: str, stage: str, reason: str | None) -> None:
+    """Keep the last failure of each attempted stage until that stage succeeds."""
+    path = state_path(root, program, "bpf").parent.parent / "diagnostics.json"
+    diagnostics = read_state(path) if path.is_file() else {}
+    if reason is None:
+        diagnostics.pop(stage, None)
+    else:
+        diagnostics[stage] = reason
+    if diagnostics:
+        write_if_changed(path, (json.dumps(diagnostics, indent=2) + "\n").encode())
+    else:
+        path.unlink(missing_ok=True)
 
 
 def render_reports(
@@ -279,7 +282,9 @@ def _render_reports(root: Path, program: str, report: Path, modes, force: bool) 
         elif modes is not None:
             raise LayoutError(f"{program}/{mode}: {reason}")
     if modes is None and not force and report.is_file():
-        newest = max(state_path(root, program, mode).stat().st_mtime_ns for mode in selected)
+        newest = max(
+            state_path(root, program, mode).stat().st_mtime_ns for mode in selected
+        )
         if report.stat().st_mtime_ns >= newest:
             return
     sections = []
@@ -298,7 +303,9 @@ def _render_reports(root: Path, program: str, report: Path, modes, force: bool) 
             meta, image = parse_container(container.read_bytes())
             slot = meta.slot_address
             if mode == "llvm-aot":
-                code_sections = executable_sections(Path(state["linked_elf"]).read_bytes())
+                code_sections = executable_sections(
+                    Path(state["linked_elf"]).read_bytes()
+                )
                 for code in code_sections:
                     offset = code.address - slot
                     if (

@@ -40,7 +40,7 @@ An explicit request to publish the current `nan-mu/libbpf-mcu` `main` authorizes
 
 1. **Pin and build.** Confirm the destination and authenticated account with `gh repo view nan-mu/libbpf-mcu --json nameWithOwner` and `gh auth status --hostname github.com`. Fetch `main`, record its full SHA, and create a fresh detached worktree at that SHA with an empty `build/`. Initialize and build the PREVAIL submodule at the revision pinned by this commit, or point `PREVAIL` to a verifier built from that same revision. See the [build prerequisites](../README.md#prerequisites). From that worktree run **`pixi run build` without arguments**. Wait for its exit status. A nonzero status (including a PREVAIL rejection) ends the entire release attempt before tagging or uploading. Individual programs may still have completed locally.
 2. **Discover the outputs.** Run `pixi run python make/layout.py verify --build-dir build` and enumerate every `build/<program>/index.toml` from this run. Each archive contains `index.toml`, `report.md`, `source.path`, `bpf.path`, every `mode[].elf.path`, and each supplied `mode[].object.path`. Check that these are exactly the regular files under the program root, with no symlinks. The archive starts inside that root. The build root’s private `.ninja/` stays outside the program directories.
-3. **Create and check every archive locally.** Create a fresh staging directory outside the checkout. For each program use 7-Zip to create `<program>.7z` from its directory. Extract each archive into its own empty directory, verify the extracted index, and compare the full relative file set and all file bytes (including the report and index) with the build output. A failure here stops the release. Retain the originals and their SHA-256 values together with the pinned SHA and archive names for retries.
+3. **Create and check every archive locally.** Create a fresh staging directory outside the checkout. For each program use 7-Zip to create `<program>.7z` from its directory. Extract each archive into its own empty directory, verify the extracted index, and compare the full relative file set and all file bytes (including the report and index) with the build output. A failure here stops the release. Record each stem, local archive path, asset name and file SHA-256 together with the pinned commit. Retain the verified originals for retries.
 
    For example, in `build/just_tx/`, with `$archive` set to the absolute staging path ending in `just_tx.7z` and `$unpacked` to an empty directory:
 
@@ -50,11 +50,33 @@ An explicit request to publish the current `nan-mu/libbpf-mcu` `main` authorizes
    ```
 
    `7z` accepts the same commands. From the checkout root, `pixi run python make/layout.py verify --build-dir "$unpacked"` verifies the extracted machine files.
-4. **Create or resume a draft.** Recheck the remote `main` SHA and the clean worktree. Look up the tags and Releases that already reference this commit, peeling annotated tags. Reuse the matching tag and draft when unambiguous. For a fresh tag, choose the next numeric patch among `v0.1.N`, starting at `v0.1.0`. Create the tag at the pinned SHA. If another writer claims that name first, read the ref and recompute the next available version when it belongs to another commit. Verify the tag target before creating a draft.
+
+   Compute the asset name from the program stem in its index. Stems containing only ASCII letters, digits, underscores and hyphens and starting with a letter or digit keep their local filename. For other stems, use `program-` followed by the lowercase SHA-256 of the UTF-8 stem, then `.7z`. Check the entire batch for duplicate stems, local filenames or asset names. Compare filenames and asset names case-insensitively and stop before creating a tag if they collide.
+
+   ```sh
+   asset=$(pixi run python -c '
+   import hashlib, re, sys
+   stem = sys.argv[1]
+   if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", stem):
+       stem = "program-" + hashlib.sha256(stem.encode("utf-8")).hexdigest()
+   print(stem + ".7z")
+   ' "$program")
+   ```
+
+   The stem `probe#1` keeps the local file `probe#1.7z`. The computed asset name uses the digest form, which avoids GitHub filename normalization. The SHA-256 in the upload ledger is computed over the 7z bytes.
+4. **Create or resume a draft.** Hold a lock for this repository on the publishing machine through draft discovery, upload and publication. Recheck the remote `main` SHA and the clean worktree. Look up the tags and Releases that already reference this commit, peeling annotated tags. Reuse the matching tag and draft when unambiguous. For a fresh tag, choose the next numeric patch among `v0.1.N`, starting at `v0.1.0`. Create the tag at the pinned SHA. If another writer claims that name first, read the ref and recompute the next available version when it belongs to another commit. Verify the tag target before creating a draft.
 
    ```sh
    gh api -X POST repos/nan-mu/libbpf-mcu/git/refs -f ref="refs/tags/$tag" -f sha="$sha"
    gh release create "$tag" -R nan-mu/libbpf-mcu --verify-tag --draft --generate-notes
    ```
 
-5. **Upload and publish.** Upload each verified archive to the draft with `gh release upload "$tag" "$archive" -R nan-mu/libbpf-mcu`. List every asset using `gh api --paginate --slurp "repos/nan-mu/libbpf-mcu/releases/$release_id/assets"`. On retry, compare against the original local archive bytes and upload only missing files. If a name, state or digest conflicts, leave the draft for inspection. Publish only after the full set matches, every asset has state `uploaded` and digest `sha256:<local SHA-256>`, and the tag and remote `main` still resolve to the pinned commit. Use `gh release edit "$tag" -R nan-mu/libbpf-mcu --draft=false`, read back the Release and assets by numeric Release ID, and return the Release URL, tag, commit and verified asset names and digests. For an already public matching Release, verify the existing tag and assets and return its URL. [GitHub Release API](https://docs.github.com/en/rest/releases/releases) · [GitHub asset digests](https://docs.github.com/en/rest/releases/assets) · [GitHub CLI release commands](https://cli.github.com/manual/gh_release)
+5. **Upload and publish.** Read the draft's numeric `release_id` and list all of its assets using `gh api --paginate --slurp "repos/nan-mu/libbpf-mcu/releases/$release_id/assets"`. Compare against the verified upload ledger. Upload only missing files, using the API's separate filename and request body. This passes paths containing `#` literally. The CLI's `gh release upload` treats `#` as an asset label separator.
+
+   ```sh
+   gh api --hostname github.com -X POST \
+     "https://uploads.github.com/repos/nan-mu/libbpf-mcu/releases/$release_id/assets" \
+     -H 'Content-Type: application/x-7z-compressed' --input "$archive" -f "name=$asset"
+   ```
+
+   On retry, check the original local bytes against the ledger and reuse matching uploads. An extra asset, an unexpected upload state or a digest conflict stops publication. After uploading, list all assets again. Publish only if the sets match, every asset is `uploaded` with digest `sha256:<local SHA-256>`, and the tag and remote `main` still resolve to the pinned commit. Run `gh release edit "$tag" -R nan-mu/libbpf-mcu --draft=false`, read back the Release and assets by numeric Release ID, and return the Release URL, tag, commit and verified asset names and digests. For an already public Release, verify the existing tag and assets and return its URL. [GitHub Release API](https://docs.github.com/en/rest/releases/releases) · [GitHub asset API](https://docs.github.com/en/rest/releases/assets) · [GitHub CLI request options](https://cli.github.com/manual/gh_api) · [GitHub CLI upload arguments](https://cli.github.com/manual/gh_release_upload)

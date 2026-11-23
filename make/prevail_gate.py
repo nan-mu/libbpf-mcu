@@ -13,6 +13,7 @@ from typing import Literal
 
 MAKE_DIR = Path(__file__).resolve().parent
 ROOT = MAKE_DIR.parent
+VERIFY_TIMEOUT = 300
 
 XdpSection = Literal["xdp", "xdp1"]
 
@@ -57,52 +58,64 @@ def select_program(listing: str) -> ProgramRef:
     return found[0]
 
 
+class PrevailError(ValueError):
+    pass
+
+
 def _run_prevail(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=VERIFY_TIMEOUT
+        )
+    except subprocess.TimeoutExpired as exc:
+        detail = (exc.stdout or b"") + (exc.stderr or b"")
+        raise PrevailError(
+            f"PREVAIL timed out after {VERIFY_TIMEOUT}s: {detail.decode(errors='replace').strip()}"
+        ) from exc
     except OSError as exc:
-        sys.stderr.write(f"{exc}\n")
-        raise SystemExit(1) from exc
-    if proc.stderr:
-        sys.stderr.write(proc.stderr)
-        if not proc.stderr.endswith("\n"):
-            sys.stderr.write("\n")
-    return proc
+        raise PrevailError(f"cannot execute PREVAIL: {exc}") from exc
 
 
 def examine(obj: Path, verifier: Path | None = None) -> ProgramRef:
     """List, select the one xdp or xdp1 program, and run the checker."""
     verifier = verifier or prevail_bin()
     listed = _run_prevail([str(verifier), "-l", str(obj)])
-    if listed.returncode != 0:
-        print(listed.stdout, file=sys.stderr, end="")
-        raise SystemExit(1)
-    program = select_program(listed.stdout)
-    checked = _run_prevail(
-        [
-            str(verifier),
-            "--stack-size",
-            "512",
-            "--section",
-            program.section,
-            "--function",
-            program.function,
-            str(obj),
-        ]
-    )
-    if checked.returncode != 0:
-        print(checked.stdout, file=sys.stderr, end="")
-        raise SystemExit(1)
+    if listed.returncode:
+        raise PrevailError(
+            f"PREVAIL could not list programs: {(listed.stdout + listed.stderr).strip()}"
+        )
+    try:
+        program = select_program(listed.stdout)
+    except SystemExit as exc:
+        raise PrevailError(
+            f"PREVAIL expected one XDP entry: {listed.stdout.strip()}"
+        ) from exc
     label = program.section
     if program.function != program.section:
         label += "/" + program.function
+    try:
+        checked = _run_prevail(
+            [
+                str(verifier),
+                "--stack-size",
+                "512",
+                "--section",
+                program.section,
+                "--function",
+                program.function,
+                str(obj),
+            ]
+        )
+    except PrevailError as exc:
+        raise PrevailError(f"{label}: {exc}") from exc
+    detail = (checked.stdout + checked.stderr).strip()
+    if checked.returncode:
+        raise PrevailError(f"PREVAIL exited {checked.returncode} for {label}: {detail}")
     verdict = re.compile(
         rf"PASS: {re.escape(label)}(?: \(terminates within [0-9]+ loop iterations\))?"
     )
     if not any(verdict.fullmatch(line) for line in checked.stdout.splitlines()):
-        print(f"PREVAIL did not report PASS for {label}", file=sys.stderr)
-        print(checked.stdout, file=sys.stderr, end="")
-        raise SystemExit(1)
+        raise PrevailError(f"PREVAIL did not report PASS for {label}: {detail}")
     return program
 
 
@@ -110,7 +123,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="prevail_gate")
     parser.add_argument("--obj", type=Path, required=True)
     args = parser.parse_args()
-    examine(args.obj)
+    try:
+        examine(args.obj)
+    except PrevailError as exc:
+        sys.exit(str(exc))
 
 
 if __name__ == "__main__":

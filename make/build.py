@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-from build_state import PRIVATE_MODES, prepare_program, read_state, reconcile, render_reports
+from build_state import (
+    PRIVATE_MODES,
+    prepare_program,
+    read_state,
+    reconcile,
+    render_reports,
+    update_diagnostic,
+)
 from layout import (
     ROOT,
     LayoutError,
@@ -92,6 +101,10 @@ def resolve_sources(inputs: list[str] | None, crate: str | None) -> list[Path]:
             path
             for path in (ROOT / "tests").rglob("*.c")
             if "unused" not in path.relative_to(ROOT / "tests").parts
+            and (
+                crate is not None
+                or "diagnostics" not in path.relative_to(ROOT / "tests").parts
+            )
             and (crate is None or path.stem == crate)
         )
     if not sources:
@@ -265,6 +278,7 @@ def write_build_ninja(
             "xpost_elf.py",
         )
     ] + [template]
+    compiler_env = {key: os.environ.get(key) for key in ("CPATH", "C_INCLUDE_PATH")}
     edges, targets = [], []
     for src in sources:
         name = src.stem
@@ -286,7 +300,12 @@ def write_build_ninja(
             cfg = None
             depfile = None
             if item == "bpf":
-                cfg = {"clang": CLANG, "flags": BPF_FLAGS, "objdump": args.objdump}
+                cfg = {
+                    "clang": CLANG,
+                    "flags": BPF_FLAGS,
+                    "objdump": args.objdump,
+                    "compiler_env": compiler_env,
+                }
                 outputs.extend([raw_obj, raw_src])
                 deps.extend([src, Path(CLANG)])
                 depfile = state.with_name("headers.d")
@@ -294,7 +313,13 @@ def write_build_ninja(
                 cfg = {"verifier": str(prevail_bin())}
                 outputs.extend([bpf, snapshot])
                 deps.extend(
-                    [bpf_state, raw_obj, raw_src, prevail_bin(), MAKE / "prevail_gate.py"]
+                    [
+                        bpf_state,
+                        raw_obj,
+                        raw_src,
+                        prevail_bin(),
+                        MAKE / "prevail_gate.py",
+                    ]
                 )
             else:
                 cfg = dict(
@@ -305,7 +330,7 @@ def write_build_ninja(
                 )
                 deps.extend([Path(cfg["firmware"]), Path(cfg["tool"])])
                 if item in ("llvm-aot", "ebpf-native"):
-                    cfg.update(clang=CLANG, flags=MCU_FLAGS)
+                    cfg.update(clang=CLANG, flags=MCU_FLAGS, compiler_env=compiler_env)
                     linker = state.with_name("slot.ld")
                     write_if_changed(
                         linker,
@@ -321,16 +346,20 @@ def write_build_ninja(
                     cfg["linker"] = str(linker)
                     deps.extend([src, gate, Path(CLANG), linker])
                     depfile = state.with_name("headers.d")
-                    outputs.extend([
-                        state.with_name(f"{name}_rv32.o"),
-                        state.with_name(f"{name}_rv32.debug.elf"),
-                    ])
+                    outputs.extend(
+                        [
+                            state.with_name(f"{name}_rv32.o"),
+                            state.with_name(f"{name}_rv32.debug.elf"),
+                        ]
+                    )
                     if item == "llvm-aot":
-                        outputs.extend([
-                            state.with_name(f"{name}_rv32.bin"),
-                            native_object_path(root, name),
-                            container_path(root, name, item),
-                        ])
+                        outputs.extend(
+                            [
+                                state.with_name(f"{name}_rv32.bin"),
+                                native_object_path(root, name),
+                                container_path(root, name, item),
+                            ]
+                        )
                         deps.append(Path(cfg["objcopy"]))
                 elif item == "ebpf":
                     deps.extend(
@@ -427,6 +456,8 @@ def build(root: Path, sources: list[Path], mode: str, args) -> None:
                     firmware_digest=firmware_digest,
                 )
             path = write_build_ninja(root, sources, mode, args, backend)
+            for src in sources:
+                update_diagnostic(root, src.stem, f"preflight/{mode}", None)
             force_modes = {mode, "bpf", "prevail"}
             if mode == "ebpf":
                 force_modes.add("ebpf-native")
@@ -436,7 +467,13 @@ def build(root: Path, sources: list[Path], mode: str, args) -> None:
                     receipt = state_path(root, src.stem, item)
                     if item in reasons or (args.force and item in force_modes):
                         receipt.unlink(missing_ok=True)
-            with (root / ".ninja" / f"{mode}.log").open("w") as log:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                prefix=f"{mode}-",
+                suffix=".log",
+                dir=root / ".ninja",
+                delete=False,
+            ) as log:
                 with subprocess.Popen(
                     ["ninja", "-f", str(path), "-k", "0"],
                     cwd=root,
@@ -458,14 +495,12 @@ def build(root: Path, sources: list[Path], mode: str, args) -> None:
                 target = "prevail" if mode == "bpf" else mode
                 for src in sources:
                     state_path(root, src.stem, target).unlink(missing_ok=True)
+                    update_diagnostic(root, src.stem, f"preflight/{mode}", failure)
             raise
         finally:
             final_errors = []
             for program in sorted(programs):
-                reasons = reconcile(
-                    root, program, failure=failure,
-                    attempted=attempted if program in names else (),
-                )
+                reasons = reconcile(root, program)
                 if program in names and not failure:
                     for step in attempted:
                         if step in reasons:
