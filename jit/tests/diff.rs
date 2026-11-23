@@ -206,6 +206,30 @@ fn unaligned_word_roundtrip() {
 }
 
 #[test]
+fn unaligned_doubleword_load_can_replace_its_base() {
+    for off in [-2049, -1, 2041, 2047] {
+        let base = 0x1800;
+        let start = (base + i32::from(off)) as usize;
+        let prog = [
+            insn(CLASS_ST | MODE_MEM | SIZE_DW, 1, 0, off, -3),
+            insn(CLASS_LDX | MODE_MEM | SIZE_DW, 1, 1, off, 0),
+            insn(CLASS_ALU64 | ALU_MOV | SRC_X, 0, 1, 0, 0),
+            exit(),
+        ];
+        let report = compare(
+            &prog,
+            &HashMap::new(),
+            &HashMap::new(),
+            &vec![0; MEM_BYTES],
+            base as u32,
+            &[start..start + 8],
+        );
+        assert_eq!(report.status, "pass", "offset {off}: {}", report.detail);
+        assert_eq!(report.r0, Some((-3_i64) as u64));
+    }
+}
+
+#[test]
 fn frame_is_592_bytes() {
     assert_eq!(xpost_jit::frame_bytes(), 592);
 }

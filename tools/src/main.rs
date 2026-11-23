@@ -100,6 +100,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Compare an interpreter container with the original BPF object's instructions and maps.
+    CheckEbpf { file: PathBuf, obj: PathBuf },
 }
 
 fn parse_u32(s: &str) -> Result<u32, String> {
@@ -191,8 +193,8 @@ fn pack(args: Cmd) -> Result<()> {
     // lookup silently misses.
     if map_index {
         let obj = obj.context("--map-index needs --obj <bpf.o> to read relocations")?;
-        let patched = index_map_references(&image_bytes, &obj, &meta)?;
-        image_bytes = patched;
+        let names: Vec<_> = meta.maps.iter().map(|m| m.name.as_str()).collect();
+        image_bytes = index_map_references(&image_bytes, &obj, &names)?.0;
     }
     let blob = build_container(&image_bytes, &meta, Some(slot_length))
         .map_err(|e| anyhow::anyhow!("build_container: {e:?}"))?;
@@ -209,11 +211,17 @@ fn pack(args: Cmd) -> Result<()> {
 /// container metadata uses, because that is the order the loader reads its
 /// binding table in. Getting the two orders out of step would silently point a
 /// reference at the wrong map, so both use the same metadata.
-fn index_map_references(
+struct MapBinding<'a> {
+    offset: usize,
+    index: usize,
+    name: &'a str,
+}
+
+fn index_map_references<'a>(
     image: &[u8],
     obj_path: &PathBuf,
-    meta: &xpost_elf::ImageMetadataV0,
-) -> Result<Vec<u8>> {
+    map_names: &[&'a str],
+) -> Result<(Vec<u8>, Vec<MapBinding<'a>>)> {
     let data = fs::read(obj_path).with_context(|| format!("read {}", obj_path.display()))?;
     let file = object::File::parse(&*data).context("parse bpf object")?;
 
@@ -225,6 +233,7 @@ fn index_map_references(
         bail!("image must match the object's single XDP section");
     }
     let mut out = image.to_vec();
+    let mut bindings = Vec::new();
     for (offset, reloc) in section.relocations() {
         let object::RelocationTarget::Symbol(index) = reloc.target() else {
             bail!("unsupported XDP relocation target at {offset:#x}");
@@ -238,10 +247,9 @@ fn index_map_references(
         if !is_map {
             bail!("unresolved XDP relocation at {offset:#x} to {name:?}");
         }
-        let idx = meta
-            .maps
+        let idx = map_names
             .iter()
-            .position(|m| m.name.as_str() == name)
+            .position(|&map| map == name)
             .with_context(|| {
                 format!("XDP map reference {name:?} at {offset:#x} has no container binding")
             })?;
@@ -259,9 +267,47 @@ fn index_map_references(
         lddw[12..16].fill(0);
         // src = 1 marks the immediate as a map index.
         lddw[1] = (lddw[1] & 0x0f) | 0x10;
+        bindings.push(MapBinding {
+            offset: at,
+            index: idx,
+            name: map_names[idx],
+        });
     }
 
-    Ok(out)
+    Ok((out, bindings))
+}
+
+fn check_ebpf(container: &PathBuf, obj: &PathBuf) -> Result<()> {
+    let bytes = fs::read(container)?;
+    let ScanOutcome::Ok(parsed) = scan_at(&mut bytes.as_slice(), 0) else {
+        bail!("invalid interpreter container");
+    };
+    let original = fs::read(obj)?;
+    let file = object::File::parse(&*original)?;
+    let section = file
+        .sections()
+        .find(|s| matches!(s.name(), Ok("xdp" | "xdp1")) && s.size() != 0)
+        .context("object has no XDP code")?;
+    let names: Vec<_> = parsed.maps.iter().map(|m| m.name.as_str()).collect();
+    let (mut image, bindings) = index_map_references(section.data()?, obj, &names)?;
+    if bytes[parsed.image_offset..parsed.image_offset + parsed.image_size] != image {
+        bail!("interpreter image differs from the map-indexed BPF instructions");
+    }
+    rbpf::EbpfVmMbuff::verify(&image).map_err(|e| anyhow::anyhow!("rBPF verifier: {e:?}"))?;
+    let mut evidence = Vec::new();
+    for binding in bindings {
+        let at = binding.offset;
+        let address = parsed.maps[binding.index].vma;
+        image[at + 1] &= 0x0f;
+        image[at + 4..at + 8].copy_from_slice(&address.to_le_bytes());
+        evidence.push(serde_json::json!({
+            "offset": at, "map": binding.name, "index": binding.index, "vma": address
+        }));
+    }
+    rbpf::EbpfVmMbuff::verify(&image)
+        .map_err(|e| anyhow::anyhow!("rBPF verifier after map binding: {e:?}"))?;
+    println!("{}", serde_json::json!(evidence));
+    Ok(())
 }
 
 fn pack_jit_cmd(args: Cmd) -> Result<()> {
@@ -311,6 +357,7 @@ fn run(args: Args) -> Result<()> {
     match args.cmd {
         Cmd::Symbol { firmware, name } => dump_symbol(&firmware, &name),
         Cmd::MemMap { firmware } => dump_mem_map(&firmware),
+        Cmd::CheckEbpf { file, obj } => check_ebpf(&file, &obj),
         pack_cmd @ Cmd::Pack { .. } => pack(pack_cmd),
         jit_cmd @ Cmd::PackJit { .. } => pack_jit_cmd(jit_cmd),
         Cmd::Scan { file, json } => scan_file(&file, json),

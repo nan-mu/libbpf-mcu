@@ -253,6 +253,18 @@ def check_firmware(cfg):
         raise LayoutError(f"firmware changed during build: {cfg['firmware']}")
 
 
+def check_deployment(cfg: dict, data: bytes):
+    meta, payload = parse_container(data)
+    if (meta.slot_address, meta.helper_address) != (cfg["slot_addr"], cfg["helper_addr"]):
+        raise LayoutError("container target differs from the linked firmware")
+    if len(payload) > cfg["slot_len"]:
+        raise LayoutError(f"image is {len(payload)} bytes but target slot holds {cfg['slot_len']}")
+    cold_capacity = cfg["firmware_provenance"].get("cold_capacity")
+    if cold_capacity is not None and len(data) > cold_capacity:
+        raise LayoutError(f"container is {len(data)} bytes but cold slot holds {cold_capacity}")
+    return meta, payload
+
+
 def pack_args(cfg, image, maps, debug):
     return [
         cfg["tool"],
@@ -276,6 +288,31 @@ def pack_args(cfg, image, maps, debug):
     ]
 
 
+def link_native(generation, cfg, obj: Path, debug: Path) -> None:
+    run(
+        generation,
+        "link",
+        [
+            cfg["clang"], "-target", "riscv32-unknown-none-elf", "-nostdlib",
+            "-fuse-ld=lld", "-Xlinker", "-T", "-Xlinker", cfg["linker"],
+            obj, "-o", debug,
+        ],
+    )
+
+
+def pack_native(generation, cfg, bpf: Path, debug: Path, image: Path) -> bytes:
+    run(generation, "convert", [cfg["objcopy"], "-O", "binary", debug, image])
+    maps = image.with_name("maps.toml")
+    write_maps(generation, bpf, maps)
+    packed = image.with_name("container.elf")
+    run(generation, "pack", [*pack_args(cfg, image, maps, debug), "-o", packed])
+    data = packed.read_bytes()
+    _meta, payload = check_deployment(cfg, data)
+    if payload != image.read_bytes():
+        raise LayoutError("AOT payload differs from the linked image")
+    return data
+
+
 def build_native(
     root: Path, mode: str, src: Path, cfg: dict, config: Path, state: Path
 ) -> None:
@@ -295,39 +332,14 @@ def build_native(
         raise LayoutError(
             f"{src} or its program headers changed during MCU compilation"
         )
-    run(
-        generation,
-        "link",
-        [
-            cfg["clang"],
-            "-target",
-            "riscv32-unknown-none-elf",
-            "-nostdlib",
-            "-fuse-ld=lld",
-            "-Xlinker",
-            "-T",
-            "-Xlinker",
-            cfg["linker"],
-            obj,
-            "-o",
-            debug,
-        ],
-    )
+    link_native(generation, cfg, obj, debug)
     files = [obj, debug]
     facts = {"linked_elf": str(debug)}
     if mode == "llvm-aot":
         image = out / f"{name}_rv32.bin"
-        run(generation, "convert", [cfg["objcopy"], "-O", "binary", debug, image])
+        data = pack_native(generation, cfg, bpf_path(root, name), debug, image)
         files.append(image)
         facts.update(image=str(image), slot=cfg["slot_addr"])
-        maps = state.with_name("maps.toml")
-        write_maps(generation, bpf_path(root, name), maps)
-        packed = state.with_name("container.elf")
-        run(generation, "pack", [*pack_args(cfg, image, maps, debug), "-o", packed])
-        data = packed.read_bytes()
-        _meta, payload = parse_container(data)
-        if payload != image.read_bytes():
-            raise LayoutError("AOT payload differs from the linked image")
         check_firmware(cfg)
         container = container_path(root, name, mode)
         public_obj = native_object_path(root, name)
@@ -354,7 +366,7 @@ def build_ebpf(root: Path, program: str, cfg: dict, config: Path, state: Path) -
 
     obj = bpf_path(root, program)
     maps = state.with_name("maps.toml")
-    generation = []
+    generation = list(cfg["firmware_calls"])
     write_maps(generation, obj, maps)
     basis = state_path(root, program, "ebpf-native")
     debug = read_state(basis)["linked_elf"]
@@ -383,7 +395,7 @@ def build_ebpf(root: Path, program: str, cfg: dict, config: Path, state: Path) -
         ],
     )
     data = packed.read_bytes()
-    _meta, payload = parse_container(data)
+    _meta, payload = check_deployment(cfg, data)
     if payload != image.read_bytes():
         raise LayoutError("rBPF payload differs from the rewritten instructions")
     check_firmware(cfg)
@@ -399,47 +411,40 @@ def build_ebpf(root: Path, program: str, cfg: dict, config: Path, state: Path) -
     )
 
 
+def pack_jit(generation, cfg, obj: Path, stage: Path) -> tuple[bytes, int]:
+    maps = stage.with_name("maps.toml")
+    write_maps(generation, obj, maps)
+    run(
+        generation,
+        "host JIT",
+        [
+            cfg["tool"], "pack-jit", "--firmware", cfg["firmware"],
+            "--obj", obj, "--maps", maps, "--name", cfg["image_name"],
+            "--slot-address", hex(cfg["slot_addr"]),
+            "--slot-length", hex(cfg["slot_len"]), "--stage", stage,
+        ],
+    )
+    info = json.loads((stage / "code.json").read_text())
+    data = (stage / "container.elf").read_bytes()
+    _meta, payload = check_deployment(cfg, data)
+    if payload != (stage / "jit.bin").read_bytes():
+        raise LayoutError("JIT payload differs from the linked words")
+    generation.extend(info["generation"])
+    return data, info["code_len"]
+
+
 def build_jit(root: Path, program: str, cfg: dict, config: Path, state: Path) -> None:
     obj = bpf_path(root, program)
-    maps = state.with_name("maps.toml")
     generation = list(cfg["firmware_calls"])
-    write_maps(generation, obj, maps)
     stage = state.parent / ".jit-stage"
     shutil.rmtree(stage, ignore_errors=True)
     container = container_path(root, program, "jit")
     image = state.with_name("jit.bin")
     try:
-        run(
-            generation,
-            "host JIT",
-            [
-                cfg["tool"],
-                "pack-jit",
-                "--firmware",
-                cfg["firmware"],
-                "--obj",
-                obj,
-                "--maps",
-                maps,
-                "--name",
-                cfg["image_name"],
-                "--slot-address",
-                hex(cfg["slot_addr"]),
-                "--slot-length",
-                hex(cfg["slot_len"]),
-                "--stage",
-                stage,
-            ],
-        )
-        info = json.loads((stage / "code.json").read_text())
-        data = (stage / "container.elf").read_bytes()
-        _meta, payload = parse_container(data)
-        if payload != (stage / "jit.bin").read_bytes():
-            raise LayoutError("JIT payload differs from the linked words")
+        data, code_len = pack_jit(generation, cfg, obj, stage)
         check_firmware(cfg)
         os.replace(stage / "jit.bin", image)
         write_if_changed(container, data)
-        generation.extend(info["generation"])
         record(
             state,
             inputs=[config, cfg["firmware"], cfg["tool"]],
@@ -447,7 +452,7 @@ def build_jit(root: Path, program: str, cfg: dict, config: Path, state: Path) ->
             upstream=[state_path(root, program, "prevail")],
             generation=generation,
             objdump=cfg["objdump"],
-            code_len=info["code_len"],
+            code_len=code_len,
         )
     finally:
         shutil.rmtree(stage, ignore_errors=True)

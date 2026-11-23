@@ -20,8 +20,8 @@ Run commands from this repository's root. The Pixi manifest and lock file target
 - Install Pixi, Ninja, Cargo, and Rust. Install `7zz` or `7z` for packaging. `tools/Cargo.toml` uses Rust edition 2024, and `jit/Cargo.toml` uses edition 2021. Use a toolchain that supports these editions and their dependencies. These manifests declare no `rust-version`, and the repository does not pin a Rust toolchain.
 - Install LLVM with the BPF and RISC-V backends, LLD, `llvm-objcopy`, and `llvm-objdump`. Apple Clang does not supply the required BPF backend. The build prefers Homebrew LLVM for Clang and has no enforced LLVM minimum version. Set `LIBBPF_MCU_OBJCOPY` or `LIBBPF_MCU_OBJDUMP` to select another LLVM executable.
 - Initialize the PREVAIL submodule and build it manually. Every build requires the verifier. The default is `prevail/bin/prevail`; set `PREVAIL` to select a built executable. PREVAIL's own [build instructions](prevail/README.md#building) describe its C++23 compiler and native dependencies.
-- Place the XPOST workspace beside this checkout. `tools/Cargo.toml` resolves `xpost-elf` at `../xpost/xpost-elf` relative to this repository. That crate owns Compact ELF V0 and XPM1 encoding and decoding.
-- Supply an already linked firmware ELF with a `.xpost.mem` XPM1 record for AOT, JIT, and rBPF builds. XPM1 provides the helper dispatcher, code slot, and map table addresses and lengths.
+- Place an XPOST Git checkout beside this checkout, or set `LIBBPF_MCU_XPOST` to its path for the default build. Fetch the pinned revision from the [firmware matrix](docs/artifacts.md#release-firmware) and install its nightly toolchain with `rust-src` and the `riscv32imc-unknown-none-elf` target. Explicit builds and tests resolve `xpost-elf` from the sibling XPOST workspace.
+- For explicit deployment builds, supply a linked firmware ELF with a `.xpost.mem` XPM1 record. XPM1 provides the helper dispatcher, code slot, and table addresses and lengths.
 
 For example, initialize and build PREVAIL after installing its native dependencies:
 
@@ -36,7 +36,7 @@ On macOS, use the Homebrew compiler and include/library configuration described 
 
 ## Build programs
 
-Build and verify all default programs, or select one by source stem:
+Build all 12 release programs in LLVM AOT, rBPF and JIT modes, or select one program for a BPF-only build:
 
 ```bash
 pixi run build
@@ -56,11 +56,11 @@ pixi run build jit --firmware /path/to/firmware.elf -c firewall
 pixi run build rv32imc --engine rbpf --firmware /path/to/firmware.elf -c firewall
 ```
 
-The project defines three Pixi tasks. Use `-h` or `--help` on any task.
+Use `-h` or `--help` on any task.
 
 | Task | Arguments |
 | --- | --- |
-| `build [bpf\|rv32imc\|jit]` | With no target, build BPF by default. Supplying `--firmware` selects `rv32imc` when the target is omitted. Select `jit` explicitly for host JIT. |
+| `build [bpf\|rv32imc\|jit]` | The default builds all three release modes. With `-c` or `--inputs`, the default target is `bpf`. Supplying `--firmware` selects `rv32imc` when the target is omitted. Select `jit` explicitly for host JIT. |
 | `test` | Runs the Python and Rust suites, including PREVAIL negatives and toolchain integration. |
 | `clean` | Removes the default `build/` directory. |
 
@@ -86,7 +86,7 @@ pixi run test
 pixi run python make/layout.py verify --build-dir build
 ```
 
-On an authorized Release, the agent runs `pixi run build` in a fresh worktree at the pinned commit and uses every program directory from that successful build. It creates one `<program>.7z` per directory, verifies the extracted files against the build, and uploads the complete set to the GitHub Release. A failed build stops publication. New default programs are included automatically. See the [publication procedure](docs/artifacts.md#publish-program-artifacts).
+Run `pixi run prepare-release --archive-dir DIR` from a clean worktree to build and verify the complete 12-program batch. The [publication procedure](docs/artifacts.md#publish-program-artifacts) covers the separate authorized upload and retry steps.
 
 ## License
 

@@ -14,7 +14,7 @@ from build import (
     clean_build,
     resolve_sources,
 )
-from layout import LayoutError
+from layout import ROOT, LayoutError
 
 
 def check_image_name(name: str | None) -> str | None:
@@ -43,7 +43,7 @@ def main():
         "target",
         nargs="?",
         choices=("bpf", "rv32imc", "jit"),
-        help="无目标时默认 bpf；传入 --firmware 时默认 rv32imc。",
+        help="无程序或目标选项时构建发布矩阵；指定程序时默认 bpf；传入 --firmware 时默认 rv32imc。",
     )
     inputs = build_parser.add_mutually_exclusive_group()
     inputs.add_argument("--inputs", nargs="+", metavar="FILE", help="一个或多个 C 源文件")
@@ -94,6 +94,12 @@ def main():
     subparsers.add_parser("test")
     args = parser.parse_args()
     if args.command == "build":
+        full = not any(
+            (
+                args.target, args.inputs, args.crate, args.firmware,
+                args.engine, args.slot_symbol, args.image_name,
+            )
+        )
         target = args.target or ("rv32imc" if args.firmware is not None else "bpf")
         if target != "rv32imc" and args.engine is not None:
             build_parser.error("--engine is only available for rv32imc")
@@ -117,7 +123,16 @@ def main():
             else DEFAULT_BUILD_DIR
         )
         try:
-            build(root, resolve_sources(args.inputs, args.crate), mode, args)
+            if full:
+                from release_firmware import PROGRAMS
+
+                sources = resolve_sources(
+                    [str(ROOT / "tests" / "xdp" / f"{name}.c") for name in PROGRAMS],
+                    None,
+                )
+            else:
+                sources = resolve_sources(args.inputs, args.crate)
+            build(root, sources, None if full else mode, args)
         except (OSError, LayoutError) as exc:
             error(str(exc))
             sys.exit(1)
@@ -137,6 +152,7 @@ def main():
             [sys.executable, str(Path(__file__).parent / "test_compact_elf_parity.py")],
             [sys.executable, str(Path(__file__).parent / "test_jit_build.py")],
             [sys.executable, str(Path(__file__).parent / "test_layout.py")],
+            [sys.executable, str(Path(__file__).parent / "test_release.py")],
             [sys.executable, str(Path(__file__).parent / "test_build_state.py")],
         ]
         for crate in ("jit", "tools"):

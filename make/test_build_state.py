@@ -15,10 +15,21 @@ from unittest.mock import patch
 import cli
 
 from layout import ROOT, bpf_path, load_index
+from release_firmware import PROGRAMS
 
 
 class BuildTargetTests(unittest.TestCase):
-    def test_default_discovers_sources_and_builds_bpf_without_firmware(self):
+    def test_default_selects_the_complete_release_build(self):
+        with patch.object(cli, "build") as build:
+            with patch.object(sys, "argv", ["cli", "build"]):
+                cli.main()
+        output, sources, mode, args = build.call_args.args
+        self.assertEqual(output, cli.DEFAULT_BUILD_DIR)
+        self.assertEqual(tuple(src.stem for src in sources), PROGRAMS)
+        self.assertIsNone(mode)
+        self.assertIsNone(args.firmware)
+
+    def test_explicit_bpf_still_discovers_sources_without_firmware(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             selected = root / "tests" / "new-program.c"
@@ -27,7 +38,7 @@ class BuildTargetTests(unittest.TestCase):
             selected.touch()
             excluded.touch()
             with patch("build.ROOT", root), patch.object(cli, "build") as build:
-                with patch.object(sys, "argv", ["cli", "build"]):
+                with patch.object(sys, "argv", ["cli", "build", "bpf"]):
                     cli.main()
             output, sources, mode, args = build.call_args.args
             self.assertEqual((output, sources, mode, args.firmware),

@@ -22,6 +22,7 @@ from build_state import (
     update_diagnostic,
 )
 from layout import (
+    MODES,
     ROOT,
     LayoutError,
     bpf_path,
@@ -138,18 +139,18 @@ def tool_bin_path(build_dir: Path) -> Path:
     return build_dir / ".ninja" / "cargo" / _host_triple() / "release" / "xpost-mcu-elf"
 
 
-def ensure_tool(build_dir: Path) -> Path:
-    """Let Cargo check the Rust tool and its sibling XPOST dependencies."""
+def ensure_tool(build_dir: Path, manifest: Path = TOOLS_MANIFEST) -> Path:
+    """Let Cargo check the Rust tool and its XPOST dependencies."""
 
-    if not TOOLS_MANIFEST.is_file():
-        error(f"tools manifest missing: {TOOLS_MANIFEST}")
+    if not manifest.is_file():
+        error(f"tools manifest missing: {manifest}")
         sys.exit(1)
     out = tool_bin_path(build_dir)
     cmd = [
         "cargo",
         "build",
         "--manifest-path",
-        str(TOOLS_MANIFEST),
+        str(manifest),
         "--release",
         "--locked",
         "--target-dir",
@@ -206,10 +207,7 @@ def load_mem_map_from_firmware(
         sys.exit(1)
 
 
-def apply_slot_symbol(
-    mem: MemMapV0, firmware_elf: Path, tool: Path, name: str, generation: list[dict]
-) -> MemMapV0:
-    """Replace the XPM1 slot with one firmware symbol. Images are not relocatable."""
+def read_symbol(firmware_elf: Path, tool: Path, name: str, generation: list[dict]) -> tuple[int, int]:
     argv = [str(tool), "symbol", str(firmware_elf), name]
     generation.append({"step": "slot symbol", "argv": argv})
     proc = subprocess.run(
@@ -236,8 +234,26 @@ def apply_slot_symbol(
     if addr == 0 or size == 0:
         error(f"symbol {name} has addr={addr:#x} size={size:#x}")
         sys.exit(1)
+    return addr, size
+
+
+def apply_slot_symbol(
+    mem: MemMapV0, firmware_elf: Path, tool: Path, name: str, generation: list[dict]
+) -> MemMapV0:
+    """Select a different slot in the same linked firmware."""
+    addr, size = read_symbol(firmware_elf, tool, name, generation)
     info(f"slot symbol {name} addr={addr:#x} size={size:#x}")
     return replace(mem, slot_addr=addr, slot_len=size)
+
+
+def write_slot_linker(linker: Path, cfg: dict) -> None:
+    write_if_changed(
+        linker,
+        SLOT_LD_TMPL.read_text()
+        .format(slot_index=0, origin=cfg["slot_addr"],
+                length=cfg["slot_len"], helper_base=cfg["helper_addr"])
+        .encode(),
+    )
 
 
 def _ninja(value: str | Path) -> str:
@@ -264,7 +280,7 @@ def _edge(
 
 
 def write_build_ninja(
-    root: Path, sources: list[Path], mode: str, args, backend: dict
+    root: Path, sources: list[Path], selected: tuple[str, ...], args, backends: dict
 ) -> Path:
     template = MAKE / "ninja" / "graph.ninja"
     scripts = [
@@ -289,11 +305,10 @@ def write_build_ninja(
         raw_obj = bpf_state.with_name(f"{name}_bpf.o")
         raw_src = bpf_state.with_name(f"{name}.c")
         modes = ["bpf", "prevail"]
-        if mode == "ebpf":
+        if "ebpf" in selected:
             modes.append("ebpf-native")
-        if mode != "bpf":
-            modes.append(mode)
-        targets.append(gate if mode == "bpf" else state_path(root, name, mode))
+        modes.extend(mode for mode in selected if mode != "bpf")
+        targets.extend(gate if mode == "bpf" else state_path(root, name, mode) for mode in selected)
         for item in modes:
             state = state_path(root, name, item)
             outputs, deps = [state], list(scripts)
@@ -322,8 +337,9 @@ def write_build_ninja(
                     ]
                 )
             else:
+                mode = "ebpf" if item == "ebpf-native" else item
                 cfg = dict(
-                    backend,
+                    backends[name, mode],
                     objdump=args.objdump,
                     objcopy=args.objcopy,
                     image_name=args.image_name or name,
@@ -332,17 +348,7 @@ def write_build_ninja(
                 if item in ("llvm-aot", "ebpf-native"):
                     cfg.update(clang=CLANG, flags=MCU_FLAGS, compiler_env=compiler_env)
                     linker = state.with_name("slot.ld")
-                    write_if_changed(
-                        linker,
-                        SLOT_LD_TMPL.read_text()
-                        .format(
-                            slot_index=0,
-                            origin=cfg["slot_addr"],
-                            length=cfg["slot_len"],
-                            helper_base=cfg["helper_addr"],
-                        )
-                        .encode(),
-                    )
+                    write_slot_linker(linker, cfg)
                     cfg["linker"] = str(linker)
                     deps.extend([src, gate, Path(CLANG), linker])
                     depfile = state.with_name("headers.d")
@@ -394,9 +400,39 @@ def write_build_ninja(
     return path
 
 
-def build(root: Path, sources: list[Path], mode: str, args) -> None:
-    selected = (mode,)
-    attempted = tuple(dict.fromkeys(("bpf", "prevail", mode)))
+def deployment_backend(firmware: Path, tool: Path, args, facts: dict) -> dict:
+    firmware = firmware.expanduser().resolve()
+    if not firmware.is_file():
+        raise LayoutError(f"firmware ELF not found: {firmware}")
+    digest = sha256_file(firmware)
+    generation = []
+    if facts:
+        if digest != facts["sha256"]:
+            raise LayoutError(f"firmware changed after compilation: {firmware}")
+        generation.append({"step": "XPOST carrier", "call": "release_firmware.prepare_firmware", "parameters": facts})
+    mem = load_mem_map_from_firmware(firmware, tool, generation)
+    if facts:
+        slot = read_symbol(firmware, tool, "xdp_slot", generation)
+        helper, _ = read_symbol(firmware, tool, "helper_dispatcher", generation)
+        if slot != (mem.slot_addr, mem.slot_len) or helper != mem.helper_addr:
+            raise LayoutError(f"{firmware}: XPM1 disagrees with linked slot or helper symbols")
+    if args.slot_symbol:
+        mem = apply_slot_symbol(mem, firmware, tool, args.slot_symbol, generation)
+    generation.append({"step": "target layout", "call": "build.deployment_backend", "parameters": dict(asdict(mem), sha256=digest)})
+    return dict(
+        asdict(mem),
+        firmware=str(firmware),
+        tool=str(tool),
+        firmware_calls=generation,
+        firmware_digest=digest,
+        firmware_provenance=facts,
+    )
+
+
+def build(root: Path, sources: list[Path], mode: str | None, args) -> None:
+    selected = MODES if mode is None else (mode,)
+    attempted = tuple(dict.fromkeys(("bpf", "prevail", *selected)))
+    label = mode or "release"
     with lock(root):
         if (root / "index.toml").exists():
             raise LayoutError(
@@ -428,7 +464,7 @@ def build(root: Path, sources: list[Path], mode: str, args) -> None:
                     receipt.unlink()
         for program in sorted(programs):
             reconcile(root, program, selected if program in names else ())
-        backend = {}
+        backends = {}
         graph_ready = False
         failure = ""
         try:
@@ -436,30 +472,24 @@ def build(root: Path, sources: list[Path], mode: str, args) -> None:
                 for src in sources:
                     state_path(root, src.stem, "prevail").unlink(missing_ok=True)
                 raise LayoutError(f"PREVAIL binary missing: {prevail_bin()}")
-            if mode != "bpf":
+            if mode is None:
+                from release_firmware import prepare_firmware
+
+                deployments, manifest = prepare_firmware(root)
+                tool = ensure_tool(root, manifest)
+                for key, (firmware, facts) in deployments.items():
+                    backends[key] = deployment_backend(firmware, tool, args, facts)
+            elif mode != "bpf":
                 firmware = args.firmware.expanduser().resolve()
                 if not firmware.is_file():
                     raise LayoutError(f"firmware ELF not found: {firmware}")
-                generation = []
-                firmware_digest = sha256_file(firmware)
-                tool = ensure_tool(root)
-                mem = load_mem_map_from_firmware(firmware, tool, generation)
-                if args.slot_symbol:
-                    mem = apply_slot_symbol(
-                        mem, firmware, tool, args.slot_symbol, generation
-                    )
-                backend = dict(
-                    asdict(mem),
-                    firmware=str(firmware),
-                    tool=str(tool),
-                    firmware_calls=generation,
-                    firmware_digest=firmware_digest,
-                )
-            path = write_build_ninja(root, sources, mode, args, backend)
+                backend = deployment_backend(firmware, ensure_tool(root), args, {})
+                backends = {(name, mode): backend for name in names}
+            path = write_build_ninja(root, sources, selected, args, backends)
             for src in sources:
-                update_diagnostic(root, src.stem, f"preflight/{mode}", None)
-            force_modes = {mode, "bpf", "prevail"}
-            if mode == "ebpf":
+                update_diagnostic(root, src.stem, f"preflight/{label}", None)
+            force_modes = set(attempted)
+            if "ebpf" in selected:
                 force_modes.add("ebpf-native")
             for src in sources:
                 reasons = reconcile(root, src.stem, selected)
@@ -469,7 +499,7 @@ def build(root: Path, sources: list[Path], mode: str, args) -> None:
                         receipt.unlink(missing_ok=True)
             with tempfile.NamedTemporaryFile(
                 mode="w",
-                prefix=f"{mode}-",
+                prefix=f"{label}-",
                 suffix=".log",
                 dir=root / ".ninja",
                 delete=False,
@@ -492,10 +522,10 @@ def build(root: Path, sources: list[Path], mode: str, args) -> None:
         except (OSError, ValueError, SystemExit, KeyboardInterrupt) as exc:
             failure = str(exc) or type(exc).__name__
             if not graph_ready:
-                target = "prevail" if mode == "bpf" else mode
                 for src in sources:
-                    state_path(root, src.stem, target).unlink(missing_ok=True)
-                    update_diagnostic(root, src.stem, f"preflight/{mode}", failure)
+                    for target in selected:
+                        state_path(root, src.stem, "prevail" if target == "bpf" else target).unlink(missing_ok=True)
+                    update_diagnostic(root, src.stem, f"preflight/{label}", failure)
             raise
         finally:
             final_errors = []
