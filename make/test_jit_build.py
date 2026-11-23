@@ -140,20 +140,13 @@ class ProgramBuildTests(unittest.TestCase):
 
     def test_exact_executable_bytes_and_source(self):
         root, name = self.build_dir, "just_tx"
-        source = ROOT / "tests/xdp/just_tx.c"
-        header = source.with_name("just_tx_core.h")
-        original = source.read_bytes().replace(
-            b'#include "just_tx_core.h"\n',
-            b"/* Begin tests/xdp/just_tx_core.h */\n"
-            + header.read_bytes()
-            + b"/* End tests/xdp/just_tx_core.h */\n",
-        )
-        self.assertEqual(original, source_path(root, name).read_bytes())
+        snapshot = source_path(root, name).read_bytes()
         native_state = read_state(state_path(root, name, "llvm-aot"))
         native = executable_sections(Path(native_state["linked_elf"]).read_bytes())
         self.assertTrue(native_object_path(root, name).is_file())
-        report = report_path(root, name).read_text()
-        self.assertEqual(report.count(original.decode()), 1)
+        report_bytes = report_path(root, name).read_bytes()
+        self.assertEqual(report_bytes.count(snapshot), 1)
+        report = report_bytes.decode()
         self.assertIn("tests/xdp/just_tx.c", report)
         self.assertEqual(
             re.findall(r"^## (.+)$", report, flags=re.MULTILINE),
@@ -412,34 +405,43 @@ class ProgramBuildTests(unittest.TestCase):
                         executable_sections(original.read_bytes()),
                     )
 
-    def test_public_snapshot_includes_local_headers_for_explicit_sources(self):
-        fixtures = ROOT / "tests/unused/source_snapshot"
-        external = self.root / "external-source"
+    def test_public_snapshot_preserves_header_inclusion(self):
+        fixtures = ROOT / "tests/unused/header_graph"
+        in_tree = fixtures / "once/header_graph.c"
+        external = self.root / "guarded-source"
         external.mkdir()
-        for name in ("external_input.c", "action.h"):
-            shutil.copyfile(fixtures / name, external / name)
-        isolated = self.root / "standalone-source"
-        isolated.mkdir()
-        for original in (fixtures / "repo_comment.c", external / "external_input.c"):
-            with self.subTest(program=original.stem):
-                run_build("bpf", "--inputs", original, build_dir=self.build_dir)
-                program = original.stem
-                snapshot = source_path(self.build_dir, program).read_bytes()
-                self.assertIn(b"#define SNAPSHOT_ACTION XDP_DROP", snapshot)
-                self.assertNotIn(b'#include "action.h"', snapshot)
-                if program == "repo_comment":
+        shutil.copyfile(in_tree, external / in_tree.name)
+        for header in (fixtures / "guarded").glob("*.h"):
+            shutil.copyfile(header, external / header.name)
+        for layout, original in (
+            ("guarded", external / in_tree.name),
+            ("once", in_tree),
+        ):
+            with self.subTest(layout=layout):
+                root = self.root / f"{layout}-build"
+                run_build("bpf", "--inputs", original, build_dir=root)
+                snapshot = source_path(root, original.stem).read_bytes()
+                if layout == "once":
                     self.assertIn(b"/* program-local header */", snapshot)
+                isolated = self.root / f"{layout}-recompile"
+                isolated.mkdir()
                 standalone = isolated / original.name
                 standalone.write_bytes(snapshot)
-                obj = standalone.with_suffix(".o")
-                subprocess.run(
-                    [CLANG, *BPF_FLAGS, "-c", standalone, "-o", obj],
-                    cwd=isolated,
-                    check=True,
+                original_obj = isolated / "original.o"
+                published_obj = isolated / "published.o"
+                for src, obj in ((original, original_obj), (standalone, published_obj)):
+                    subprocess.run(
+                        [CLANG, *BPF_FLAGS, "-c", src, "-o", obj],
+                        cwd=isolated,
+                        check=True,
+                    )
+                expected = executable_sections(original_obj.read_bytes())
+                self.assertEqual(
+                    executable_sections(published_obj.read_bytes()), expected
                 )
                 self.assertEqual(
-                    executable_sections(obj.read_bytes()),
-                    executable_sections(bpf_path(self.build_dir, program).read_bytes()),
+                    executable_sections(bpf_path(root, original.stem).read_bytes()),
+                    expected,
                 )
 
     def test_rbpf_classic_map_descriptors_keep_their_own_offsets(self):

@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import cli
 
-from layout import ROOT, bpf_path, load_index, source_path
+from layout import ROOT, bpf_path, load_index
 
 
 class BuildTargetTests(unittest.TestCase):
@@ -125,9 +125,7 @@ class PublicationTests(unittest.TestCase):
 
     def test_new_source_with_same_stem_withdraws_previous_build_on_preflight_failure(self):
         self.build()
-        snapshot = source_path(self.build_dir, self.source.stem).read_bytes()
-        self.assertIn(self.header.read_bytes(), snapshot)
-        self.assertNotIn(b'#include "action: #$.h"', snapshot)
+        self.assertTrue((self.program / "index.toml").is_file())
         other = self.root / self.source.name
         other.write_text("int unrelated;\n")
         self.build(other, target="jit", options=["--firmware", str(self.root / "absent.elf")],

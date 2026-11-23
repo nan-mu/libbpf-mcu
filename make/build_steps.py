@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -85,12 +86,50 @@ def compile_c(generation, src, obj, dep, clang, flags) -> list[Path]:
     ]
 
 
-QUOTED_INCLUDE_OR_COMMENT = re.compile(
-    rb'/\*[\s\S]*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''
-    rb'|^[ \t]*#[ \t]*include[ \t]*"(?P<header>[^"\n]+)"'
+COMMENT_OR_LITERAL = (
+    rb'(?P<comment>/\*[\s\S]*?\*/|//[^\n]*)|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''
+)
+SOURCE_DIRECTIVES = re.compile(
+    COMMENT_OR_LITERAL
+    + rb'|^[ \t]*#[ \t]*(?:include[ \t]*"(?P<header>[^"\n]+)"|(?P<once>pragma[ \t]+once\b))'
     rb"(?P<trailer>[ \t]*(?:/\*[\s\S]*?\*/[ \t]*)*(?://[^\r\n]*)?)(?:\r?\n|$)",
     re.MULTILINE,
 )
+GUARD_OPENING = re.compile(
+    rb"#[ \t]*(?:ifndef[ \t]+([A-Za-z_]\w*)"
+    rb"|if[ \t]+![ \t]*defined(?:[ \t]*\([ \t]*([A-Za-z_]\w*)[ \t]*\)|[ \t]+([A-Za-z_]\w*)))"
+)
+CONDITIONAL = re.compile(rb"#[ \t]*(ifn?def|if|endif|else|elif(?:n?def)?)\b")
+
+
+def controlling_guard(text: bytes) -> bytes | None:
+    """Recognize a negative macro condition that encloses the entire file."""
+    clean = re.sub(
+        COMMENT_OR_LITERAL,
+        lambda m: b" " + b"\n" * m[0].count(b"\n") if m["comment"] else m[0],
+        text,
+    ).strip()
+    lines = clean.splitlines()
+    opening = GUARD_OPENING.fullmatch(lines[0].strip()) if lines else None
+    if not opening:
+        return None
+    depth = 1
+    for index, line in enumerate(lines[1:], 1):
+        directive = CONDITIONAL.match(line.lstrip())
+        if directive is None:
+            continue
+        operator = directive[1]
+        if operator.startswith(b"if"):
+            depth += 1
+        elif operator == b"endif":
+            depth -= 1
+            if depth == 0:
+                if index == len(lines) - 1:
+                    return next(guard for guard in opening.groups() if guard)
+                break
+        elif depth == 1:
+            break
+    return None
 
 
 def source_snapshot(src: Path) -> tuple[bytes, list[Path]]:
@@ -99,20 +138,43 @@ def source_snapshot(src: Path) -> tuple[bytes, list[Path]]:
     sdk_roots = (ROOT / "include", ROOT / "include-bpf")
 
     def expand(path: Path, stack: tuple[Path, ...]) -> bytes:
+        target = path.resolve()
+        text = path.read_bytes()
+        once = None
+        if any(match["once"] for match in SOURCE_DIRECTIVES.finditer(text)):
+            relative = os.fsencode(os.path.relpath(target, src.parent))
+            once = (
+                b"LIBBPF_MCU_SNAPSHOT_ONCE_"
+                + hashlib.sha256(relative).hexdigest().encode()
+            )
+
+        if target in stack:
+            # The compiler decides whether this edge is active for its target.
+            # A conventional guard or an already executed pragma can suppress it.
+            guards = [guard for guard in (controlling_guard(text), once) if guard]
+            error = b"#error cyclic program include in source snapshot\n"
+            if not guards:
+                return error
+            condition = b" && ".join(b"!defined(" + guard + b")" for guard in guards)
+            return b"#if " + condition + b"\n" + error + b"#endif\n"
+
         def inline(match: re.Match[bytes]) -> bytes:
+            if once is not None and match["once"]:
+                # Set the guard at this directive, inside its original branch.
+                return b"#define " + once + match["trailer"] + b"\n"
             name = match["header"]
             if name is None:
                 return match[0]
             header = path.parent / os.fsdecode(name)
-            target = header.resolve()
+            included = header.resolve()
             if not header.is_file() or any(
-                target.is_relative_to(sdk) for sdk in sdk_roots
+                included.is_relative_to(sdk) for sdk in sdk_roots
             ):
                 return match[0]
-            if target in stack:
-                raise LayoutError(f"cyclic program include: {header}")
             headers.append(header)
-            relative = target.relative_to(ROOT) if target.is_relative_to(ROOT) else name
+            relative = (
+                included.relative_to(ROOT) if included.is_relative_to(ROOT) else name
+            )
             label = os.fsencode(relative)
             trailer = match["trailer"].lstrip(b" \t")
             content = expand(header, (*stack, target))
@@ -129,9 +191,14 @@ def source_snapshot(src: Path) -> tuple[bytes, list[Path]]:
                 + b" */\n"
             )
 
-        return QUOTED_INCLUDE_OR_COMMENT.sub(inline, path.read_bytes())
+        snapshot = SOURCE_DIRECTIVES.sub(inline, text)
+        if once:
+            if not snapshot.endswith(b"\n"):
+                snapshot += b"\n"
+            return b"#ifndef " + once + b"\n" + snapshot + b"#endif\n"
+        return snapshot
 
-    return expand(src, (src.resolve(),)), headers
+    return expand(src, ()), headers
 
 
 def build_bpf(

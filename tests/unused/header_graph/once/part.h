@@ -1,0 +1,1 @@
+enum { PART_NAME = SHARED_BASE };

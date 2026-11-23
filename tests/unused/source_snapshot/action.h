@@ -1,6 +1,0 @@
-#ifndef SNAPSHOT_ACTION_H
-#define SNAPSHOT_ACTION_H
-
-#define SNAPSHOT_ACTION XDP_DROP
-
-#endif

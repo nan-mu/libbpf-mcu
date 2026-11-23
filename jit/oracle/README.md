@@ -18,8 +18,8 @@ are upstream's.
 cargo test --manifest-path jit/oracle/Cargo.toml --release -- --nocapture
 ```
 
-`build.rs` compiles the eight `tests/xdp/*.c` programs with clang
-(`/opt/homebrew/opt/llvm/bin/clang`, override with `CLANG`). The test writes
+`build.rs` compiles the programs listed in `jit/scripts/xdp-sources.txt` with
+clang (`/opt/homebrew/opt/llvm/bin/clang`, override with `CLANG`). The test writes
 `jit/oracle/results.json` and exits non-zero if any case fails.
 
 Rerunnable levers:
@@ -40,24 +40,11 @@ ALU32 mod/div-by-zero question (see `NOTES.md` F2).
 
 ## Current result
 
-Measured on this host, 8727 cases, `--release`:
-
-| status | count |
-| --- | --- |
-| pass | 8199 |
-| fail | 27 |
-| inconclusive | 0 |
-| unsupported | 501 |
-
-The suite is **red**, and it should be. All 27 failures are one unresolved
-semantic disagreement: ALU32 mod/div by zero and the destination's high 32
-bits. 12 are boundary probes, 15 are random seeds. `modzero` proves the 15
-random ones are the same question, not a memory bug. See `NOTES.md` F2.
-
-The default test profile enables overflow checks, which makes rbpf's `NEG64`
-panic on `i64::MIN`. Those 22 cases are unsupported there and pass under
-`--release`: 8177 pass / 27 fail / 0 inconclusive / 523 unsupported. The fail
-count is 27 either way.
+Read `results.json` for each run's case counts and statuses. The baseline
+includes an open ALU32 mod/div-by-zero disagreement about the destination's
+high 32 bits. The `modzero` example traces it in the seeded cases. See
+`NOTES.md` F2. With overflow checks enabled, rbpf's `NEG64` panics on
+`i64::MIN` and those cases are recorded as unsupported.
 
 ## What is compared
 
@@ -161,8 +148,8 @@ arithmetic and jump semantics under test are unchanged.
 exposes no hook, so it cannot report a trace. `src/rv.rs` is an oracle-local
 RV32IM executor that records one. **Every case runs both executors** and requires
 the same return value and the same final memory. A divergence is recorded as
-`executor_split` and makes the case inconclusive. There were zero splits across
-all 8727 cases, which is what licenses using the tracing executor's trace.
+`executor_split` and makes the case inconclusive. Inspect this field in
+`results.json` for the result of each comparison.
 
 ## Four-way split of claims
 
@@ -180,12 +167,12 @@ all 8727 cases, which is what licenses using the tracing executor's trace.
 - `le`/`be` at 16, 32 and 64 bits in the ALU32 class.
 - Byte, half, word and double-word loads and stores at offsets `0,1,2,3,4,7,8,15`,
   including unaligned addresses.
-- 1964 seeded random programs over the supported set, with forward conditional
+- Seeded random programs over the supported set, with forward conditional
   jumps, comparing the return value and all nine saved registers.
-- All fourteen program-level cases on real Clang ELF, including `div2`,
-  `bitswap`, `bsort`, `firewall` and the three stack-keyed map programs, on the
-  `check-xdp.sh` packets and the extra inputs.
-- 24 negative cases: the JIT returns `Err` and does not panic on ALU64 div/mod,
+- Program cases on real Clang ELF, including `div2`, `bitswap`, `bsort`,
+  `firewall` and the stack-keyed map programs. `results.json` lists the inputs
+  and outcomes.
+- Negative cases check that the JIT returns `Err` without panicking on ALU64 div/mod,
   ALU64 bswap, atomics, tail calls, BPF-to-BPF calls, `jmp32` control flow,
   `ld_abs`/`ld_ind`, unknown opcodes, truncated and malformed `lddw`, empty
   input, and out-of-range registers.
@@ -196,8 +183,8 @@ all 8727 cases, which is what licenses using the tracing executor's trace.
   of loads whose base is provably the ctx pointer, which is the kernel's own
   rewrite. The patch list is in `results.json` for audit.
 - The tracing executor is faithful *for these cases*, because it agreed with
-  `run_rv` on the return value and the whole memory every time. This is an
-  empirical agreement over 8727 cases, not a proof about all inputs.
+  `run_rv` on the return value and the whole memory. See `executor_split` in
+  `results.json` for each run's comparison.
 - rbpf's `JGT_IMM` zero-extends the same i32 field that its own `JSGT_IMM` and
   every `ALU64_IMM` sign-extend. Both cannot be right; the ISA defines `imm` as
   signed. This pins the blame without needing a third implementation.
@@ -223,12 +210,12 @@ all 8727 cases, which is what licenses using the tracing executor's trace.
   capacity, linker script and `helper_dispatcher` address are not exercised.
 - **`host_abi::HELPER = 0x4038_0000`.** The RV32 interpreter forwards *any*
   helper address to the host model, so a wrong address cannot show up here.
-- **ALU64 div/mod and ALU64 bswap.** The JIT rejects them; 416 cases are
-  recorded unsupported.
-- **SDIV/SMOD.** rbpf has no signed div/mod, so these 40 cases have no
+- **ALU64 div/mod and ALU64 bswap.** The JIT rejects them and the report
+  records unsupported executions.
+- **SDIV/SMOD.** rbpf has no signed div/mod, so these instructions have no
   independent oracle.
-- **The 27 ALU32 mod/div-by-zero cases.** Unresolved; see `NOTES.md` F2. The
-  `modzero` example attributes every random failure to this one rule.
+- **ALU32 mod/div-by-zero.** The open disagreement is described in
+  `NOTES.md` F2 and reproduced by `modzero`.
 - **Stack depth.** The JIT fixes the BPF stack at 512 bytes and does not read the
   verifier's `stack_depth`.
 
@@ -237,13 +224,12 @@ all 8727 cases, which is what licenses using the tracing executor's trace.
 Each is declared in `run::oracle_gap` from code evidence, never inferred from a
 disagreement, and the disagreement is still recorded in full.
 
-| gap | cases | evidence |
-| --- | --- | --- |
-| JMP64 immediates zero-extended | 44 | `interpreter.rs:324` `unsigned_u64!` vs `:604` `JSGT_IMM` |
-| no SDIV/SMOD | 40 | the ALU block never reads `insn.off` |
-| `NEG64` panics on `i64::MIN` | 22 | `interpreter.rs:573` `-(reg as i64)`; `NEG32` at `:524` uses `wrapping_neg` |
+| gap | evidence |
+| --- | --- |
+| JMP64 immediates zero-extended | `interpreter.rs:324` `unsigned_u64!` vs `:604` `JSGT_IMM` |
+| no SDIV/SMOD | the ALU block never reads `insn.off` |
+| `NEG64` panics on `i64::MIN` | `interpreter.rs:573` `-(reg as i64)`; `NEG32` at `:524` uses `wrapping_neg` |
 
 The `NEG64` panic only fires under overflow checks, which the default test
-profile enables and `--release` does not. It is caught and recorded, never
-allowed to abort the suite. The 22 cases are unsupported in the default profile
-and pass under `--release`; no other case changes status between the two.
+profile enables and `--release` does not. The harness catches the panic and
+records the affected cases in `results.json`.
