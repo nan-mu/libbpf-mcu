@@ -50,10 +50,10 @@ int memcpy_xdp(struct xdp_md *ctx)
 
 	if (ctx_view(ctx, &payload, &avail, &param))
 		return XDP_ABORTED;
-	/* Exec value is 32 bytes, so the payload is 24. param <= 12 matches
-	 * the old param <= avail/2 bound on that value. Unroll keeps every
-	 * packet offset constant for PREVAIL. */
-	if (payload + 24 > end || avail < 24 || param == 0 || param > 12)
+	/* The 24-byte payload holds two regions of up to 12 bytes each.
+	 * Check the upper bound directly so PREVAIL can bound the writes.
+	 * A zero length skips every write and returns XDP_ABORTED below. */
+	if (payload + 24 > end || avail < 24 || param > 12)
 		return XDP_ABORTED;
 #pragma unroll
 	for (i = 0; i < 12; i++) {
@@ -61,7 +61,7 @@ int memcpy_xdp(struct xdp_md *ctx)
 			continue;
 		payload[param + i] = payload[i];
 	}
-	return XDP_PASS;
+	return param ? XDP_PASS : XDP_ABORTED;
 }
 
 char LICENSE[] SEC("license") = "GPL";

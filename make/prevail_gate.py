@@ -1,4 +1,4 @@
-"""PREVAIL listing parse and the stamp that unlocks one MCU compile."""
+"""Select and verify the program in a BPF object."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def prevail_bin() -> Path:
     """
     override = os.environ.get("PREVAIL")
     if override:
-        return Path(override)
+        return Path(override).expanduser().resolve()
     return ROOT / "prevail" / "bin" / "prevail"
 
 
@@ -70,15 +70,17 @@ def _run_prevail(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return proc
 
 
-def examine(obj: Path) -> ProgramRef:
-    """List, select the one xdp or xdp1 program, and run the checker. No stamp I/O."""
-    listed = _run_prevail([str(prevail_bin()), "-l", str(obj)])
+def examine(obj: Path, verifier: Path | None = None) -> ProgramRef:
+    """List, select the one xdp or xdp1 program, and run the checker."""
+    verifier = verifier or prevail_bin()
+    listed = _run_prevail([str(verifier), "-l", str(obj)])
     if listed.returncode != 0:
+        print(listed.stdout, file=sys.stderr, end="")
         raise SystemExit(1)
     program = select_program(listed.stdout)
     checked = _run_prevail(
         [
-            str(prevail_bin()),
+            str(verifier),
             "--stack-size",
             "512",
             "--section",
@@ -89,48 +91,26 @@ def examine(obj: Path) -> ProgramRef:
         ]
     )
     if checked.returncode != 0:
+        print(checked.stdout, file=sys.stderr, end="")
+        raise SystemExit(1)
+    label = program.section
+    if program.function != program.section:
+        label += "/" + program.function
+    verdict = re.compile(
+        rf"PASS: {re.escape(label)}(?: \(terminates within [0-9]+ loop iterations\))?"
+    )
+    if not any(verdict.fullmatch(line) for line in checked.stdout.splitlines()):
+        print(f"PREVAIL did not report PASS for {label}", file=sys.stderr)
+        print(checked.stdout, file=sys.stderr, end="")
         raise SystemExit(1)
     return program
-
-
-def published_path(path: Path) -> str:
-    path = Path(path)
-    if not path.is_absolute():
-        return path.as_posix()
-    try:
-        return path.relative_to(ROOT).as_posix()
-    except ValueError:
-        return path.name
-
-
-def write_stamp(stamp: Path, obj: Path, program: ProgramRef) -> None:
-    from layout import sha256_file
-
-    body = (
-        f"section={program.section}\n"
-        f"function={program.function}\n"
-        f"bpf_o={published_path(obj)}\n"
-        f"bpf_sha256={sha256_file(obj)}\n"
-        f"verifier=prevail\n"
-        f"verifier_id={sha256_file(prevail_bin())}\n"
-        f"options=stack-size=512\n"
-    )
-    tmp = stamp.with_name(stamp.name + ".tmp")
-    tmp.write_text(body)
-    os.replace(tmp, stamp)
-
-
-def stamp_aot(obj: Path, stamp: Path) -> None:
-    stamp.unlink(missing_ok=True)
-    write_stamp(stamp, obj, examine(obj))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="prevail_gate")
     parser.add_argument("--obj", type=Path, required=True)
-    parser.add_argument("--stamp", type=Path, required=True)
     args = parser.parse_args()
-    stamp_aot(args.obj, args.stamp)
+    examine(args.obj)
 
 
 if __name__ == "__main__":

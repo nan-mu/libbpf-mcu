@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 
@@ -11,11 +10,12 @@ from layout import (
     container_path,
     load_index,
     make_index,
+    native_object_path,
     source_path,
     verify_tree,
     write_index,
 )
-from obj_report import BPF, CodeSection, code_elf, write_report
+from obj_report import BPF, RISCV, CodeSection, code_elf, write_report
 from xpost_elf import ImageMetadataV0, build_container
 
 
@@ -46,7 +46,7 @@ class LayoutTests(unittest.TestCase):
     def test_verify_independently(self):
         self.assertEqual(load_index(self.program), self.document)
         self.assertEqual(verify_tree(self.root), [self.document])
-        (self.program / "jit" / "report.toml").write_text("invalid TOML")
+        (self.program / "report.md").write_text("edited by a human")
         self.assertEqual(verify_tree(self.root), [self.document])
 
     def test_all_indexed_members_are_hashed(self):
@@ -69,6 +69,27 @@ class LayoutTests(unittest.TestCase):
         with self.assertRaisesRegex(LayoutError, "symlink"):
             load_index(self.program)
 
+    def test_aot_native_object_is_indexed_and_checked(self):
+        aot = container_path(self.root, "example", "llvm-aot")
+        aot.write_bytes(self.deployment.read_bytes())
+        obj = native_object_path(self.root, "example")
+        data = bytearray(code_elf(CodeSection(".text", 0, b"\x13\0\0\0"), RISCV))
+        data[16:18] = (1).to_bytes(2, "little")  # ET_REL
+        obj.write_bytes(data)
+        index = make_index(self.program, "example", ("llvm-aot",))
+        write_index(self.index, index)
+        self.assertEqual(
+            load_index(self.program)["mode"][0]["object"]["path"],
+            "objects/example_rv32.o",
+        )
+        obj.write_bytes(bytes(data[:-1]) + b"!")
+        with self.assertRaisesRegex(LayoutError, "SHA-256"):
+            load_index(self.program)
+        obj.write_bytes(self.obj.read_bytes())
+        write_index(self.index, make_index(self.program, "example", ("llvm-aot",)))
+        with self.assertRaisesRegex(LayoutError, "relocatable RV32 ELF"):
+            load_index(self.program)
+
     def test_duplicate_mode_and_escaped_path(self):
         self.document["mode"] *= 2
         write_index(self.index, self.document)
@@ -86,14 +107,40 @@ class LayoutTests(unittest.TestCase):
         with self.assertRaisesRegex(LayoutError, "invalid container"):
             load_index(self.program)
 
-    def test_report_source_round_trip(self):
-        report = self.program / "report.toml"
-        for source in (b"// comments\n\nint x;\n", b"\r\n// ''' \\\t\n\n", b"int x;"):
+    def test_report_keeps_source_bytes_and_fences_untrusted_content(self):
+        report = self.program / "report.md"
+        calls = [{"step": "compile", "argv": ["clang", "two words.c", "file`name.o"]}]
+        sections = [
+            ("bpf", "raw listing\n", calls),
+            ("llvm-aot", "compiled RV32IMC\n", []),
+            ("ebpf", "rewritten listing\n", []),
+            ("jit", "linked RV32IM\n", []),
+        ]
+        for source, block in (
+            (b"// comments\n\nint x;\n", b"```c\n// comments\n\nint x;\n```"),
+            (b"/*\r\n````\r\n*/\r\n", b"`````c\n/*\r\n````\r\n*/\r\n`````"),
+            (b"int x;", b"```c\nint x;\n```"),
+        ):
             with self.subTest(source=source):
-                write_report(report, "example.c", source, "listing\n", [])
+                write_report(report, "example.c", source, sections)
+                text = report.read_bytes()
+                self.assertEqual(text.count(block), 1)
                 self.assertEqual(
-                    tomllib.loads(report.read_text())["source"]["text"].encode(), source
+                    b"ends without a newline" in text, not source.endswith(b"\n")
                 )
+                headings = [
+                    line for line in text.splitlines() if line.startswith((b"## ", b"### "))
+                ]
+                self.assertEqual(
+                    headings,
+                    [
+                        b"## Source", b"## eBPF", b"### bpf", b"### ebpf",
+                        b"## RV32IMC", b"### llvm-aot", b"### jit",
+                    ],
+                )
+                self.assertEqual(text.count(b"#### Machine code and assembly\n"), 4)
+                self.assertEqual(text.count(b"#### Build steps\n"), 4)
+                self.assertIn(b"$ clang 'two words.c' 'file`name.o'", text)
 
 
 if __name__ == "__main__":

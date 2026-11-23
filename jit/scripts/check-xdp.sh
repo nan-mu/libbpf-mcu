@@ -26,7 +26,7 @@ for name in div2 xdp_drop case_mark just_drop just_tx firewall bitswap bsort; do
   "$CLANG" --target=bpf -O2 -g -Wall -Wno-missing-declarations -fno-stack-protector \
     -I "$ROOT/include-bpf" -include vmlinux.h -c "$src" -o "$obj"
   set +e
-  python3 "$ROOT/make/prevail_gate.py" --obj "$obj" --stamp "$OUT/$name.prevail.ok" \
+  python3 "$ROOT/make/prevail_gate.py" --obj "$obj" \
     >"$OUT/$name.prevail.out" 2>&1
   prev=$?
   set -e

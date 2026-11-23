@@ -38,16 +38,16 @@ def main():
     parser = argparse.ArgumentParser(prog="libbpf-mcu")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    build_parser = subparsers.add_parser("build")
+    build_parser = subparsers.add_parser("build", allow_abbrev=False)
     build_parser.add_argument(
         "target",
         nargs="?",
-        default=None,
-        help="构建目标。默认 esp32c3（需 --firmware）。可显式选 bpf 或 jit",
+        choices=("bpf", "rv32imc", "jit"),
+        help="无目标时默认 bpf；传入 --firmware 时默认 rv32imc。",
     )
-    build_parser.add_argument("--inputs", "-i")
-    build_parser.add_argument("--output", "--outputs", "-o", dest="outputs")
-    build_parser.add_argument(
+    inputs = build_parser.add_mutually_exclusive_group()
+    inputs.add_argument("--inputs", nargs="+", metavar="FILE", help="一个或多个 C 源文件")
+    inputs.add_argument(
         "-c",
         "--crate",
         dest="crate",
@@ -55,28 +55,13 @@ def main():
         help="只编译 tests/**/<stem>.c 中 stem 匹配的一个源文件",
     )
     build_parser.add_argument(
-        "-f", "--force", action="store_true", help="强制重新编译，忽略增量"
-    )
-    build_parser.add_argument(
-        "--objdump",
-        default=os.environ.get("LIBBPF_MCU_OBJDUMP", DEFAULT_OBJDUMP),
-        help=f"objdump 可执行文件（默认 {DEFAULT_OBJDUMP}）",
-    )
-    build_parser.add_argument(
-        "--objcopy",
-        default=os.environ.get("LIBBPF_MCU_OBJCOPY", DEFAULT_OBJCOPY),
-        help=f"objcopy 可执行文件（默认 {DEFAULT_OBJCOPY}）",
+        "--force", action="store_true", help="强制重新编译，忽略增量"
     )
     build_parser.add_argument(
         "--firmware",
         type=Path,
         default=None,
-        help="已链接固件 ELF（须含 .xpost.mem / XPM1）；esp32c3 必填",
-    )
-    build_parser.add_argument(
-        "--no-compact-elf",
-        action="store_true",
-        help="ESP32-C3: do not emit the <program>-vm-aot.elf Compact ELF container",
+        help="已链接固件 ELF（须含 .xpost.mem / XPM1）；rv32imc、jit 必填",
     )
     build_parser.add_argument(
         "--slot-symbol",
@@ -91,7 +76,7 @@ def main():
     build_parser.add_argument(
         "--engine",
         choices=["aot", "rbpf"],
-        default="aot",
+        default=None,
         help=(
             "what the container carries. aot: the linked RV32IMC machine code. "
             "rbpf: the eBPF bytecode, with each map reference rewritten to the "
@@ -102,42 +87,29 @@ def main():
         "--build-dir",
         type=Path,
         default=None,
-        help="输出根目录，含 build.ninja。省略则用默认 build/",
+        help="输出根目录，默认为 build/",
     )
 
     subparsers.add_parser("clean")
     subparsers.add_parser("test")
-    artifacts = subparsers.add_parser("artifacts")
-    artifact_commands = artifacts.add_subparsers(
-        dest="artifacts_command", required=True
-    )
-    export = artifact_commands.add_parser("export-legacy")
-    export.add_argument("--build-dir", type=Path, required=True)
-    export.add_argument("--out", type=Path, required=True)
-    export.add_argument("--mode", required=True, choices=("rv32", "jit", "bpf-xpost"))
-
     args = parser.parse_args()
     if args.command == "build":
-        target = args.target.lower() if args.target else "esp32c3"
-        if target not in ("bpf", "esp32c3", "jit"):
-            build_parser.error(f"unknown target: {target}")
-        if args.outputs is not None:
-            build_parser.error(
-                "--output is no longer supported; use --build-dir or artifacts export-legacy"
-            )
-        if target == "jit" and (args.no_compact_elf or args.engine != "aot"):
-            build_parser.error(
-                "jit requires a Compact ELF and is incompatible with --engine rbpf"
-            )
+        target = args.target or ("rv32imc" if args.firmware is not None else "bpf")
+        if target != "rv32imc" and args.engine is not None:
+            build_parser.error("--engine is only available for rv32imc")
+        if target == "bpf" and any((args.firmware, args.slot_symbol, args.image_name)):
+            build_parser.error("--firmware, --slot-symbol and --image-name require rv32imc or jit")
         if target != "bpf" and args.firmware is None:
             build_parser.error(f"{target} requires --firmware")
         args.image_name = check_image_name(args.image_name)
-        args.objdump = shutil.which(args.objdump) or args.objdump
-        args.objcopy = shutil.which(args.objcopy) or args.objcopy
+        objdump = os.environ.get("LIBBPF_MCU_OBJDUMP", DEFAULT_OBJDUMP)
+        objcopy = os.environ.get("LIBBPF_MCU_OBJCOPY", DEFAULT_OBJCOPY)
+        args.objdump = shutil.which(objdump) or objdump
+        args.objcopy = shutil.which(objcopy) or objcopy
         mode = {
             "bpf": "bpf",
             "jit": "jit",
-            "esp32c3": "ebpf" if args.engine == "rbpf" else "llvm-aot",
+            "rv32imc": "ebpf" if args.engine == "rbpf" else "llvm-aot",
         }[target]
         root = (
             args.build_dir.expanduser().resolve()
@@ -165,10 +137,7 @@ def main():
             [sys.executable, str(Path(__file__).parent / "test_compact_elf_parity.py")],
             [sys.executable, str(Path(__file__).parent / "test_jit_build.py")],
             [sys.executable, str(Path(__file__).parent / "test_layout.py")],
-            [
-                sys.executable,
-                str(Path(__file__).parent.parent / "scripts" / "test_package.py"),
-            ],
+            [sys.executable, str(Path(__file__).parent / "test_build_state.py")],
         ]
         for crate in ("jit", "tools"):
             tests.append(
@@ -184,18 +153,6 @@ def main():
             result = subprocess.run(cmd, cwd=str(Path(__file__).parent))
             if result.returncode != 0:
                 sys.exit(result.returncode)
-    elif args.command == "artifacts" and args.artifacts_command == "export-legacy":
-        from layout import export_legacy
-
-        try:
-            programs = export_legacy(args.build_dir, args.out, args.mode)
-        except LayoutError as exc:
-            error(str(exc))
-            sys.exit(2)
-        info("exported " + ", ".join(programs))
-    else:
-        parser.print_help()
-        sys.exit(1)
 
 
 if __name__ == "__main__":

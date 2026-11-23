@@ -46,6 +46,9 @@ enum Cmd {
         name: String,
         #[arg(long, value_parser = parse_u32)]
         slot_address: u32,
+        /// Maximum payload bytes available in the selected firmware slot.
+        #[arg(long, value_parser = parse_u32)]
+        slot_length: u32,
         #[arg(long, value_parser = parse_u32)]
         helper_address: u32,
         #[arg(long, default_value_t = 1, value_parser = parse_u32_as_u8)]
@@ -156,6 +159,7 @@ fn pack(args: Cmd) -> Result<()> {
         linked_elf,
         name,
         slot_address,
+        slot_length,
         helper_address,
         machine,
         map_index,
@@ -190,11 +194,11 @@ fn pack(args: Cmd) -> Result<()> {
         let patched = index_map_references(&image_bytes, &obj, &meta)?;
         image_bytes = patched;
     }
+    let blob = build_container(&image_bytes, &meta, Some(slot_length))
+        .map_err(|e| anyhow::anyhow!("build_container: {e:?}"))?;
     if let Some(export) = &export_image {
         write_atomic(export, &image_bytes)?;
     }
-    let blob = build_container(&image_bytes, &meta, None)
-        .map_err(|e| anyhow::anyhow!("build_container: {e:?}"))?;
     write_atomic(&out, blob.as_slice())?;
     Ok(())
 }

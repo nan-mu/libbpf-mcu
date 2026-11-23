@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import re
+import shlex
 import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from layout import append_multiline, q, write_if_changed
+from layout import write_if_changed
 
 ELF32 = struct.Struct("<16sHHIIIIIHHHHHH")
 ELF64 = struct.Struct("<16sHHIQQQIHHHHHH")
@@ -143,25 +145,67 @@ def disassemble_payload(objdump: str, code: CodeSection, machine: int) -> str:
         return format_disasm(objdump, elf, code, bpf=machine == BPF)
 
 
-def parameter(value: object) -> str:
-    if isinstance(value, dict):
-        fields = ", ".join(f"{q(k)} = {parameter(v)}" for k, v in sorted(value.items()))
-        return "{ " + fields + " }"
-    if isinstance(value, list):
-        return "[" + ", ".join(map(parameter, value)) + "]"
-    if isinstance(value, int):
-        return str(value)
-    return q(str(value))
+MACHINES = {
+    "bpf": (
+        "Little-endian eBPF. The listing shows the executable sections of the "
+        "original Clang object. Addresses are byte offsets within each section."
+    ),
+    "llvm-aot": (
+        "RV32IMC, ILP32, no FPU. LLVM compiles the C source for the MCU. "
+        "The listing shows the linked instructions at their firmware slot addresses."
+    ),
+    "ebpf": (
+        "Little-endian eBPF for the rBPF interpreter on RV32IMC. The container payload "
+        "uses map indices. Addresses are byte offsets in the rewritten program."
+    ),
+    "jit": (
+        "ILP32, no FPU. The host JIT translates eBPF to the RV32IM subset of RV32IMC. "
+        "The listing covers the linked instructions at their firmware slot addresses "
+        "and ends before map storage."
+    ),
+}
+
+
+def fenced(text: str, language: str) -> str:
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    newline = "" if text.endswith(("\r", "\n")) else "\n"
+    return f"{fence}{language}\n{text}{newline}{fence}"
 
 
 def write_report(
-    path: Path, source: str, snapshot: bytes, listing: str, generation: list[dict]
+    path: Path, source: str, snapshot: bytes, sections: list[tuple[str, str, list[dict]]]
 ) -> None:
-    lines = ["[source]", f"path = {q(source)}"]
-    append_multiline(lines, "text", snapshot.decode("utf-8"))
-    lines.extend(["", "[assembly]"])
-    append_multiline(lines, "listing", listing)
-    for step in generation:
-        lines.extend(["", "[[generation]]"])
-        lines.extend(f"{key} = {parameter(value)}" for key, value in step.items())
-    write_if_changed(path, ("\n".join(lines) + "\n").encode())
+    blocks = [
+        "# Build report",
+        "## Source",
+        fenced(source, "text"),
+        fenced(snapshot.decode("utf-8"), "c"),
+    ]
+    if snapshot and not snapshot.endswith((b"\r", b"\n")):
+        blocks.append("The source file ends without a newline.")
+    architectures = {"eBPF": [], "RV32IMC": []}
+    for mode, listing, generation in sections:
+        group = architectures["eBPF" if mode in ("bpf", "ebpf") else "RV32IMC"]
+        group.extend(
+            [
+                f"### {mode}",
+                MACHINES[mode],
+                "#### Machine code and assembly",
+                fenced(listing, "text"),
+                "#### Build steps",
+            ]
+        )
+        calls = []
+        for step in generation:
+            if "argv" in step:
+                details = "$ " + shlex.join(step["argv"])
+            else:
+                params = json.dumps(step["parameters"], ensure_ascii=False, indent=2)
+                details = step["call"] + "\n" + params
+            calls.append(step["step"] + "\n" + details)
+        group.append(fenced("\n\n".join(calls), "text"))
+    for architecture, group in architectures.items():
+        if group:
+            blocks.extend([f"## {architecture}", *group])
+    write_if_changed(path, ("\n\n".join(blocks) + "\n").encode("utf-8"))

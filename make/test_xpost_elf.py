@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import struct
 import subprocess
@@ -154,7 +155,6 @@ class CompilerIntegrationTests(unittest.TestCase):
             self.skipTest('LLVM clang/objcopy/objdump/readelf required')
         from build import ensure_tool
         from build_steps import write_maps
-        from legacy_export import parse_maps_aot_addrs
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             src = root/'sample.c'
@@ -162,16 +162,18 @@ class CompilerIntegrationTests(unittest.TestCase):
 struct key { unsigned a:3; unsigned b:5; unsigned tail; };
 struct { int (*type)[1]; int (*max_entries)[4]; struct key *key; unsigned *value; }
 stats __attribute__((section(".maps"), used));
-extern unsigned helper_dispatcher(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned);
+extern unsigned consume_map(unsigned long, unsigned long);
 unsigned _start(void) {
     struct key k = {0};
-    return helper_dispatcher(1, (unsigned long)&stats, (unsigned long)&k, 0, 0, 0);
+    return consume_map((unsigned long)&stats, (unsigned long)&k);
 }
 _Static_assert(sizeof(struct key) == 8, "key size");
 _Static_assert(_Alignof(struct key) <= 4, "key alignment");
 ''')
             def run(*args):
-                return subprocess.run(args, check=True, capture_output=True, text=True).stdout
+                proc = subprocess.run(args, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, f"{args}\n{proc.stderr}")
+                return proc.stdout
             bpf = root/'bpf.o'
             run(clang, '--target=bpf', '-O2', '-g', '-c', str(src), '-o', str(bpf))
             maps = root/'maps.toml'
@@ -181,7 +183,7 @@ _Static_assert(_Alignof(struct key) <= 4, "key alignment");
                 '-O2', '-ffreestanding', '-c', str(src), '-o', str(obj))
             ld = root/'slot.ld'
             ld.write_text('''ENTRY(_start)
-helper_dispatcher = 0x40381000;
+consume_map = 0x40381000;
 SECTIONS { . = 0x40380000; .text : { *(.text*) } .maps : ALIGN(4) { *(.maps) } }
 ''')
             elf = root/'native.elf'
@@ -189,17 +191,24 @@ SECTIONS { . = 0x40380000; .text : { *(.text*) } .maps : ALIGN(4) { *(.maps) } }
                 '-Wl,-T,'+str(ld), str(obj), '-o', str(elf))
             raw = root/'sample.bin'
             run(objcopy, '-O', 'binary', str(elf), str(raw))
-            addresses = parse_maps_aot_addrs(objdump, elf)
-            self.assertIn('stats', addresses)
             out = root/'sample.elf'
             pack = ensure_tool(root)
+            address = json.loads(run(pack, "symbol", elf, "stats"))["addr"]
             args = [
                 pack, 'pack', '--image', raw, '--linked-elf', elf,
                 '--out', out, '--name', 'sample', '--slot-address', '0x40380000',
                 '--helper-address', '0x40381000',
             ]
+            exported = root/'rewritten.bin'
+            size = len(raw.read_bytes())
+            rejected = subprocess.run([*args, '--maps', maps, '--slot-length', str(size - 1),
+                                       '--export-image', exported], capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertFalse(out.exists())
+            self.assertFalse(exported.exists())
+            args.extend(['--slot-length', str(size)])
             run(*args, '--maps', maps)
-            report = root/'report.toml'
+            report = root/'no-maps.toml'
             report.write_text('[source]\npath = "sample.c"\n[assembly]\nlisting = "example"\n')
             rejected = subprocess.run([*args, '--maps', report], capture_output=True, text=True)
             self.assertNotEqual(rejected.returncode, 0)
@@ -207,7 +216,7 @@ SECTIONS { . = 0x40380000; .text : { *(.text*) } .maps : ALIGN(4) { *(.maps) } }
             metadata, image = parse_container(out.read_bytes())
             self.assertEqual(image, raw.read_bytes())
             self.assertEqual(metadata.maps[0].key_layout, (3, 5, 24, 32))
-            self.assertEqual(metadata.maps[0].map_vma, addresses['stats'])
+            self.assertEqual(metadata.maps[0].map_vma, address)
             output = run(readelf, '-h', '-S', str(out))
             for name in ('.xpost.meta', '.xpost.image', '.shstrtab'):
                 self.assertIn(name, output)

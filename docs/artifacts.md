@@ -1,105 +1,60 @@
 # Program artifacts and local releases
 
-The supported MCU is ESP32-C3 with RV32IMC, ILP32, and no FPU. The Rust host tool uses the sibling XPOST workspace's `xpost-elf` crate for XPM1 and Compact ELF V0. The local verifier checks the same wire format and payload digest. The 8192-byte container ceiling and 256-entry map limit mirror XPOST revision `94bfe6d8`. The device builder uses the same map limit and checks the configured image cell capacity. [XPOST encoder](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/xpost-elf/src/encode.rs#L8-L17) · [Device image and map builder](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/src/xdp/image/builder.rs#L209-L266) · [Device storage default](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/src/xdp/table/storage.rs#L17-L21)
+The `rv32imc` build target uses the ILP32 ABI and no FPU. The current XPOST machine profile supports ESP32-C3. The Rust host tool uses the sibling XPOST workspace's `xpost-elf` crate for XPM1 and Compact ELF V0. The local verifier checks the same wire format and payload digest. The 8192-byte container ceiling and 256-entry map limit mirror XPOST revision `94bfe6d8`. The device builder uses the same map limit and checks the configured image cell capacity. [XPOST encoder](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/xpost-elf/src/encode.rs#L8-L17) · [Device image and map builder](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/src/xdp/image/builder.rs#L209-L266) · [Device storage default](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/src/xdp/table/storage.rs#L17-L21)
 
 ## Program layout
 
 `--build-dir` selects the whole build root and defaults to `build/` in the checkout. Each program has its own directory and `index.toml`. A program archive starts at that directory. `<p>` is the C source stem.
 
-| Mode | Machine members relative to program root | Human report |
-| --- | --- | --- |
-| All | `index.toml`, `src/<p>.c` | |
-| Raw BPF | `bpf/<p>_bpf.o` | `bpf/report.toml` |
-| `llvm-aot` | `llvm-aot/<p>-vm-aot.elf` | `llvm-aot/report.toml` |
-| `ebpf` | `ebpf/<p>-vm-ebpf.elf` | `ebpf/report.toml` |
-| `jit` | `jit/<p>-vm-jit.elf` | `jit/report.toml` |
+A full `just_tx` program with all three deployments has these eight files:
 
-The `libbpf-mcu.program-index.v2` index records the program, source snapshot, original Clang object, and one `[[mode]]` table per available deployment. The `source` and `bpf` tables identify each member by role. Each deployment has `role = "xpost_container"` and `format = "xpost-compact-elf-v0"`. The source, object and ELF records give canonical relative paths, byte counts and SHA-256 of complete files.
-
-`pixi run python make/layout.py verify --build-dir DIR` verifies an extracted program root or enumerates program indexes one level below a build root. It checks path containment, sizes, complete file hashes, the BPF ELF type, and Compact ELF V0 metadata and payload digest. A BPF-only index omits `[[mode]]`. Machine verification works with the reports absent.
-
-The raw BPF object retains sections, BTF and relocations. PREVAIL checks this object before any deployment build. AOT independently compiles C with `include/`, links using the firmware slot and helper dispatcher, and packs the resulting image. Host JIT uses the raw object and links RV32IM instructions before packaging. The `ebpf` mode extracts the XDP section and rewrites map references to their indices in Compact ELF order. Its private RV32 link supplies the map addresses for the selected interpreter firmware, including when the same program's AOT container targets another firmware.
-
-The build root's `.ninja/` holds the graph, host tool, linker scripts, depfile state, fingerprints and failure diagnostics. Successful modes retain their receipts across invocations. Changed source, headers, object, verifier, firmware or linked map-address basis invalidates the corresponding outputs before the index advertises them again. The build lock serializes writes within the root. Compilations, PREVAIL acceptance, artifact verification and device execution establish separate evidence.
-
-The native object, linked debug ELF and flat image remain in the local `llvm-aot/` directory. `--no-compact-elf` produces those files and a report for inspection. The index exposes deployable containers. JIT keeps its local `jit.bin` and emits no relocatable object.
-
-## Human reports
-
-Each report starts with `[source]`. Its `path` identifies the original file relative to the checkout and `text` contains the UTF-8 source snapshot. `[assembly].listing` shows each instruction's bytes and operands with a section-relative byte offset for eBPF or a linked address for RV32. The raw BPF listing uses its executable ELF sections. The interpreter listing uses rewritten bytes from the container. AOT uses symbols from the linked ELF after checking the code sections against the container payload. The JIT listing stops at the end of the linked instructions.
-
-The `[[generation]]` entries record the executed arguments and in-process calls. Absolute paths in these arguments describe the actual build host. The report can be regenerated from the successful local build receipts and artifacts.
-
-```sh
-pixi run python make/layout.py reports --build-dir build
+```text
+just_tx/
+├── index.toml
+├── just_tx.c
+├── report.md
+├── objects/
+│   ├── just_tx_bpf.o
+│   └── just_tx_rv32.o
+└── containers/
+    ├── just_tx-vm-aot.elf
+    ├── just_tx-vm-ebpf.elf
+    └── just_tx-vm-jit.elf
 ```
 
-## Legacy export
+A fresh `pixi run build` currently builds and verifies raw BPF for every default source. The complete `just_tx` program in that build consists of `index.toml`, `just_tx.c`, `report.md` and `objects/just_tx_bpf.o`. The native object accompanies the LLVM AOT deployment. JIT produces linked instructions directly, and the rBPF deployment uses rewritten bytecode from the original eBPF object.
 
-The exporter accepts `rv32`, `jit` or `bpf-xpost` and reserves each output directory for one mode. It reconstructs legacy files from the original BPF object, linked ELF, deployment container and available build data. Historical v1 roots use their index and manifest for program identity and mode selection. When a required object or linked ELF is missing, rebuild the program from source.
+The machine contract is `libbpf-mcu.program-index.v3`. It records the program, source snapshot, original BPF ELF and one `[[mode]]` per deployment. Each deployment records its container. LLVM AOT also records the native relocatable object. Each referenced file has a canonical relative path, byte length and SHA-256. Use `pixi run python make/layout.py verify --build-dir DIR` on a build root or an extracted program directory to check the indexed bytes and ELF format.
 
-```sh
-pixi run python make/cli.py artifacts export-legacy --build-dir build --mode rv32 --out /tmp/libbpf-rv32
-```
+PREVAIL checks the original Clang object before the build exposes any program files, including in BPF-only builds. A rejected program requires investigation. In a deployment, the firmware supplies the slot address and capacity. The packer checks the final image size after map rewriting or native linking. Intermediate binaries, linked debug ELFs, linker scripts, dependency fingerprints and failure diagnostics belong to the build root’s private `.ninja/` directory.
 
-| Export mode | Files inside each program directory |
-| --- | --- |
-| `rv32` | `bpf.o`, `bpf.toml` with linked `aot_addr`, `esp32c3.o`, `esp32c3.elf`, `esp32c3.bin`, `<p>.elf` if packaged |
-| `jit` | `bpf.o`, `bpf.toml`, `jit.bin`, `jit.toml` with code extent and map bindings, `<p>.elf`, `prevail.ok` if present |
-| `bpf-xpost` | `bpf.o`, `bpf.toml`, `<p>.bin`, `<p>.elf` |
+## Reading the report
 
-## Offline packaging
+Each program contains one `report.md`. Source appears once. The eBPF chapter groups the original object and the rewritten interpreter payload. The `RV32IMC` chapter groups LLVM AOT and host JIT. Only built modes appear. Each subsection includes a fixed description of its ISA and execution model, instruction bytes, disassembly, and the actual generation steps. BPF addresses are byte offsets in executable sections. The rBPF listing shows the rewritten bytes in the deployed image. LLVM AOT uses linked RV32IMC addresses and checks the listing against the payload. Host JIT shows RV32IM instructions through the end of code, before map storage. Build commands may include the build host’s absolute paths.
 
-`release/programs.toml` lists the 17 formal sources under `tests/xdp/`. Each row always includes raw BPF. Add deployment modes after the maintainer confirms the linked firmware and its SHA-256 for each mode. An empty `modes` array requires no firmware. A single program can specify a different ELF, `image_name` or `slot_symbol` per mode. The firmware and source paths are relative to the checkout root.
-
-```toml
-schema = "libbpf-mcu.release-plan.v2"
-
-[[program]]
-name = "just_tx"
-source = "tests/xdp/just_tx.c"
-modes = ["jit"]
-
-[program.firmware.jit]
-path = "firmware/just_tx-jit.elf"
-sha256 = "<64 lowercase hex digits>"
-```
-
-Install `7zz` or `7z` and run the package task. The default output directory is `packages/` at the checkout root, where archives survive `pixi run clean`. A developer can pass `--plan` with a test configuration and choose a separate `--out` directory. The command accepts development worktrees and uses no GitHub credentials. Provision the build tools and dependency caches before running on a disconnected host.
-
-```sh
-pixi run package --out /path/to/fresh-archive-directory
-```
-
-The command builds the requested modes, checks the available index against the selection, archives each program as `<p>.7z`, and verifies it after extraction. Exact archive paths follow the program layout above. The package task reports commit, working-tree status, absolute archive paths, names and SHA-256 on stdout as JSON. Build and archiver logs go to stderr. A missing mode, missing or modified firmware, conflicting archive name, or build failure aborts packaging. Preserve the verified 7z files and the task's JSON output for publication retries.
+Run `pixi run python make/layout.py reports --build-dir build` to regenerate reports from a completed local build. Verification of the indexed machine files is independent of Markdown rendering. The archive includes the report from the same build.
 
 ## Publish program artifacts
 
-A maintainer's explicit request to publish the current `nan-mu/libbpf-mcu` `main` authorizes the agent to create the tag, upload the verified archives and make the Release public. Use a local authenticated `gh` session. Acquire a same-host lock for this repository before starting and hold it through final readback. An atomically created directory such as `~/.local/state/libbpf-mcu/publish.lock` works across checkouts. On interruption, confirm the previous agent has stopped before releasing its lock.
+An explicit request to publish the current `nan-mu/libbpf-mcu` `main` authorizes the agent to build, tag, upload and publish the GitHub Release. The default build determines both the program set and the members of each archive. Adding a source to the default build automatically includes its verified result in the next release.
 
-1. **Pin the commit.** Confirm `gh auth status --hostname github.com` and use `gh repo view nan-mu/libbpf-mcu --json nameWithOwner` to confirm the destination. Confirm local `main` is clean and compare its full HEAD SHA to `git ls-remote https://github.com/nan-mu/libbpf-mcu.git refs/heads/main`. Keep the verified SHA, exact archive list and original files together. For a fresh build, run `pixi run package` with the versioned plan at that SHA. Before allocating a tag, recheck HEAD, remote `main`, cleanliness, the package receipt's commit and the file names and digests. For a retry, look for the assigned tag and matching draft first and use the recorded files.
-2. **Allocate the tag and draft.** Read the remote tags with `git ls-remote --tags https://github.com/nan-mu/libbpf-mcu.git` and match `^v0\.1\.(0|[1-9][0-9]*)$`. Choose the largest numeric patch plus one, or `v0.1.0` if none exist. Find prior tags for the pinned SHA by resolving each candidate to its commit, peeling annotated tags when needed. Read drafts and public Releases via `gh api --paginate --slurp repos/nan-mu/libbpf-mcu/releases`, matching `tag_name`. A single matching tag can be reused. Resolve ambiguity before allocating another tag. Create a missing tag with the POST below. If creation races with another publisher, read the resulting ref before proceeding. A ref for the pinned commit can be reused. A tag already assigned to this attempt that points elsewhere requires stopping and reporting the difference. If a concurrent publish took an unassigned candidate for another commit, refresh the tag and Release lists before selecting the next version. Read the exact remote ref and confirm its commit before creating or reusing a draft.
+1. **Pin and build.** Confirm the destination and authenticated account with `gh repo view nan-mu/libbpf-mcu --json nameWithOwner` and `gh auth status --hostname github.com`. Fetch `main`, record its full SHA, and create a fresh detached worktree at that SHA with an empty `build/`. Initialize and build the PREVAIL submodule at the revision pinned by this commit, or point `PREVAIL` to a verifier built from that same revision. See the [build prerequisites](../README.md#prerequisites). From that worktree run **`pixi run build` without arguments**. Wait for its exit status. A nonzero status (including a PREVAIL rejection) ends the entire release attempt before tagging or uploading. Individual programs may still have completed locally.
+2. **Discover the outputs.** Run `pixi run python make/layout.py verify --build-dir build` and enumerate every `build/<program>/index.toml` from this run. Each archive contains `index.toml`, `report.md`, `source.path`, `bpf.path`, every `mode[].elf.path`, and each supplied `mode[].object.path`. Check that these are exactly the regular files under the program root, with no symlinks. The archive starts inside that root. The build root’s private `.ninja/` stays outside the program directories.
+3. **Create and check every archive locally.** Create a fresh staging directory outside the checkout. For each program use 7-Zip to create `<program>.7z` from its directory. Extract each archive into its own empty directory, verify the extracted index, and compare the full relative file set and all file bytes (including the report and index) with the build output. A failure here stops the release. Retain the originals and their SHA-256 values together with the pinned SHA and archive names for retries.
+
+   For example, in `build/just_tx/`, with `$archive` set to the absolute staging path ending in `just_tx.7z` and `$unpacked` to an empty directory:
 
    ```sh
-   gh api --hostname github.com -X POST repos/nan-mu/libbpf-mcu/git/refs \
-     -f ref="refs/tags/$tag" -f sha="$sha"
-   gh api --hostname github.com "repos/nan-mu/libbpf-mcu/git/ref/tags/$tag"
+   7zz a -t7z -- "$archive" .
+   7zz x -o"$unpacked" -- "$archive"
+   ```
+
+   `7z` accepts the same commands. From the checkout root, `pixi run python make/layout.py verify --build-dir "$unpacked"` verifies the extracted machine files.
+4. **Create or resume a draft.** Recheck the remote `main` SHA and the clean worktree. Look up the tags and Releases that already reference this commit, peeling annotated tags. Reuse the matching tag and draft when unambiguous. For a fresh tag, choose the next numeric patch among `v0.1.N`, starting at `v0.1.0`. Create the tag at the pinned SHA. If another writer claims that name first, read the ref and recompute the next available version when it belongs to another commit. Verify the tag target before creating a draft.
+
+   ```sh
+   gh api -X POST repos/nan-mu/libbpf-mcu/git/refs -f ref="refs/tags/$tag" -f sha="$sha"
    gh release create "$tag" -R nan-mu/libbpf-mcu --verify-tag --draft --generate-notes
    ```
 
-3. **Upload and verify.** Find the draft's numeric Release ID in the REST response. List every asset by Release ID, flatten the paginated arrays, and compare names, upload states and digests to the package receipt and original local files. Reuse an asset only if its name is expected, its state is `uploaded` and its digest is exactly `sha256:<local SHA-256>`. Upload each missing archive using the command below. Stop on an unexpected name, duplicate name, wrong digest or non-uploaded asset. After an upload error, re-read the assets before retrying. Never use `--clobber`.
-
-   ```sh
-   gh api --hostname github.com --paginate --slurp \
-     "repos/nan-mu/libbpf-mcu/releases/$release_id/assets"
-   gh release upload "$tag" "$archive" -R nan-mu/libbpf-mcu
-   ```
-
-4. **Publish and read back.** Immediately before changing draft status, re-read the tag, the Release and all its asset pages. Check the pinned SHA, exact set of asset names, `uploaded` states and matching SHA-256 digests. Once these checks pass, run the edit command. Read the Release again by its numeric ID and verify `draft=false`. Return its `html_url`, tag, commit SHA and attachment names and digests.
-
-   ```sh
-   gh release edit "$tag" -R nan-mu/libbpf-mcu --draft=false
-   gh api --hostname github.com "repos/nan-mu/libbpf-mcu/releases/$release_id"
-   ```
-
-A retry with a correct tag and no draft creates the missing draft. A draft carrying only verified assets resumes with the missing files from the original local set. If the same Release is already public, verify its tag and entire asset set and return the existing link. If any release input or remote asset differs, preserve the draft and report the difference. [GitHub Release API](https://docs.github.com/en/rest/releases/releases) · [GitHub asset digests](https://docs.github.com/en/rest/releases/assets) · [GitHub CLI release commands](https://cli.github.com/manual/gh_release)
+5. **Upload and publish.** Upload each verified archive to the draft with `gh release upload "$tag" "$archive" -R nan-mu/libbpf-mcu`. List every asset using `gh api --paginate --slurp "repos/nan-mu/libbpf-mcu/releases/$release_id/assets"`. On retry, compare against the original local archive bytes and upload only missing files. If a name, state or digest conflicts, leave the draft for inspection. Publish only after the full set matches, every asset has state `uploaded` and digest `sha256:<local SHA-256>`, and the tag and remote `main` still resolve to the pinned commit. Use `gh release edit "$tag" -R nan-mu/libbpf-mcu --draft=false`, read back the Release and assets by numeric Release ID, and return the Release URL, tag, commit and verified asset names and digests. For an already public matching Release, verify the existing tag and assets and return its URL. [GitHub Release API](https://docs.github.com/en/rest/releases/releases) · [GitHub asset digests](https://docs.github.com/en/rest/releases/assets) · [GitHub CLI release commands](https://cli.github.com/manual/gh_release)

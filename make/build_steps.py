@@ -16,13 +16,14 @@ from layout import (
     LayoutError,
     bpf_path,
     container_path,
+    native_object_path,
     q,
     sha256_file,
     source_path,
     state_path,
     write_if_changed,
 )
-from prevail_gate import prevail_bin, stamp_aot
+from prevail_gate import examine
 from xdp_section import program_section
 from xpost_elf import parse_container
 
@@ -86,7 +87,7 @@ def build_bpf(
     root: Path, src: Path, config: dict, config_path: Path, state: Path
 ) -> None:
     program = src.stem
-    obj, snapshot = bpf_path(root, program), source_path(root, program)
+    obj, snapshot = state.with_name(f"{program}_bpf.o"), state.with_name(f"{program}.c")
     original = src.read_bytes()
     generation = []
     headers = compile_c(
@@ -110,15 +111,20 @@ def build_bpf(
     )
 
 
-def verify_bpf(root: Path, program: str, state: Path) -> None:
-    obj = bpf_path(root, program)
-    stamp = obj.parent / "prevail.ok"
-    stamp_aot(obj, stamp)
+def verify_bpf(root: Path, program: str, state: Path, config: Path) -> None:
+    basis = state_path(root, program, "bpf")
+    obj = basis.with_name(f"{program}_bpf.o")
+    snapshot = basis.with_name(f"{program}.c")
+    verifier = Path(json.loads(config.read_text())["verifier"])
+    examine(obj, verifier)
+    public_obj, public_src = bpf_path(root, program), source_path(root, program)
+    write_if_changed(public_obj, obj.read_bytes())
+    write_if_changed(public_src, snapshot.read_bytes())
     record(
         state,
-        inputs=[prevail_bin().resolve()],
-        outputs=[stamp],
-        upstream=[state_path(root, program, "bpf")],
+        inputs=[config, verifier, Path(__file__).with_name("prevail_gate.py")],
+        outputs=[public_obj, public_src],
+        upstream=[basis],
     )
 
 
@@ -141,6 +147,8 @@ def pack_args(cfg, image, maps, debug):
         cfg["image_name"],
         "--slot-address",
         hex(cfg["slot_addr"]),
+        "--slot-length",
+        hex(cfg["slot_len"]),
         "--helper-address",
         hex(cfg["helper_addr"]),
         "--machine",
@@ -152,7 +160,7 @@ def build_native(
     root: Path, mode: str, src: Path, cfg: dict, config: Path, state: Path
 ) -> None:
     name = src.stem
-    out = root / name / mode if mode == "llvm-aot" else state.parent
+    out = state.parent
     obj = out / f"{name}_rv32.o"
     debug = out / f"{name}_rv32.debug.elf"
     snapshot = source_path(root, name).read_bytes()
@@ -173,8 +181,10 @@ def build_native(
             "riscv32-unknown-none-elf",
             "-nostdlib",
             "-fuse-ld=lld",
-            "-Wl,-T," + cfg["linker"],
-            "-Wl",
+            "-Xlinker",
+            "-T",
+            "-Xlinker",
+            cfg["linker"],
             obj,
             "-o",
             debug,
@@ -187,21 +197,20 @@ def build_native(
         run(generation, "convert", [cfg["objcopy"], "-O", "binary", debug, image])
         files.append(image)
         facts.update(image=str(image), slot=cfg["slot_addr"])
-        if cfg["compact"]:
-            maps = state.with_name("maps.toml")
-            write_maps(generation, bpf_path(root, name), maps)
-            container = container_path(root, name, mode)
-            run(
-                generation,
-                "pack",
-                [*pack_args(cfg, image, maps, debug), "-o", container],
-            )
-            _meta, payload = parse_container(container.read_bytes())
-            if payload != image.read_bytes():
-                raise LayoutError("AOT payload differs from the linked image")
-            files.append(container)
-        else:
-            container_path(root, name, mode).unlink(missing_ok=True)
+        maps = state.with_name("maps.toml")
+        write_maps(generation, bpf_path(root, name), maps)
+        packed = state.with_name("container.elf")
+        run(generation, "pack", [*pack_args(cfg, image, maps, debug), "-o", packed])
+        data = packed.read_bytes()
+        _meta, payload = parse_container(data)
+        if payload != image.read_bytes():
+            raise LayoutError("AOT payload differs from the linked image")
+        check_firmware(cfg)
+        container = container_path(root, name, mode)
+        public_obj = native_object_path(root, name)
+        write_if_changed(container, data)
+        write_if_changed(public_obj, obj.read_bytes())
+        files.extend([container, public_obj])
     check_firmware(cfg)
     tools = [cfg["clang"], cfg["tool"]]
     if mode == "llvm-aot":
@@ -228,7 +237,8 @@ def build_ebpf(root: Path, program: str, cfg: dict, config: Path, state: Path) -
     debug = read_state(basis)["linked_elf"]
     section = program_section(obj)
     raw = state.with_name("section.bin")
-    image = root / program / "ebpf" / f"{program}_bpf-xpost.bin"
+    image = state.with_name("rewritten.bin")
+    packed = state.with_name("container.elf")
     container = container_path(root, program, "ebpf")
     run(
         generation,
@@ -246,13 +256,15 @@ def build_ebpf(root: Path, program: str, cfg: dict, config: Path, state: Path) -
             "--export-image",
             image,
             "-o",
-            container,
+            packed,
         ],
     )
-    _meta, payload = parse_container(container.read_bytes())
+    data = packed.read_bytes()
+    _meta, payload = parse_container(data)
     if payload != image.read_bytes():
         raise LayoutError("rBPF payload differs from the rewritten instructions")
     check_firmware(cfg)
+    write_if_changed(container, data)
     record(
         state,
         inputs=[config, cfg["firmware"], cfg["tool"], cfg["objcopy"]],
@@ -272,7 +284,7 @@ def build_jit(root: Path, program: str, cfg: dict, config: Path, state: Path) ->
     stage = state.parent / ".jit-stage"
     shutil.rmtree(stage, ignore_errors=True)
     container = container_path(root, program, "jit")
-    image = container.with_name("jit.bin")
+    image = state.with_name("jit.bin")
     try:
         run(
             generation,
@@ -301,10 +313,10 @@ def build_jit(root: Path, program: str, cfg: dict, config: Path, state: Path) ->
         _meta, payload = parse_container(data)
         if payload != (stage / "jit.bin").read_bytes():
             raise LayoutError("JIT payload differs from the linked words")
-        os.replace(stage / "jit.bin", image)
-        os.replace(stage / "container.elf", container)
-        generation.extend(info["generation"])
         check_firmware(cfg)
+        os.replace(stage / "jit.bin", image)
+        write_if_changed(container, data)
+        generation.extend(info["generation"])
         record(
             state,
             inputs=[config, cfg["firmware"], cfg["tool"]],
@@ -334,7 +346,7 @@ def main() -> None:
         if args.mode == "bpf":
             build_bpf(args.root, args.src, cfg, args.config, state)
         elif args.mode == "prevail":
-            verify_bpf(args.root, args.src.stem, state)
+            verify_bpf(args.root, args.src.stem, state, args.config)
         elif args.mode in ("llvm-aot", "ebpf-native"):
             build_native(args.root, args.mode, args.src, cfg, args.config, state)
         elif args.mode == "ebpf":

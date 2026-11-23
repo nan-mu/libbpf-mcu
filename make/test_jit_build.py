@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
+import shlex
 import struct
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 
@@ -15,16 +16,15 @@ from build import tool_bin_path
 from build_state import read_state, render_reports
 from layout import (
     ROOT,
-    LayoutError,
     bpf_path,
     container_path,
-    export_legacy,
     load_index,
+    native_object_path,
     report_path,
     source_path,
     state_path,
 )
-from obj_report import executable_sections
+from obj_report import MACHINES, executable_sections
 from xpost_elf import parse_container
 from xpost_mem import MAGIC, WIRE_SIZE
 
@@ -33,8 +33,8 @@ SLOT = 0x40380200
 SLOT_LEN = 0xE00
 
 
-def xpm1_record() -> bytes:
-    payload = struct.pack("<6I", MAGIC, HELPER, SLOT, SLOT_LEN, 0x310000, 0x10000)
+def xpm1_record(slot_len: int = SLOT_LEN) -> bytes:
+    payload = struct.pack("<6I", MAGIC, HELPER, SLOT, slot_len, 0x310000, 0x10000)
     if len(payload) != WIRE_SIZE:
         raise RuntimeError(f"XPM1 record is {len(payload)} bytes, not {WIRE_SIZE}")
     return payload
@@ -115,7 +115,7 @@ class ProgramBuildTests(unittest.TestCase):
         cls.firmware.write_bytes(firmware_elf(xpm1_record()))
         cls.build_dir = cls.root / "build"
         cls.program = cls.build_dir / "just_tx"
-        cls.aot_args = ("esp32c3", "-c", "just_tx", "--firmware", cls.firmware)
+        cls.aot_args = ("rv32imc", "-c", "just_tx", "--firmware", cls.firmware)
         cls.ebpf_args = (*cls.aot_args, "--engine", "rbpf")
         cls.jit_args = ("jit", "-c", "just_tx", "--firmware", cls.firmware)
         for args in (cls.aot_args, cls.ebpf_args, cls.jit_args):
@@ -125,18 +125,30 @@ class ProgramBuildTests(unittest.TestCase):
         root, name = self.build_dir, "just_tx"
         original = (ROOT / "tests/xdp/just_tx.c").read_bytes()
         self.assertEqual(original, source_path(root, name).read_bytes())
-        native = executable_sections(
-            (self.program / "llvm-aot" / "just_tx_rv32.debug.elf").read_bytes()
+        native_state = read_state(state_path(root, name, "llvm-aot"))
+        native = executable_sections(Path(native_state["linked_elf"]).read_bytes())
+        self.assertTrue(native_object_path(root, name).is_file())
+        report = report_path(root, name).read_text()
+        self.assertEqual(report.count(original.decode()), 1)
+        self.assertIn("tests/xdp/just_tx.c", report)
+        self.assertEqual(
+            re.findall(r"^## (.+)$", report, flags=re.MULTILINE),
+            ["Source", "eBPF", "RV32IMC"],
         )
+        sections = re.split(r"^### (.+)$", report, flags=re.MULTILINE)
+        sections = dict(zip(sections[1::2], sections[2::2], strict=True))
+        self.assertEqual(set(sections), {"bpf", "llvm-aot", "ebpf", "jit"})
         bpf = executable_sections(bpf_path(root, name).read_bytes())
         for mode in ("bpf", "llvm-aot", "ebpf", "jit"):
             with self.subTest(mode=mode):
-                path = report_path(root, name, mode)
-                doc = tomllib.loads(path.read_text())
-                self.assertEqual(set(doc), {"source", "assembly", "generation"})
-                self.assertEqual(doc["source"]["path"], "tests/xdp/just_tx.c")
-                self.assertEqual(doc["source"]["text"].encode(), original)
-                self.assertIn("rxcnt = {", doc["source"]["text"])
+                section_text = sections[mode]
+                self.assertIn(MACHINES[mode], section_text)
+                match = re.search(
+                    r"^#### Machine code and assembly\n+(`{3,})text\n(.*?)^\1$",
+                    section_text, re.MULTILINE | re.DOTALL,
+                )
+                self.assertIsNotNone(match)
+                listing = match.group(2)
                 if mode == "bpf":
                     expected = {code.name: (0, code.data) for code in bpf}
                 else:
@@ -170,7 +182,7 @@ class ProgramBuildTests(unittest.TestCase):
                         self.assertEqual(image[code_len:], bytes(16))
                 seen = set()
                 at, payload = 0, b""
-                for line in doc["assembly"]["listing"].splitlines():
+                for line in listing.splitlines():
                     match = re.fullmatch(r"([a-z0-9_.]+)  \(.+\)", line)
                     if match:
                         self.assertEqual(payload, b"")
@@ -194,7 +206,14 @@ class ProgramBuildTests(unittest.TestCase):
                     ]
                 if mode != "bpf":
                     generation += read_state(state_path(root, name, mode))["generation"]
-                self.assertEqual(doc["generation"], generation)
+                steps = section_text.split("#### Build steps", 1)[1]
+                for step in generation:
+                    self.assertIn(step["step"], steps)
+                    if "argv" in step:
+                        self.assertIn("$ " + shlex.join(step["argv"]), steps)
+                    else:
+                        params = json.dumps(step["parameters"], ensure_ascii=False, indent=2)
+                        self.assertIn(step["call"] + "\n" + params, steps)
                 self.assertIn("--target=bpf", generation[0]["argv"])
                 self.assertIn("-O2", generation[0]["argv"])
                 if mode != "bpf":
@@ -202,55 +221,29 @@ class ProgramBuildTests(unittest.TestCase):
 
     def test_incremental_and_reports_are_not_inputs(self):
         root, name = self.build_dir, "just_tx"
-        reports = [
-            report_path(root, name, mode) for mode in ("bpf", "llvm-aot", "ebpf", "jit")
-        ]
-        saved = {p: p.read_bytes() for p in reports}
-        try:
-            reports[0].write_text("changed report")
-            for path in reports[1:]:
-                path.unlink()
+        report = report_path(root, name)
+        original = report.read_bytes()
+        report.unlink()
+        self.assertEqual(len(load_index(self.program)["mode"]), 3)
+        for args in (self.aot_args, self.ebpf_args, self.jit_args):
+            run = run_build(*args, build_dir=root)
+            self.assertIn("ninja: no work to do.", run.stdout)
+            graph = (root / ".ninja" / "build.ninja").read_text()
+            self.assertNotIn("report.md", graph)
+        self.assertEqual(report.read_bytes(), original)
+        for args in (self.aot_args, self.ebpf_args, self.jit_args):
+            run = run_build(*args, "--force", build_dir=root)
+            self.assertIn("prevail just_tx", run.stdout)
             self.assertEqual(len(load_index(self.program)["mode"]), 3)
-            for mode in ("rv32", "bpf-xpost", "jit"):
-                self.assertIn(
-                    name, export_legacy(root, self.root / f"legacy-{mode}", mode)
-                )
-            legacy = self.root / "legacy-rv32" / name
-            addresses = tomllib.loads((legacy / "bpf.toml").read_text())["maps"][
-                "rxcnt"
-            ]
-            meta, _ = parse_container(
-                container_path(root, name, "llvm-aot").read_bytes()
-            )
-            self.assertEqual(addresses["aot_addr"], meta.maps[0].map_vma)
-            with self.assertRaisesRegex(LayoutError, "refusing to mix"):
-                export_legacy(root, self.root / "legacy-rv32", "jit")
-            for args in (self.aot_args, self.ebpf_args, self.jit_args):
-                run = run_build(*args, build_dir=root)
-                self.assertIn("ninja: no work to do.", run.stdout)
-                graph = (root / ".ninja" / "build.ninja").read_text()
-                self.assertNotIn("report.toml", graph)
-                self.assertNotIn("--bpf-toml", graph)
-                self.assertNotIn("--addr-toml", graph)
-            for args in (self.aot_args, self.ebpf_args, self.jit_args):
-                for path in reports:
-                    path.unlink(missing_ok=True)
-                run = run_build(*args, "--force", build_dir=root)
-                self.assertIn("prevail just_tx", run.stdout)
-                self.assertEqual(len(load_index(self.program)["mode"]), 3)
-            render_reports(root, name, force=True)
-            for path, data in saved.items():
-                self.assertEqual(path.read_bytes(), data)
-        finally:
-            for path, data in saved.items():
-                path.write_bytes(data)
+        render_reports(root, name, force=True)
+        self.assertEqual(report.read_bytes(), original)
 
     def test_firmware_rebuild_only_retracts_invalid_mode(self):
         root = self.build_dir
         firmware = self.root / "other-firmware.elf"
         firmware.write_bytes(self.firmware.read_bytes())
         jit = ("jit", "-c", "just_drop", "--firmware", firmware)
-        aot = ("esp32c3", "-c", "just_drop", "--firmware", self.firmware)
+        aot = ("rv32imc", "-c", "just_drop", "--firmware", self.firmware)
         run_build(*aot, build_dir=root)
         run_build(*jit, build_dir=root)
         program = root / "just_drop"
@@ -279,20 +272,33 @@ class ProgramBuildTests(unittest.TestCase):
             [row["name"] for row in load_index(program)["mode"]], ["llvm-aot", "jit"]
         )
 
-    def test_prevail_rejection_leaves_only_the_raw_object(self):
+    def test_rewritten_bytecode_must_fit_firmware_slot(self):
+        program = "just_tx"
+        _, payload = parse_container(container_path(self.build_dir, program, "ebpf").read_bytes())
+        with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+            root = Path(tmp) / "build"
+            firmware = Path(tmp) / "limited.elf"
+            args = ("rv32imc", "-c", program, "--engine", "rbpf", "--firmware", firmware)
+            firmware.write_bytes(firmware_elf(xpm1_record(len(payload))))
+            run_build(*args, build_dir=root)
+            self.assertTrue(container_path(root, program, "ebpf").is_file())
+            firmware.write_bytes(firmware_elf(xpm1_record(len(payload) - 1)))
+            rejected = run_build(*args, build_dir=root, check=False)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("ImageExceedsSlot", rejected.stdout + rejected.stderr)
+            self.assertEqual(load_index(root / program)["mode"], [])
+            self.assertFalse(container_path(root, program, "ebpf").exists())
+
+    def test_prevail_rejection_blocks_every_public_member(self):
         source = ROOT / "tests/unused/xdp_oob_packet.c"
         process = run_build(
-            "jit",
-            "--inputs",
-            source,
-            "--firmware",
-            self.firmware,
+            "bpf", "--inputs", source,
             build_dir=self.build_dir,
             check=False,
         )
         self.assertNotEqual(process.returncode, 0)
-        self.assertFalse((self.build_dir / source.stem / "bpf" / "prevail.ok").exists())
-        self.assertEqual(load_index(self.build_dir / source.stem)["mode"], [])
+        self.assertFalse(any(p.is_file() for p in (self.build_dir / source.stem).rglob("*")))
+        self.assertTrue((self.build_dir / ".ninja" / source.stem / "diagnostics.json").is_file())
 
 
 if __name__ == "__main__":

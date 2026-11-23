@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import keyword
 import re
 import struct
 import sys
@@ -760,55 +759,6 @@ def analyze(obj_path: Path) -> dict[str, Any]:
         core = parse_core(ext, types, strtab)
 
     return {"maps": maps, "core": core}
-
-
-from layout import append_multiline, q as toml_string
-
-
-def _maps_table_name(name: str) -> str:
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) and not keyword.iskeyword(name):
-        return f"maps.{name}"
-    return f"maps.{toml_string(name)}"
-
-
-def format_core_csv(core: list[dict[str, Any]]) -> str:
-    rows = ["insn_off,type_id,access_str,kind,type_name,section"]
-    for relo in core:
-        rows.append(
-            "{insn_off:#06x},{type_id},{access_str},{kind},{type_name},{section}".format(
-                insn_off=int(relo.get("insn_off", 0)),
-                type_id=int(relo.get("type_id", 0)),
-                access_str=str(relo.get("access_str", "")),
-                kind=int(relo.get("kind", 0)),
-                type_name=str(relo.get("type_name", "")),
-                section=str(relo.get("section", "")),
-            )
-        )
-    return "\n".join(rows)
-
-
-def format_btf_toml(report: dict[str, Any]) -> list[str]:
-    """Render maps + CORE for bpf.toml (after [xdp]/[text])."""
-    maps = report.get("maps") or {}
-    items = maps.get("items") or []
-    core = report.get("core") or []
-    lines: list[str] = []
-
-    for item in items:
-        lines.append(f"[{_maps_table_name(str(item.get('name', '')))}]")
-        lines.append(f"map_type = {toml_string(str(item.get('map_type_name', '')))}")
-        lines.append(f"max_entries = {int(item.get('max_entries', 0))}")
-        lines.append(f"key_size = {int(item.get('key_size', 0))}")
-        lines.append(f"value_size = {int(item.get('value_size', 0))}")
-        lines.append(f"estimated_bytes = {int(item.get('estimated_bytes', 0))}")
-        append_multiline(lines, "key", str(item.get("key", "")))
-        append_multiline(lines, "value", str(item.get("value", "")))
-        lines.append("")
-
-    lines.append("[CORE]")
-    append_multiline(lines, "records", format_core_csv(core))
-    lines.append("")
-    return lines
 
 
 def main() -> None:

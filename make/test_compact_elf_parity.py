@@ -55,7 +55,7 @@ value = "u32 a\\nu32 b"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             img = root / "img.bin"
-            bpf = root / "bpf.toml"
+            bpf = root / "map-definitions.toml"
             out = root / "example.elf"
             img.write_bytes(image)
             bpf.write_text(toml_text)

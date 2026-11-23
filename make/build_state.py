@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from functools import cache
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from layout import (
     bpf_path,
     container_path,
     make_index,
+    native_object_path,
     report_path,
     sha256_file,
     source_path,
@@ -37,9 +39,10 @@ PRIVATE_MODES = ("bpf", "prevail", "llvm-aot", "ebpf-native", "ebpf", "jit")
 
 def parse_depfile(text: str) -> list[str]:
     text = text.replace("\\\n", " ")
-    _target, separator, rest = text.partition(":")
-    if not separator:
+    separator = re.search(r":(?=\s|$)", text)
+    if separator is None:
         raise LayoutError("invalid Clang depfile")
+    rest = text[separator.end():]
     paths, current = [], []
     escaped = False
     for char in rest:
@@ -113,9 +116,72 @@ def verify_state(path: Path, checked: dict[Path, str | None]) -> str | None:
                 checked[path] = reason
                 return reason
         checked[path] = None
-    except (OSError, KeyError, TypeError, ValueError) as exc:
-        checked[path] = str(exc)
+    except (OSError, AttributeError, KeyError, TypeError, ValueError) as exc:
+        checked[path] = f"invalid build state: {exc}"
     return checked[path]
+
+
+def prepare_program(root: Path, program: str) -> None:
+    """Retire only known v2 producer files, and keep writes inside the build root."""
+    public = root / program
+    private = root / ".ninja" / program
+    for directory in (
+        public,
+        private,
+        public / "objects",
+        public / "containers",
+        *(private / mode for mode in PRIVATE_MODES),
+    ):
+        if directory.is_symlink():
+            raise LayoutError(f"symlink is not a build directory: {directory}")
+    ownership = private / "public-layout"
+    if ownership.is_symlink():
+        raise LayoutError(f"symlink is not a build marker: {ownership}")
+    if ownership.is_file() and ownership.read_bytes() == b"v3\n":
+        return
+    old_object = public / "bpf" / f"{program}_bpf.o"
+    receipt = state_path(root, program, "bpf")
+    v2 = receipt.is_file() and str(old_object) in read_state(receipt)["outputs"]
+    index = public / "index.toml"
+    reserved = [
+        source_path(root, program),
+        bpf_path(root, program),
+        native_object_path(root, program),
+        report_path(root, program),
+        *(container_path(root, program, mode) for mode in MODES),
+    ]
+    if not v2:
+        reserved.append(index)
+    for path in reserved:
+        if path.exists() or path.is_symlink():
+            raise LayoutError(f"existing file is not owned by this build: {path}")
+    if not v2:
+        write_if_changed(ownership, b"v3\n")
+        return
+    old_files = {
+        "src": [f"{program}.c"],
+        "bpf": [old_object.name, "prevail.ok", "report.toml"],
+        "llvm-aot": [
+            f"{program}_rv32.o",
+            f"{program}_rv32.debug.elf",
+            f"{program}_rv32.bin",
+            f"{program}-vm-aot.elf",
+            "report.toml",
+        ],
+        "ebpf": [f"{program}_bpf-xpost.bin", f"{program}-vm-ebpf.elf", "report.toml"],
+        "jit": ["jit.bin", f"{program}-vm-jit.elf", "report.toml"],
+    }
+    for component, filenames in old_files.items():
+        directory = public / component
+        if directory.is_symlink():
+            raise LayoutError(f"symlink is not a build directory: {directory}")
+        if directory.is_dir():
+            for filename in filenames:
+                (directory / filename).unlink(missing_ok=True)
+            if not any(directory.iterdir()):
+                directory.rmdir()
+    index.unlink(missing_ok=True)
+    write_if_changed(ownership, b"v3\n")
 
 
 def reconcile(
@@ -133,20 +199,38 @@ def reconcile(
         for mode, path in states.items()
         if (reason := verify_state(path, checked)) is not None
     }
+    obj, source = bpf_path(root, program), source_path(root, program)
+    gate = states["prevail"]
+    if "prevail" not in reasons:
+        if set(read_state(gate)["outputs"]) != {str(obj), str(source)}:
+            reasons["prevail"] = "verified outputs changed"
+    gate_invalid = "bpf" in reasons or "prevail" in reasons
+    if gate_invalid:
+        obj.unlink(missing_ok=True)
+        source.unlink(missing_ok=True)
+    for mode in MODES:
+        container = container_path(root, program, mode)
+        files = [container]
+        if mode == "llvm-aot":
+            files.append(native_object_path(root, program))
+        if mode not in reasons:
+            recorded = read_state(states[mode])["outputs"]
+            if any(str(path) not in recorded for path in files):
+                reasons[mode] = "published outputs changed"
+        if gate_invalid or mode in reasons:
+            for path in files:
+                path.unlink(missing_ok=True)
     index_path = root / program / "index.toml"
-    if "bpf" in reasons or "bpf" in hidden:
+    report = report_path(root, program)
+    if gate_invalid or "bpf" in hidden:
         index_path.unlink(missing_ok=True)
-        modes = ()
+        report.unlink(missing_ok=True)
     else:
-        modes = tuple(
-            mode
-            for mode in MODES
-            if mode not in reasons
-            and mode not in hidden
-            and str(container_path(root, program, mode))
-            in read_state(states[mode])["outputs"]
-        )
+        modes = tuple(mode for mode in MODES if mode not in reasons and mode not in hidden)
+        before = index_path.read_bytes() if index_path.exists() else None
         write_index(index_path, make_index(index_path.parent, program, modes))
+        if before != index_path.read_bytes():
+            report.unlink(missing_ok=True)
     diagnostics = states["bpf"].parent.parent / "diagnostics.json"
     old = read_state(diagnostics) if diagnostics.is_file() else {}
     for mode, reason in reasons.items():
@@ -161,25 +245,46 @@ def reconcile(
     return reasons
 
 
-def render_reports(root: Path, program: str, *, force: bool = False) -> None:
+def render_reports(
+    root: Path,
+    program: str,
+    *,
+    force: bool = False,
+    modes: tuple[str, ...] | None = None,
+    destination: Path | None = None,
+) -> None:
+    report = destination or report_path(root, program)
+    try:
+        _render_reports(root, program, report, modes, force)
+    except (Exception, KeyboardInterrupt):
+        report.unlink(missing_ok=True)
+        raise
+
+
+def _render_reports(root: Path, program: str, report: Path, modes, force: bool) -> None:
     checked: dict[Path, str | None] = {}
-    state_file = state_path(root, program, "bpf")
-    if verify_state(state_file, checked):
-        return
-    bpf = read_state(state_file)
+    gate = state_path(root, program, "prevail")
+    if reason := verify_state(gate, checked):
+        raise LayoutError(f"{program}: unable to report unverified BPF: {reason}")
+    bpf = read_state(state_path(root, program, "bpf"))
     obj = bpf_path(root, program)
     snapshot = source_path(root, program).read_bytes()
-    for mode in ("bpf", *MODES):
+    selected = ["bpf"]
+    for mode in MODES:
+        if modes is not None and mode not in modes:
+            continue
+        reason = verify_state(state_path(root, program, mode), checked)
+        if not reason:
+            selected.append(mode)
+        elif modes is not None:
+            raise LayoutError(f"{program}/{mode}: {reason}")
+    if modes is None and not force and report.is_file():
+        newest = max(state_path(root, program, mode).stat().st_mtime_ns for mode in selected)
+        if report.stat().st_mtime_ns >= newest:
+            return
+    sections = []
+    for mode in selected:
         path = state_path(root, program, mode)
-        if verify_state(path, checked):
-            continue
-        report = report_path(root, program, mode)
-        if (
-            not force
-            and report.is_file()
-            and report.stat().st_mtime_ns >= path.stat().st_mtime_ns
-        ):
-            continue
         state = read_state(path)
         objdump = state["objdump"]
         generation = list(bpf["generation"])
@@ -190,15 +295,11 @@ def render_reports(root: Path, program: str, *, force: bool = False) -> None:
             )
         else:
             container = container_path(root, program, mode)
-            if str(container) in state["outputs"]:
-                meta, image = parse_container(container.read_bytes())
-                slot = meta.slot_address
-            else:
-                image = Path(state["image"]).read_bytes()
-                slot = state["slot"]
+            meta, image = parse_container(container.read_bytes())
+            slot = meta.slot_address
             if mode == "llvm-aot":
-                sections = executable_sections(Path(state["linked_elf"]).read_bytes())
-                for code in sections:
+                code_sections = executable_sections(Path(state["linked_elf"]).read_bytes())
+                for code in code_sections:
                     offset = code.address - slot
                     if (
                         offset < 0
@@ -215,7 +316,7 @@ def render_reports(root: Path, program: str, *, force: bool = False) -> None:
                         bpf=False,
                         compressed=True,
                     )
-                    for code in sections
+                    for code in code_sections
                 )
             elif mode == "ebpf":
                 listing = disassemble_payload(
@@ -235,6 +336,5 @@ def render_reports(root: Path, program: str, *, force: bool = False) -> None:
             generation.extend(state["generation"])
         if not listing:
             raise LayoutError(f"{program}/{mode}: empty code listing")
-        write_report(
-            report, os.path.relpath(bpf["source"], ROOT), snapshot, listing, generation
-        )
+        sections.append((mode, listing, generation))
+    write_report(report, os.path.relpath(bpf["source"], ROOT), snapshot, sections)

@@ -11,4 +11,6 @@ jit/oracle/target/
 jit/oracle/build/
 jit/oracle/results.json
 /.build.lock
+# Local archives and locks produced by earlier checkouts
 /packages/
+/.packages.lock

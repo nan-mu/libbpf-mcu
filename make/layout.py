@@ -1,4 +1,4 @@
-"""Program index, independent artifact verification, and legacy export."""
+"""Program index and independent artifact verification."""
 
 from __future__ import annotations
 
@@ -16,9 +16,8 @@ from pathlib import Path, PureWindowsPath
 from xpost_elf import parse_container
 
 ROOT = Path(__file__).resolve().parent.parent
-SCHEMA_INDEX = "libbpf-mcu.program-index.v2"
+SCHEMA_INDEX = "libbpf-mcu.program-index.v3"
 MODES = ("llvm-aot", "ebpf", "jit")
-LEGACY_MODES = {"rv32": "llvm-aot", "jit": "jit", "bpf-xpost": "ebpf"}
 CONTAINER_ROLE = "xpost_container"
 CONTAINER_FORMAT = "xpost-compact-elf-v0"
 
@@ -30,7 +29,7 @@ class LayoutError(ValueError):
 def check_program(name: str) -> str:
     if (
         not isinstance(name, str)
-        or name in {"", ".", "..", ".ninja"}
+        or name.casefold() in {"", ".", "..", ".ninja", "index.toml"}
         or PureWindowsPath(name).drive
         or any(ch in "/\\" or ord(ch) < 32 or ord(ch) == 127 for ch in name)
     ):
@@ -56,6 +55,8 @@ def atomic_write(path: Path, data: bytes) -> None:
 
 
 def write_if_changed(path: Path, data: bytes) -> None:
+    if path.is_symlink():
+        raise LayoutError(f"symlink is not a build output: {path}")
     if not path.is_file() or path.read_bytes() != data:
         atomic_write(path, data)
 
@@ -63,7 +64,7 @@ def write_if_changed(path: Path, data: bytes) -> None:
 @contextmanager
 def lock(root: Path):
     # Keep the lock beside the root so removing the default tree does not
-    # replace the lock inode while a build or export is waiting on it.
+    # replace the lock inode while another build is waiting on it.
     root.parent.mkdir(parents=True, exist_ok=True)
     with (root.parent / f".{root.name}.lock").open("a") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
@@ -74,31 +75,25 @@ def q(value: str) -> str:
     return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
-def append_multiline(lines: list[str], field: str, text: str) -> None:
-    if "'''" not in text and all(
-        ch in "\n\t" or ord(ch) >= 32 and ord(ch) != 127 for ch in text
-    ):
-        lines.append(f"{field} = '''\n{text}'''")
-    else:
-        escaped = "\n".join(q(line)[1:-1] for line in text.split("\n"))
-        lines.append(f'{field} = """\n{escaped}"""')
-
-
 def source_path(root: Path, program: str) -> Path:
-    return root / program / "src" / f"{program}.c"
+    return root / program / f"{program}.c"
 
 
 def bpf_path(root: Path, program: str) -> Path:
-    return root / program / "bpf" / f"{program}_bpf.o"
+    return root / program / "objects" / f"{program}_bpf.o"
 
 
-def report_path(root: Path, program: str, mode: str) -> Path:
-    return root / program / mode / "report.toml"
+def native_object_path(root: Path, program: str) -> Path:
+    return root / program / "objects" / f"{program}_rv32.o"
+
+
+def report_path(root: Path, program: str) -> Path:
+    return root / program / "report.md"
 
 
 def container_path(root: Path, program: str, mode: str) -> Path:
     suffix = {"llvm-aot": "aot", "ebpf": "ebpf", "jit": "jit"}[mode]
-    return root / program / mode / f"{program}-vm-{suffix}.elf"
+    return root / program / "containers" / f"{program}-vm-{suffix}.elf"
 
 
 def state_path(root: Path, program: str, mode: str) -> Path:
@@ -131,22 +126,25 @@ def member(root: Path, path: Path) -> dict:
 
 
 def make_index(program_root: Path, program: str, modes: tuple[str, ...]) -> dict:
+    check_program(program)
+    root = program_root.parent
+    rows = []
+    for mode in modes:
+        row = {
+            "name": mode,
+            "role": CONTAINER_ROLE,
+            "format": CONTAINER_FORMAT,
+            "elf": member(program_root, container_path(root, program, mode)),
+        }
+        if mode == "llvm-aot":
+            row["object"] = member(program_root, native_object_path(root, program))
+        rows.append(row)
     return {
         "schema": SCHEMA_INDEX,
-        "program": check_program(program),
-        "source": member(program_root, source_path(program_root.parent, program)),
-        "bpf": member(program_root, bpf_path(program_root.parent, program)),
-        "mode": [
-            {
-                "name": mode,
-                "role": CONTAINER_ROLE,
-                "format": CONTAINER_FORMAT,
-                "elf": member(
-                    program_root, container_path(program_root.parent, program, mode)
-                ),
-            }
-            for mode in modes
-        ],
+        "program": program,
+        "source": member(program_root, source_path(root, program)),
+        "bpf": member(program_root, bpf_path(root, program)),
+        "mode": rows,
     }
 
 
@@ -175,6 +173,8 @@ def write_index(path: Path, index: dict) -> None:
                 f"elf = {_inline_member(mode['elf'])}",
             ]
         )
+        if "object" in mode:
+            lines.append(f"object = {_inline_member(mode['object'])}")
     write_if_changed(path, ("\n".join(lines) + "\n").encode())
 
 
@@ -192,15 +192,17 @@ def _verify_member(root: Path, record: dict, expected: str) -> Path:
     return path
 
 
-def check_bpf(path: Path) -> None:
+def check_relocatable(path: Path, *, bpf: bool) -> None:
     with path.open("rb") as stream:
         header = stream.read(64)
+    elf_class, machine, size = (2, 247, 64) if bpf else (1, 243, 52)
     if (
-        len(header) != 64
-        or header[:7] != b"\x7fELF\x02\x01\x01"
-        or struct.unpack_from("<HH", header, 16) != (1, 247)
+        len(header) < size
+        or header[:7] != b"\x7fELF" + bytes([elf_class, 1, 1])
+        or struct.unpack_from("<HH", header, 16) != (1, machine)
     ):
-        raise LayoutError(f"expected a little-endian relocatable eBPF ELF: {path}")
+        arch = "eBPF" if bpf else "RV32"
+        raise LayoutError(f"expected a little-endian relocatable {arch} ELF: {path}")
 
 
 def load_index(program_root: Path, program: str | None = None) -> dict:
@@ -210,8 +212,9 @@ def load_index(program_root: Path, program: str | None = None) -> dict:
     name = check_program(index.get("program"))
     if program is not None and name != program:
         raise LayoutError(f"{program_root}: program is {name}, expected {program}")
-    _verify_member(program_root, index.get("source"), f"src/{name}.c")
-    check_bpf(_verify_member(program_root, index.get("bpf"), f"bpf/{name}_bpf.o"))
+    _verify_member(program_root, index.get("source"), f"{name}.c")
+    bpf = _verify_member(program_root, index.get("bpf"), f"objects/{name}_bpf.o")
+    check_relocatable(bpf, bpf=True)
     rows = index.setdefault("mode", [])
     if not isinstance(rows, list):
         raise LayoutError(f"{name}: mode must be an array of tables")
@@ -227,8 +230,15 @@ def load_index(program_root: Path, program: str | None = None) -> dict:
             raise LayoutError(f"{name}/{mode}: invalid role or format")
         suffix = {"llvm-aot": "aot", "ebpf": "ebpf", "jit": "jit"}[mode]
         path = _verify_member(
-            program_root, row.get("elf"), f"{mode}/{name}-vm-{suffix}.elf"
+            program_root, row.get("elf"), f"containers/{name}-vm-{suffix}.elf"
         )
+        if mode == "llvm-aot":
+            native = _verify_member(
+                program_root, row.get("object"), f"objects/{name}_rv32.o"
+            )
+            check_relocatable(native, bpf=False)
+        elif "object" in row:
+            raise LayoutError(f"{name}/{mode}: unexpected native object")
         try:
             parse_container(path.read_bytes())
         except ValueError as exc:
@@ -252,26 +262,12 @@ def verify_tree(root: Path) -> list[dict]:
     return indexes
 
 
-def export_legacy(root: Path, out: Path, mode: str) -> list[str]:
-    from legacy_export import export
-
-    root, out = root.resolve(), out.resolve()
-    if root == out or root in out.parents or out in root.parents:
-        raise LayoutError("legacy output must be separate from the build root")
-    first, second = sorted((root, out))
-    with lock(first), lock(second):
-        return export(root, out, mode)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
-    for command in ("verify", "reports", "export-legacy"):
+    for command in ("verify", "reports"):
         cmd = sub.add_parser(command)
         cmd.add_argument("--build-dir", required=True, type=Path)
-    export = sub.choices["export-legacy"]
-    export.add_argument("--mode", choices=LEGACY_MODES, required=True)
-    export.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     try:
         if args.command == "verify":
@@ -286,11 +282,6 @@ def main() -> None:
             with lock(root):
                 for index in verify_tree(root):
                     render_reports(root, index["program"], force=True)
-        else:
-            print(
-                "exported "
-                + ", ".join(export_legacy(args.build_dir, args.out, args.mode))
-            )
     except (OSError, ValueError) as exc:
         sys.exit(str(exc))
 

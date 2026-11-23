@@ -11,7 +11,7 @@ import sys
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-from build_state import PRIVATE_MODES, reconcile, render_reports
+from build_state import PRIVATE_MODES, prepare_program, read_state, reconcile, render_reports
 from layout import (
     ROOT,
     LayoutError,
@@ -19,6 +19,7 @@ from layout import (
     check_program,
     container_path,
     lock,
+    native_object_path,
     source_path,
     sha256_file,
     state_path,
@@ -33,7 +34,7 @@ DEFAULT_BUILD_DIR = ROOT / "build"
 CLANG = resolve_llvm_tool("clang", prefer_homebrew=True)
 DEFAULT_OBJDUMP = resolve_llvm_tool("llvm-objdump")
 DEFAULT_OBJCOPY = resolve_llvm_tool("llvm-objcopy")
-SLOT_LD_TMPL = MAKE / "linker" / "esp32c3-slot.ld.tmpl"
+SLOT_LD_TMPL = MAKE / "linker" / "rv32imc-slot.ld.tmpl"
 TOOLS_MANIFEST = ROOT / "tools" / "Cargo.toml"
 
 BPF_FLAGS = [
@@ -81,11 +82,11 @@ class MemMapV0:
     table_len: int
 
 
-def resolve_sources(inputs: str | None, crate: str | None) -> list[Path]:
+def resolve_sources(inputs: list[str] | None, crate: str | None) -> list[Path]:
     if inputs is not None and crate is not None:
         raise LayoutError("--inputs and -c are mutually exclusive")
     if inputs is not None:
-        sources = [Path(item).expanduser().resolve() for item in shlex.split(inputs)]
+        sources = [Path(item).expanduser().resolve() for item in inputs]
     else:
         sources = sorted(
             path
@@ -242,7 +243,7 @@ def _edge(
     lines = [
         f"build {' '.join(map(_ninja, outputs))}: {rule} {' '.join(map(_ninja, deps))}",
         f"  argv = {shlex.join(map(str, argv)).replace('$', '$$')}",
-        f"  label = {label}",
+        f"  label = {label.replace('$', '$$')}",
     ]
     if depfile is not None:
         lines.append(f"  depfile = {_ninja(depfile)}")
@@ -271,15 +272,14 @@ def write_build_ninja(
         snapshot = source_path(root, name)
         bpf_state = state_path(root, name, "bpf")
         gate = state_path(root, name, "prevail")
-        stamp = bpf.parent / "prevail.ok"
-        modes = ["bpf"]
-        if mode != "bpf":
-            modes.append("prevail")
+        raw_obj = bpf_state.with_name(f"{name}_bpf.o")
+        raw_src = bpf_state.with_name(f"{name}.c")
+        modes = ["bpf", "prevail"]
         if mode == "ebpf":
             modes.append("ebpf-native")
         if mode != "bpf":
             modes.append(mode)
-        targets.append(state_path(root, name, mode))
+        targets.append(gate if mode == "bpf" else state_path(root, name, mode))
         for item in modes:
             state = state_path(root, name, item)
             outputs, deps = [state], list(scripts)
@@ -287,12 +287,15 @@ def write_build_ninja(
             depfile = None
             if item == "bpf":
                 cfg = {"clang": CLANG, "flags": BPF_FLAGS, "objdump": args.objdump}
-                outputs.extend([bpf, snapshot])
+                outputs.extend([raw_obj, raw_src])
                 deps.extend([src, Path(CLANG)])
                 depfile = state.with_name("headers.d")
             elif item == "prevail":
-                outputs.append(stamp)
-                deps.extend([bpf_state, bpf, prevail_bin(), MAKE / "prevail_gate.py"])
+                cfg = {"verifier": str(prevail_bin())}
+                outputs.extend([bpf, snapshot])
+                deps.extend(
+                    [bpf_state, raw_obj, raw_src, prevail_bin(), MAKE / "prevail_gate.py"]
+                )
             else:
                 cfg = dict(
                     backend,
@@ -318,15 +321,17 @@ def write_build_ninja(
                     cfg["linker"] = str(linker)
                     deps.extend([src, gate, Path(CLANG), linker])
                     depfile = state.with_name("headers.d")
-                    native = root / name / item if item == "llvm-aot" else state.parent
-                    outputs.extend(
-                        [native / f"{name}_rv32.o", native / f"{name}_rv32.debug.elf"]
-                    )
+                    outputs.extend([
+                        state.with_name(f"{name}_rv32.o"),
+                        state.with_name(f"{name}_rv32.debug.elf"),
+                    ])
                     if item == "llvm-aot":
-                        outputs.append(native / f"{name}_rv32.bin")
+                        outputs.extend([
+                            state.with_name(f"{name}_rv32.bin"),
+                            native_object_path(root, name),
+                            container_path(root, name, item),
+                        ])
                         deps.append(Path(cfg["objcopy"]))
-                        if cfg["compact"]:
-                            outputs.append(container_path(root, name, item))
                 elif item == "ebpf":
                     deps.extend(
                         [
@@ -338,21 +343,20 @@ def write_build_ninja(
                     outputs.extend(
                         [
                             container_path(root, name, item),
-                            root / name / item / f"{name}_bpf-xpost.bin",
+                            state.with_name("rewritten.bin"),
                         ]
                     )
                 else:
                     deps.append(gate)
                     container = container_path(root, name, item)
-                    outputs.extend([container, container.with_name("jit.bin")])
+                    outputs.extend([container, state.with_name("jit.bin")])
             argv = [sys.executable, MAKE / "build_steps.py", item, root, src]
             if cfg is not None:
                 config = state.with_name("config.json")
                 write_if_changed(config, json.dumps(cfg, sort_keys=True).encode())
                 deps.append(config)
                 argv.append(config)
-            for out in outputs:
-                out.parent.mkdir(parents=True, exist_ok=True)
+            state.parent.mkdir(parents=True, exist_ok=True)
             edges.append(_edge(outputs, deps, argv, f"{item} {name}", depfile=depfile))
     path = root / ".ninja" / "build.ninja"
     body = template.read_text().replace("@EDGES@", "\n\n".join(edges))
@@ -363,26 +367,47 @@ def write_build_ninja(
 
 def build(root: Path, sources: list[Path], mode: str, args) -> None:
     selected = (mode,)
+    attempted = tuple(dict.fromkeys(("bpf", "prevail", mode)))
     with lock(root):
         if (root / "index.toml").exists():
             raise LayoutError(
                 f"{root}: use a separate build root from existing artifact indexes"
             )
         names = {src.stem for src in sources}
+        for src in sources:
+            if src.is_relative_to(root / ".ninja") or any(
+                src.is_relative_to(root / name) for name in names
+            ):
+                raise LayoutError(f"source overlaps generated output: {src}")
+        if (root / ".ninja").is_symlink():
+            raise LayoutError(f"symlink is not a build directory: {root / '.ninja'}")
         programs = names | {
             p.name for p in (root / ".ninja").glob("*") if (p / "bpf").is_dir()
         }
         # Withhold any mode being replaced, while preserving unrelated valid
         # modes. Ninja and the receipts determine which modes can return.
         for program in sorted(programs):
+            prepare_program(root, check_program(program))
+        for src in sources:
+            receipt = state_path(root, src.stem, "bpf")
+            if receipt.is_file():
+                try:
+                    previous_source = read_state(receipt)["source"]
+                except (KeyError, TypeError, ValueError):
+                    previous_source = None
+                if previous_source != str(src):
+                    receipt.unlink()
+        for program in sorted(programs):
             reconcile(root, program, selected if program in names else ())
         backend = {}
         graph_ready = False
         failure = ""
         try:
+            if not prevail_bin().is_file():
+                for src in sources:
+                    state_path(root, src.stem, "prevail").unlink(missing_ok=True)
+                raise LayoutError(f"PREVAIL binary missing: {prevail_bin()}")
             if mode != "bpf":
-                if not prevail_bin().is_file():
-                    raise LayoutError(f"PREVAIL binary missing: {prevail_bin()}")
                 firmware = args.firmware.expanduser().resolve()
                 if not firmware.is_file():
                     raise LayoutError(f"firmware ELF not found: {firmware}")
@@ -398,15 +423,11 @@ def build(root: Path, sources: list[Path], mode: str, args) -> None:
                     asdict(mem),
                     firmware=str(firmware),
                     tool=str(tool),
-                    compact=not args.no_compact_elf,
                     firmware_calls=generation,
                     firmware_digest=firmware_digest,
                 )
             path = write_build_ninja(root, sources, mode, args, backend)
-            graph_ready = True
-            force_modes = {mode, "bpf"}
-            if mode != "bpf":
-                force_modes.add("prevail")
+            force_modes = {mode, "bpf", "prevail"}
             if mode == "ebpf":
                 force_modes.add("ebpf-native")
             for src in sources:
@@ -423,6 +444,7 @@ def build(root: Path, sources: list[Path], mode: str, args) -> None:
                     stderr=subprocess.STDOUT,
                     text=True,
                 ) as proc:
+                    graph_ready = True
                     for line in proc.stdout:
                         log.write(line)
                         print(line, end="", flush=True)
@@ -431,24 +453,35 @@ def build(root: Path, sources: list[Path], mode: str, args) -> None:
                         f"Ninja failed ({proc.returncode}), see {log.name}"
                     )
         except (OSError, ValueError, SystemExit, KeyboardInterrupt) as exc:
-            failure = str(exc)
+            failure = str(exc) or type(exc).__name__
             if not graph_ready:
+                target = "prevail" if mode == "bpf" else mode
                 for src in sources:
-                    state_path(root, src.stem, mode).unlink(missing_ok=True)
+                    state_path(root, src.stem, target).unlink(missing_ok=True)
             raise
         finally:
+            final_errors = []
             for program in sorted(programs):
-                reconcile(
-                    root,
-                    program,
-                    failure=failure,
-                    attempted=selected if program in names else (),
+                reasons = reconcile(
+                    root, program, failure=failure,
+                    attempted=attempted if program in names else (),
                 )
-        for src in sources:
-            try:
-                render_reports(root, src.stem)
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                print(f"{src.stem}: report generation failed: {exc}", file=sys.stderr)
+                if program in names and not failure:
+                    for step in attempted:
+                        if step in reasons:
+                            final_errors.append(f"{program}/{step}: {reasons[step]}")
+                            break
+                if "bpf" in reasons or "prevail" in reasons:
+                    continue
+                try:
+                    render_reports(root, program)
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    final_errors.append(f"{program}: report generation failed: {exc}")
+            if final_errors:
+                message = "\n".join(final_errors)
+                if not failure:
+                    raise LayoutError(message)
+                print(message, file=sys.stderr)
 
 
 def clean_build() -> None:

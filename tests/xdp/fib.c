@@ -48,13 +48,16 @@ static __always_inline int ctx_view(struct xdp_md *ctx, __u8 **payload,
 	return 0;
 }
 
+#define FIB_MAX_N 47U
+
 static __always_inline __u32 fib_u32(__u32 n)
 {
 	__u32 a = 0, b = 1, i;
 
 	if (n == 0)
 		return 0;
-	for (i = 1; i < n; i++) {
+	/* Keep the trip-count bound explicit for PREVAIL. */
+	for (i = 1; i < FIB_MAX_N && i < n; i++) {
 		__u32 c = a + b;
 		a = b;
 		b = c;
@@ -74,9 +77,9 @@ int fib(struct xdp_md *ctx)
 	asm volatile("" ::: "memory");
 	if (avail < 4)
 		return XDP_ABORTED;
-	if (param > 47)
-		param = 47;
-	/* Keep the clamp in a register. eBPF otherwise emits i < 47 inside the loop. */
+	if (param > FIB_MAX_N)
+		param = FIB_MAX_N;
+	/* Keep the clamp and loop bound visible through BPF optimization. */
 	asm volatile("" : "+r"(param));
 	store_u32(payload, fib_u32(param));
 	return XDP_PASS;
