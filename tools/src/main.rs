@@ -12,10 +12,13 @@ use clap::{Parser, Subcommand};
 use object::{Object, ObjectSection, ObjectSymbol};
 use xpost_elf::{SECTION_NAME, ScanOutcome, build_container, decode, scan_at};
 
-use bpf_meta::{metadata_from_value, with_aot_addrs};
+use bpf_meta::{metadata_from_value, with_linked_maps};
 
 #[derive(Parser, Debug)]
-#[command(name = "xpost-mcu-elf", about = "XPM1 + Compact ELF helpers (xpost-elf)")]
+#[command(
+    name = "xpost-mcu-elf",
+    about = "XPM1 + Compact ELF helpers (xpost-elf)"
+)]
 struct Args {
     #[command(subcommand)]
     cmd: Cmd,
@@ -30,15 +33,15 @@ enum Cmd {
         /// Linked firmware ELF carrying `.xpost.mem`.
         firmware: PathBuf,
     },
-    /// Encode AOT image + bpf.toml into Compact ELF V0 (`<stem>.elf`).
+    /// Encode an image and its map bindings as Compact ELF V0.
     Pack {
         #[arg(long)]
         image: PathBuf,
         #[arg(long)]
-        bpf_toml: PathBuf,
-        /// Backend report whose map `aot_addr` values are applied in memory.
+        maps: PathBuf,
+        /// Linked AOT ELF supplying map VMAs.
         #[arg(long)]
-        addr_toml: Option<PathBuf>,
+        linked_elf: PathBuf,
         #[arg(long)]
         name: String,
         #[arg(long, value_parser = parse_u32)]
@@ -77,10 +80,11 @@ enum Cmd {
         #[arg(long)]
         obj: PathBuf,
         #[arg(long)]
-        bpf_toml: PathBuf,
-        /// Source path recorded in the jit report. Not compiled again.
-        #[arg(long)]
-        src: PathBuf,
+        maps: PathBuf,
+        #[arg(long, value_parser = parse_u32)]
+        slot_address: u32,
+        #[arg(long, value_parser = parse_u32)]
+        slot_length: u32,
         #[arg(long)]
         name: String,
         /// Directory named `.jit-stage`. The only place this command writes.
@@ -148,8 +152,8 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 fn pack(args: Cmd) -> Result<()> {
     let Cmd::Pack {
         image,
-        bpf_toml,
-        addr_toml,
+        maps,
+        linked_elf,
         name,
         slot_address,
         helper_address,
@@ -166,13 +170,20 @@ fn pack(args: Cmd) -> Result<()> {
         bail!("--name must be non-empty ASCII");
     }
     let mut image_bytes = fs::read(&image).with_context(|| format!("read {}", image.display()))?;
-    let bpf_text = fs::read_to_string(&bpf_toml).with_context(|| format!("read {}", bpf_toml.display()))?;
-    let overlaid = if let Some(addr) = &addr_toml {
-        let addr_text = fs::read_to_string(addr).with_context(|| format!("read {}", addr.display()))?;
-        with_aot_addrs(&bpf_text, &addr_text, &bpf_toml.display().to_string())?
-    } else {
-        toml::from_str(&bpf_text).with_context(|| format!("parse {}", bpf_toml.display()))?
-    };
+    let maps_text =
+        fs::read_to_string(&maps).with_context(|| format!("read {}", maps.display()))?;
+    let overlaid = with_linked_maps(
+        toml::from_str(&maps_text).context("parse BTF map input")?,
+        &linked_elf,
+    )?;
+    let meta = metadata_from_value(
+        &overlaid,
+        &maps.display().to_string(),
+        &name,
+        slot_address,
+        helper_address,
+        machine,
+    )?;
     // A bytecode image reaches the interpreter with its map references
     // unresolved: the object file names each map by symbol and leaves the
     // instruction's immediate at zero. Writing the map's index into that
@@ -181,20 +192,12 @@ fn pack(args: Cmd) -> Result<()> {
     // lookup silently misses.
     if map_index {
         let obj = obj.context("--map-index needs --obj <bpf.o> to read relocations")?;
-        let patched = index_map_references(&image_bytes, &obj, &overlaid)?;
+        let patched = index_map_references(&image_bytes, &obj, &meta)?;
         image_bytes = patched;
     }
     if let Some(export) = &export_image {
         write_atomic(export, &image_bytes)?;
     }
-    let meta = metadata_from_value(
-        &overlaid,
-        &bpf_toml.display().to_string(),
-        &name,
-        slot_address,
-        helper_address,
-        machine,
-    )?;
     let blob = build_container(&image_bytes, &meta, None)
         .map_err(|e| anyhow::anyhow!("build_container: {e:?}"))?;
     write_atomic(&out, blob.as_slice())?;
@@ -206,19 +209,17 @@ fn pack(args: Cmd) -> Result<()> {
 /// The index is the map's position in the same filtered, sorted order the
 /// container metadata uses, because that is the order the loader reads its
 /// binding table in. Getting the two orders out of step would silently point a
-/// reference at the wrong map, so both come from `bpf.toml` through the same
-/// metadata builder.
+/// reference at the wrong map, so both use the same metadata.
 fn index_map_references(
     image: &[u8],
     obj_path: &PathBuf,
-    overlaid: &toml::Value,
+    meta: &xpost_elf::ImageMetadataV0,
 ) -> Result<Vec<u8>> {
     use object::{Object, ObjectSection, ObjectSymbol};
 
     let data = fs::read(obj_path).with_context(|| format!("read {}", obj_path.display()))?;
     let file = object::File::parse(&*data).context("parse bpf object")?;
 
-    let meta = metadata_from_value(overlaid, "bpf report", "probe", 0x1000, 0x1000, 1)?;
     let order: Vec<String> = meta
         .maps
         .iter()
@@ -255,7 +256,10 @@ fn index_map_references(
                 object::RelocationTarget::Symbol(sym) => sym,
                 _ => continue,
             };
-            let name = match file.symbol_by_index(symbol).and_then(|s| Ok(s.name()?.to_string())) {
+            let name = match file
+                .symbol_by_index(symbol)
+                .and_then(|s| Ok(s.name()?.to_string()))
+            {
                 Ok(n) => n,
                 Err(_) => continue,
             };
@@ -269,8 +273,11 @@ fn index_map_references(
                 continue;
             };
             let at = offset as usize;
-            if at + 8 > out.len() {
-                bail!("relocation at {offset:#x} is past the image ({} bytes)", out.len());
+            if at + 16 > out.len() {
+                bail!(
+                    "relocation at {offset:#x} is past the image ({} bytes)",
+                    out.len()
+                );
             }
             if out[at] != 0x18 {
                 bail!(
@@ -299,15 +306,17 @@ fn pack_jit_cmd(args: Cmd) -> Result<()> {
     let Cmd::PackJit {
         firmware,
         obj,
-        bpf_toml,
-        src,
+        maps,
+        slot_address,
+        slot_length,
         name,
         stage,
     } = args
     else {
         unreachable!()
     };
-    let artifact = jit_image::JitArtifact::assemble(&firmware, &obj, &bpf_toml, &src, &name)?;
+    let artifact =
+        jit_image::JitArtifact::assemble(&firmware, &obj, &maps, &name, slot_address, slot_length)?;
     artifact.write_stage(&stage)?;
     Ok(())
 }

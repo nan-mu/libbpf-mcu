@@ -1,42 +1,34 @@
-//! Parse libbpf-mcu `bpf.toml` into Compact ELF metadata (silent omit on skip).
+//! Convert private BTF map inputs into Compact ELF metadata.
 
 use anyhow::{Context, Result, bail};
 use toml::Value;
 
 use xpost_elf::{ImageMetadataV0, MAX_ENTRIES, MAX_LAYOUT, MAX_MAPS, MAX_NAME, MapDescriptorV0};
 
-pub fn with_aot_addrs(bpf_text: &str, addr_text: &str, label: &str) -> Result<Value> {
-    let mut root: Value = toml::from_str(bpf_text).with_context(|| format!("parse {label}"))?;
-    let addr: Value = toml::from_str(addr_text).context("parse addr report")?;
-    let Some(Value::Table(addr_maps)) = addr.get("maps").cloned() else {
-        return Ok(root);
-    };
+/// Overlay map VMAs directly from the linked ELF, restricted to its maps section.
+pub fn with_linked_maps(mut root: Value, path: &std::path::Path) -> Result<Value> {
+    use object::{Object, ObjectSection, ObjectSymbol};
+
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let elf = object::File::parse(&*bytes).context("parse linked AOT ELF")?;
     if let Some(Value::Table(maps)) = root.get_mut("maps") {
-        for (name, item) in maps.iter_mut() {
-            let Some(Value::Table(addr_fields)) = addr_maps.get(name) else {
+        for symbol in elf.symbols() {
+            let Some(index) = symbol.section_index() else {
                 continue;
             };
-            let Some(addr_value) = addr_fields.get("aot_addr").cloned() else {
+            let section = elf.section_by_index(index)?;
+            if !matches!(section.name()?, ".maps" | "maps") || symbol.address() == 0 {
                 continue;
-            };
-            if let Value::Table(fields) = item {
-                fields.insert("aot_addr".into(), addr_value);
+            }
+            if let Some(Value::Table(fields)) = maps.get_mut(symbol.name()?) {
+                fields.insert(
+                    "map_vma".into(),
+                    i64::from(u32::try_from(symbol.address())?).into(),
+                );
             }
         }
     }
     Ok(root)
-}
-
-pub fn metadata_from_toml_text(
-    text: &str,
-    label: &str,
-    name: &str,
-    slot_address: u32,
-    helper_address: u32,
-    machine: u8,
-) -> Result<ImageMetadataV0> {
-    let root: Value = toml::from_str(text).with_context(|| format!("parse {label}"))?;
-    metadata_from_value(&root, label, name, slot_address, helper_address, machine)
 }
 
 pub fn metadata_from_value(
@@ -159,11 +151,7 @@ fn map_descriptor(
     }))
 }
 
-fn size_bytes(
-    fields: &toml::map::Map<String, Value>,
-    key: &str,
-    bits: &[u8],
-) -> Result<usize> {
+fn size_bytes(fields: &toml::map::Map<String, Value>, key: &str, bits: &[u8]) -> Result<usize> {
     let from_layout = {
         let sum: usize = bits.iter().map(|&b| usize::from(b)).sum();
         if sum % 8 != 0 {

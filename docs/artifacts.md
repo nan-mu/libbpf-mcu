@@ -1,244 +1,105 @@
-# Artifact protocol and release matrix
+# Program artifacts and local releases
 
-This reference describes canonical build artifacts and the local release publisher. Paths are relative to `--build-dir`, which defaults to `../build` outside the repository. `<p>` is the unique C source stem.
+The supported MCU is ESP32-C3 with RV32IMC, ILP32, and no FPU. The Rust host tool uses the sibling XPOST workspace's `xpost-elf` crate for XPM1 and Compact ELF V0. The local verifier checks the same wire format and payload digest.
 
-## Modes and formats
+## Program layout
 
-| Mode | Artifact path | Role | Format |
-| --- | --- | --- | --- |
-| `bpf` | `<p>/bpf/<p>_bpf.o` | `bpf_object` | `elf-bpf-relocatable` |
-| `rv32` | `<p>/rv32/<p>_rv32.o` | `aot_object` | `elf-riscv-relocatable` |
-| `rv32` | `<p>/rv32/<p>_rv32.debug.elf` | `debug_elf` | `elf-riscv-linked` |
-| `rv32` | `<p>/rv32/<p>_rv32.bin` | `image` | `raw-rv32-image` |
-| `rv32` | `<p>/rv32/<p>_rv32.elf` | `xpost_container` | `xpost-compact-elf-v0` |
-| `jit` | `<p>/jit/<p>_jit.bin` | `image` | `raw-rv32-image` |
-| `jit` | `<p>/jit/<p>_jit.elf` | `xpost_container` | `xpost-compact-elf-v0` |
-| `bpf-xpost` | `<p>/bpf-xpost/<p>_bpf-xpost.bin` | `image` | `raw-ebpf-image` |
-| `bpf-xpost` | `<p>/bpf-xpost/<p>_bpf-xpost.elf` | `xpost_container` | `xpost-compact-elf-v0` |
+`--build-dir` selects the whole build root and defaults to `build/` in the checkout. Each program has its own directory and `index.toml`. A program archive starts at that directory. `<p>` is the C source stem.
 
-Every produced mode has `<p>/<mode>/report.toml`. The program has `<p>/manifest.toml`, and the build root has `index.toml`. `<p>/bpf/prevail.ok` exists only after PREVAIL runs. It is an internal gate stamp, not an official artifact.
-
-The BPF object is the original Clang ELF. AOT independently compiles C to RV32IMC. Its BPF input establishes the verification gate, not the AOT compiler input. Host JIT translates eBPF to RV32IM and emits no relocatable `.o`. `bpf-xpost` packages eBPF for the rBPF interpreter and rewrites map references to indices. It is not another compiler.
-
-The `.elf` suffix does not identify an engine. The RV32 debug ELF and the Compact ELF V0 containers have different roles and formats. Containers are primary artifacts. The BPF object is primary in `bpf`. If `--no-compact-elf` suppresses an AOT container, its raw image becomes primary instead. Release plans always produce backend containers.
-
-Ninja graphs, depfiles, linker scripts, gate stamps, and staging files are internal. They do not appear in `[[artifact]]`.
-
-## Field ownership
-
-The writer owns the meaning of each field. A consumer validates the v1 hash links and chooses a mode, role, and format. Release matrix metadata adds an outer selection layer. XPOST consumers do not need new fields in the existing artifact schemas.
-
-| Location and fields | Owner | Meaning and validation |
+| Mode | Machine members relative to program root | Human report |
 | --- | --- | --- |
-| `index.schema` | Layout publisher | `libbpf-mcu.artifacts.v1`. |
-| `index.program[].name`, `.manifest`, `.manifest_sha256` | Layout publisher | Program name, build-root-relative manifest path, and SHA-256 of its bytes. Entries are sorted by name and include programs with consumable modes. |
-| `manifest.schema`, `.program` | Layout publisher | `libbpf-mcu.program.v1` and the source stem identifying the program. |
-| `manifest.source` | Source probe | Same source record as a report. Establishes which program source the manifest represents. |
-| `manifest.mode[].name`, `.report`, `.report_sha256` | Layout publisher | Consumable mode name, manifest-relative report path, and SHA-256 of its bytes. |
-| `manifest.stale[]`, `manifest.failed[]` | Layout publisher | Nonconsumable modes with `name`, manifest-relative `report`, and `reason`. Other valid modes remain available. |
-| `report.schema` | Layout publisher | `libbpf-mcu.report.v1`. |
-| `report.program`, `.mode`, `.status` | Mode publisher | Source stem, one of `bpf`, `rv32`, `jit`, or `bpf-xpost`, and `success`, `failed`, or `unsupported`. Only validated `success` is consumable. |
-| `source.repo`, `.commit`, `.dirty`, `.path`, `.sha256` | Source probe | Repository URL, source commit, working-tree state, source path, and primary C file hash. `dirty` is provenance, not part of `source_id`. |
-| `build.source_id` | Layout publisher | SHA-256 of canonical JSON containing `repo`, `commit`, `path`, and `sha256` from `[source]`. |
-| `build.input_set_id` | Layout publisher | Fingerprint of primary source, dependencies, input artifacts, and firmware hash when present. Details below. |
-| `build.configuration_id` | Layout publisher | Fingerprint of logical arguments, flags, target properties, ordered options, and toolchain. It is separate from the source and input fingerprints. |
-| `build.argv` | Mode publisher | Logical argument vector for identity. It uses protocol mode names and is not necessarily a command to paste into the CLI. |
-| `build.diagnostic_argv` | Mode publisher | Diagnostic invocation with absolute paths redacted to `$REPO`, `$HOME`, `$BUILD`, or `$PATH`. Excluded from configuration identity. |
-| `build.cflags`, `.ldflags`, `.opt`, `.target`, `.isa`, `.abi`, `.endian` | Mode publisher | Effective flag descriptions, optimization, target, instruction set, ABI, and byte order. Used in configuration identity. |
-| `build.options` | Mode publisher | Serialized option strings in canonical key order. Includes options that affect packaging and firmware linking. Used in configuration identity. |
-| `dependency[].path`, `.role`, `.sha256` | Dependency collector | Nonprimary file inputs, such as headers and linker files. Repository-relative paths stay relative. External files use `external/<first-16-hash-digits>/<name>`. |
-| `input_artifact[].role`, `.path`, `.sha256` | Mode publisher | Declared artifacts consumed by the mode. Paths are relative to the report and must resolve within the program directory, including through symlinks. |
-| `artifact[].role`, `.path`, `.format`, `.sha256`, `.size_bytes`, `.primary` | Mode publisher | Output purpose, report-relative path, format, content hash, byte count, and primary-output marker. Role and format come from the table above. |
-| `toolchain` | Mode publisher | Recorded compiler, verifier, Rust, JIT-package, or packer identities for the mode. Keys are serialized in sorted order. |
-| `firmware.sha256` | Firmware probe | Hash of the linked firmware ELF. The ELF is not packaged. Raw BPF reports have no firmware table. |
-| `firmware.helper_addr`, `.slot_addr`, `.slot_len`, `.table_addr`, `.table_len`, `.slot_symbol` | XPM1 probe and optional slot override | Firmware helper, code slot, and map table addresses and lengths. The optional symbol replaces the slot address and length and records that choice. Values are strings. |
-| `verification.status`, `.input_sha256`, `.verifier`, `.verifier_id`, `.options` | PREVAIL gate | `not_run`, `accepted`, `rejected`, or `unsupported`, plus the checked BPF hash and verifier identity/options. BPF-only builds record `not_run`. |
-| `maps`, `CORE`, `xdp`, `text` and section measurements | Object/BTF reporter | Object layout, map definitions, BTF-derived metadata, and optional section contents. `--release` omits section contents. `aot_addr` belongs in the RV32 report only. |
-| `jit` | Host JIT | Map VMRs, relocations, image length, and compile timing. These describe host compilation, not device performance. |
-| `rbpf.map_index`, `.addr_report`, `.addr_sha256` | rBPF packer | Map-index rewriting and the RV32 address report used to derive the metadata. Its bytes are also bound by the `map_index_basis` input artifact. |
+| All | `index.toml`, `src/<p>.c` | |
+| Raw BPF | `bpf/<p>_bpf.o` | `bpf/report.toml` |
+| `llvm-aot` | `llvm-aot/<p>-vm-aot.elf` | `llvm-aot/report.toml` |
+| `ebpf` | `ebpf/<p>-vm-ebpf.elf` | `ebpf/report.toml` |
+| `jit` | `jit/<p>-vm-jit.elf` | `jit/report.toml` |
 
-A report never stores its own hash. The manifest owns the report hash, and the index owns the manifest hash. Artifacts and input artifacts own their content hashes in the report. This chain allows a whole artifact root to move without rewriting relative links.
+The `libbpf-mcu.program-index.v2` index records the program, source snapshot, original Clang object, and one `[[mode]]` table per available deployment. The `source` and `bpf` tables identify each member by role. Each deployment has `role = "xpost_container"` and `format = "xpost-compact-elf-v0"`. The source, object and ELF records give canonical relative paths, byte counts and SHA-256 of complete files.
 
-### Fingerprints and options
+`pixi run python make/layout.py verify --build-dir DIR` verifies an extracted program root or enumerates program indexes one level below a build root. It checks path containment, sizes, complete file hashes, the BPF ELF type, and Compact ELF V0 metadata and payload digest. A BPF-only index omits `[[mode]]`. Machine verification works with the reports absent.
 
-Canonical JSON uses sorted object keys, compact separators, and ASCII escaping. SHA-256 hashes its UTF-8 bytes. These rules preserve the current v1 identifiers.
+The raw BPF object retains sections, BTF and relocations. PREVAIL checks this object before any deployment build. AOT independently compiles C with `include/`, links using the firmware slot and helper dispatcher, and packs the resulting image. Host JIT uses the raw object and links RV32IM instructions before packaging. The `ebpf` mode extracts the XDP section and rewrites map references to their indices in Compact ELF order. Its private RV32 link supplies the map addresses for the selected interpreter firmware, including when the same program's AOT container targets another firmware.
 
-`source_id` hashes exactly the four source fields listed above. The primary source is deliberately absent from `[[dependency]]`. It remains in the input fingerprint as a `{path, sha256}` row.
+The build root's `.ninja/` holds the graph, host tool, linker scripts, depfile state, fingerprints and failure diagnostics. Successful modes retain their receipts across invocations. Changed source, headers, object, verifier, firmware or linked map-address basis invalidates the corresponding outputs before the index advertises them again. The build lock serializes writes within the root. Compilations, PREVAIL acceptance, artifact verification and device execution establish separate evidence.
 
-`input_set_id` hashes a list of `{path, sha256}` rows. Rows come from dependencies, the primary source, and input artifacts. Firmware contributes a row with path `firmware`. The list is sorted by `(path, sha256)`. Dependency and input roles are descriptions, not keys in this hash. Thus the primary source still changes the fingerprint even when a depfile also names it.
+The native object, linked debug ELF and flat image remain in the local `llvm-aot/` directory. `--no-compact-elf` produces those files and a report for inspection. The index exposes deployable containers. JIT keeps its local `jit.bin` and emits no relocatable object.
 
-`configuration_id` hashes an object containing `abi`, `argv`, `cflags`, `endian`, `isa`, `ldflags`, `opt`, `options`, `target`, and `toolchain`. It does not incorporate `source_id` or `input_set_id`. Consumers retain all three identities to distinguish source, input, and configuration changes.
+## Human reports
 
-The serialized `[build.options]` table exposes the exact strings that contribute to configuration identity. To reproduce the fingerprint from a parsed report, convert the table to a list of `[key, value]` pairs sorted by key. Hash that list as `options` alongside the other configuration fields. Hashing the TOML table as a JSON object would produce a different identifier.
+Each report starts with `[source]`. Its `path` identifies the original file relative to the checkout and `text` contains the UTF-8 source snapshot. `[assembly].listing` shows each instruction's bytes and operands with a section-relative byte offset for eBPF or a linked address for RV32. The raw BPF listing uses its executable ELF sections. The interpreter listing uses rewritten bytes from the container. AOT uses symbols from the linked ELF after checking the code sections against the container payload. The JIT listing stops at the end of the linked instructions.
 
-| Mode | Option keys and values |
-| --- | --- |
-| `bpf` | `release` is `"0"` or `"1"`. |
-| Backend modes | `container`, `engine`, `helper`, `image_name`, `release`, `slot`, `slot_len`, `slot_symbol`, `table`, `table_len`, in that order. `container` and `release` use `"0"` or `"1"`. Unset names and symbols are `""`. Addresses and lengths use their recorded strings. |
+The `[[generation]]` entries record the executed arguments and in-process calls. Absolute paths in these arguments describe the actual build host. The report can be regenerated from the successful local build receipts and artifacts.
 
-Backend `engine` is `aot`, `jit`, or `rbpf` according to the route. A generated RV32 report from an rBPF build can therefore record `engine = "rbpf"`. This does not change its `rv32` mode or machine-code artifact formats.
-
-BPF records Clang. RV32 records Clang and PREVAIL, and records Rust and the packer when it emits a container. JIT records Rust, the JIT package, the packer, and PREVAIL. rBPF records Rust, the packer, and PREVAIL. Toolchain identities are reported values, not enforced minimum versions.
-
-### Input relationships
-
-| Mode | Input artifact role | Input |
-| --- | --- | --- |
-| `rv32` | `gate_bpf` | `../bpf/<p>_bpf.o`, accepted by PREVAIL. |
-| `jit` | `bpf_object` | `../bpf/<p>_bpf.o`, compiled by the host JIT. |
-| `bpf-xpost` | `bpf_object` | `../bpf/<p>_bpf.o`, extracted and patched for interpretation. |
-| `bpf-xpost` | `map_index_basis` | `../rv32/report.toml`, the map metadata basis. |
-
-Changing the RV32 report invalidates rBPF through `map_index_basis`, even if the BPF object is unchanged. A changed source identity or input artifact hash makes an older mode stale. Duplicate source stems are errors.
-
-## Publication within a build root
-
-A mode publisher prepares a report, checks its output hashes, replaces `report.toml`, and updates the manifest and index under a lock. Consumers must verify the hash chain rather than trusting an older `success` report after an interrupted build.
-
-A failed mode loses its consumable entry and its image/container outputs. Other modes remain available. A downstream failure does not delete the raw BPF object. PREVAIL rejection leaves no successful RV32 or rBPF container.
-
-Validate an existing root with:
-
-```bash
-	pixi run python make/layout.py verify --build-dir ../build
+```sh
+pixi run python make/layout.py reports --build-dir build
 ```
-
-Validation checks index-to-manifest and manifest-to-report hashes, artifact hashes and sizes, and input artifact hashes and path containment. A development root can contain a subset of modes. A release set must contain exactly its generated mode closure, with no stale or failed modes.
-
-XPOST resolves `Aot` to `rv32`, `Jit` to `jit`, and `Rbpf` to `bpf-xpost`. Each profile selects its own artifact root and program. In an archive that root is `sets/<id>`. Firmware compilation/flashing, runtime cache management, and device experiments are XPOST responsibilities.
-
-## Release plans and matrix
-
-The publisher accepts `--plan PATH --tag TAG`. It reads a TOML plan with schema `libbpf-mcu.release-plan.v1` and one or more `[[build]]` entries. Firmware paths are relative to the plan file, not the current directory.
-
-This example defines independent normal-slot and idle-slot variants of `case_mark`, plus a firmware-free BPF set:
-
-```toml
-	schema = "libbpf-mcu.release-plan.v1"
-
-	[[build]]
-	id = "case-mark"
-	program = "case_mark"
-	modes = ["rv32", "jit", "bpf-xpost"]
-	firmware = "firmware.elf"
-	image_name = "case_mark"
-	release = true
-
-	[[build]]
-	id = "case-mark-idle"
-	program = "case_mark"
-	modes = ["rv32", "bpf-xpost"]
-	firmware = "firmware.elf"
-	image_name = "case_mark_idle"
-	slot_symbol = "xdp_slot_idle"
-	release = true
-
-	[[build]]
-	id = "firewall-bpf"
-	program = "firewall"
-	modes = ["bpf"]
-```
-
-`firmware.elf` and `xdp_slot_idle` are example inputs to replace with an actual linked firmware and slot symbol. This plan is a configuration example, not execution evidence.
-
-| Plan field | Requirement |
-| --- | --- |
-| `id` | Required. Matches `[A-Za-z0-9][A-Za-z0-9_-]*`. Unique without regard to case. Determines the independent output root. |
-| `program` | Required. One unique source stem in the default tests, excluding `unused`. |
-| `modes` | Required nonempty list of distinct `bpf`, `rv32`, `jit`, or `bpf-xpost` values. Order is retained as the requested list. |
-| `firmware` | Required for any backend mode. Linked firmware ELF with XPM1. Relative to the plan file. |
-| `image_name` | Optional backend option. Matches `[A-Za-z0-9_]{1,31}`. Defaults to the program name in the container. Does not rename files. |
-| `slot_symbol` | Optional backend option. Matches `[A-Za-z_][A-Za-z0-9_]*`. Overrides the XPM1 slot address and length. Rejected if `jit` is requested. |
-| `release` | Optional backend boolean, default `false`. Omits object section contents from reports. |
-
-Unknown plan keys are errors. A BPF-only set rejects firmware, image-name, slot-symbol, and enabled release options. A single set cannot combine JIT with a slot override. Use another set for the slot variant. The plan exposes no `--no-compact-elf` equivalent.
-
-Every set has its own build root and program manifest. Sets sharing a source stem do not overwrite each other's configurations. The generated closure always includes `bpf`, and `bpf-xpost` also requires `rv32`. Generated modes are ordered `bpf`, `rv32`, `jit`, `bpf-xpost`.
-
-| Set | Requested modes | Produced modes | Archive artifact root |
-| --- | --- | --- | --- |
-| `case-mark` | `rv32`, `jit`, `bpf-xpost` | `bpf`, `rv32`, `jit`, `bpf-xpost` | `sets/case-mark` |
-| `case-mark-idle` | `rv32`, `bpf-xpost` | `bpf`, `rv32`, `bpf-xpost` | `sets/case-mark-idle` |
-| `firewall-bpf` | `bpf` | `bpf` | `sets/firewall-bpf` |
-
-The publisher builds BPF first, then requested AOT, then rBPF when needed, then JIT. It validates the final RV32 report as the rBPF basis. A failed or unsupported mode aborts packaging with a program/mode diagnostic. Requested modes are never silently omitted.
-
-## Package and publication
-
-Create a local package with a new output directory outside the repository:
-
-```bash
-	pixi run publish-artifacts --plan /path/to/release-plan.toml \
-	  --tag local-matrix --package-only --out /tmp/new-matrix-package
-```
-
-Formal publication uses the same plan interface:
-
-```bash
-	pixi run publish-artifacts --plan /path/to/release-plan.toml --tag v0.1.0
-```
-
-| Publisher option | Behavior |
-| --- | --- |
-| `--plan PATH` | Required TOML release plan. Validated before any set build starts. |
-| `--tag TAG` | Required explicit unused tag. Never inferred. |
-| `--out DIRECTORY` | New directory outside the repository. Default is `<system-temp>/libbpf-mcu-publications/<tag>`. Existing paths are rejected. |
-| `--dry-run` | Requires clean local `main` and GitHub checks. Builds and validates without creating a tag or uploading. |
-| `--package-only` | Allows development branches and local changes. Builds and validates without calling GitHub. Mutually exclusive with `--dry-run`. |
-| `--draft` | Adds `--draft` to the Release creation command. The default upload creates a non-draft Release. |
-
-Formal publication and dry runs require clean local `main` at HEAD, including no untracked changes. The publisher derives the GitHub repository from `origin`, checks `gh` authentication, and rejects an existing local tag, remote tag, or Release. `GH_REPO` does not redirect publication.
-
-The publisher retains an isolated diagnostic directory with build outputs and `commands.log`. It copies only official files into a staging tree, validates each set, checks container metadata against firmware and requested names, creates the archive, extracts it, and repeats validation. Firmware, Ninja files, depfiles, stamps, linker scripts, caches, and staging files are excluded.
-
-The package preserves each canonical artifact root unchanged:
-
-```text
-libbpf-mcu-artifacts/
-├── release-index.toml
-├── sets/
-│   ├── case-mark/
-│   │   ├── index.toml
-│   │   └── case_mark/
-│   │       ├── manifest.toml
-│   │       ├── bpf/
-│   │       ├── rv32/
-│   │       ├── jit/
-│   │       └── bpf-xpost/
-│   ├── case-mark-idle/
-│   │   ├── index.toml
-│   │   └── case_mark/
-│   │       ├── manifest.toml
-│   │       ├── bpf/
-│   │       ├── rv32/
-│   │       └── bpf-xpost/
-│   └── firewall-bpf/
-│       ├── index.toml
-│       └── firewall/
-│           ├── manifest.toml
-│           └── bpf/
-└── SHA256SUMS
-```
-
-`release-index.toml` is outside all per-set roots. Its schema is `libbpf-mcu.release-index.v1`. Each `[[set]]` has `id`, `program`, `root`, `requested_modes`, and `produced_modes`. Backend sets also have `firmware_sha256`. Rows follow plan order. `root` is `sets/<id>`. Firmware hashes also remain in the mode reports. The outer index does not replace the v1 index/manifest/report hash chain inside each set.
-
-The internal `SHA256SUMS` covers the release index and every official per-set file except the checksum file itself. The output directory contains `libbpf-mcu-artifacts-<tag>.tar.gz` and a separate `SHA256SUMS` for that archive. Check the extracted tree with `sha256sum -c SHA256SUMS`, or `shasum -a 256 -c SHA256SUMS` on macOS.
-
-After validation, formal publication asks you to type the explicit tag and full source commit, with the destination repository shown. The script rechecks source state, plan hash, firmware hashes, and destination. It atomically creates the missing `refs/tags/<tag>` through `gh api`, then runs `gh release create --verify-tag` with the archive and external checksum file. It does not run `git tag`, push tags, or merge changes. Notes record source commit, branch state, plan hash, and requested/produced sets and firmware hashes.
-
-Upload failures return failure. A failure after tag creation can leave a tag or a partial Release for manual inspection. The script does not overwrite an existing Release. Publication runs through local `gh`; no hosted workflow is used. Agents test publication behavior with mocks rather than creating Releases.
-
-Compilation, PREVAIL acceptance, protocol integrity, and device behavior are distinct evidence. Package validation does not imply device execution or that eBPF verification proves the independently compiled MCU binary safe.
 
 ## Legacy export
 
-`artifacts export-legacy` copies one verified mode into a different directory. It refuses a second mode in that directory and never writes back into the canonical root.
+The exporter accepts `rv32`, `jit` or `bpf-xpost` and reserves each output directory for one mode. It reconstructs legacy files from the original BPF object, linked ELF, deployment container and available build data. Historical v1 roots use their index and manifest for program identity and mode selection. When a required object or linked ELF is missing, rebuild the program from source.
 
-```bash
-	pixi run python make/cli.py artifacts export-legacy \
-	  --build-dir ../build --out /tmp/legacy-rv32 --mode rv32
+```sh
+pixi run python make/cli.py artifacts export-legacy --build-dir build --mode rv32 --out /tmp/libbpf-rv32
 ```
 
-The mode is `rv32`, `jit`, or `bpf-xpost`. Each export copies `<p>/bpf.o`, `<p>/bpf.toml`, and `<p>/<p>.elf`. RV32 also copies `esp32c3.o`, `esp32c3.elf`, and `esp32c3.bin`. Only the legacy RV32 `bpf.toml` merges `aot_addr` into BPF map tables. That merge stays in the copy.
+| Export mode | Files inside each program directory |
+| --- | --- |
+| `rv32` | `bpf.o`, `bpf.toml` with linked `aot_addr`, `esp32c3.o`, `esp32c3.elf`, `esp32c3.bin`, `<p>.elf` if packaged |
+| `jit` | `bpf.o`, `bpf.toml`, `jit.bin`, `jit.toml` with code extent and map bindings, `<p>.elf`, `prevail.ok` if present |
+| `bpf-xpost` | `bpf.o`, `bpf.toml`, `<p>.bin`, `<p>.elf` |
 
-The oracle's `jit/oracle/build/<name>.bpf.o`, `build/jit-check/<name>.bpf.o`, and `make/sail/` outputs are private tooling outputs, not canonical artifacts. Consumers select one explicit mode directory or one explicit legacy export.
+## Offline packaging
+
+`release/programs.toml` lists the 17 formal sources under `tests/xdp/`. Each row always includes raw BPF. Add deployment modes after the maintainer confirms the linked firmware and its SHA-256 for each mode. An empty `modes` array requires no firmware. A single program can specify a different ELF, `image_name` or `slot_symbol` per mode. The firmware and source paths are relative to the checkout root.
+
+```toml
+schema = "libbpf-mcu.release-plan.v2"
+
+[[program]]
+name = "just_tx"
+source = "tests/xdp/just_tx.c"
+modes = ["jit"]
+
+[program.firmware.jit]
+path = "firmware/just_tx-jit.elf"
+sha256 = "<64 lowercase hex digits>"
+```
+
+Install `7zz` or `7z` and run the package task. The default output directory is `build/packages/`. A developer can pass `--plan` with a test configuration and choose a separate `--out` directory. The command accepts development worktrees and uses no GitHub credentials. Provision the build tools and dependency caches before running on a disconnected host.
+
+```sh
+pixi run package --out /path/to/fresh-archive-directory
+```
+
+The command builds the requested modes, checks the available index against the selection, archives each program as `<p>.7z`, and verifies it after extraction. Exact archive paths follow the program layout above. The package task reports commit, working-tree status, absolute archive paths, names and SHA-256 on stdout as JSON. Build and archiver logs go to stderr. A missing mode, missing or modified firmware, conflicting archive name, or build failure aborts packaging. Preserve the verified 7z files and the task's JSON output for publication retries.
+
+## Publish program artifacts
+
+A maintainer's explicit request to publish the current `nan-mu/libbpf-mcu` `main` authorizes the agent to create the tag, upload the verified archives and make the Release public. Use a local authenticated `gh` session. Acquire a same-host lock for this repository before starting and hold it through final readback. An atomically created directory such as `~/.local/state/libbpf-mcu/publish.lock` works across checkouts. On interruption, confirm the previous agent has stopped before releasing its lock.
+
+1. **Pin the commit.** Confirm `gh auth status --hostname github.com` and use `gh repo view nan-mu/libbpf-mcu --json nameWithOwner` to confirm the destination. Confirm local `main` is clean and compare its full HEAD SHA to `git ls-remote https://github.com/nan-mu/libbpf-mcu.git refs/heads/main`. Keep the verified SHA, exact archive list and original files together. For a fresh build, run `pixi run package` with the versioned plan at that SHA. Before allocating a tag, recheck HEAD, remote `main`, cleanliness, the package receipt's commit and the file names and digests. For a retry, look for the assigned tag and matching draft first and use the recorded files.
+2. **Allocate the tag and draft.** Read the remote tags with `git ls-remote --tags https://github.com/nan-mu/libbpf-mcu.git` and match `^v0\.1\.(0|[1-9][0-9]*)$`. Choose the largest numeric patch plus one, or `v0.1.0` if none exist. Find prior tags for the pinned SHA by resolving each candidate to its commit, peeling annotated tags when needed. Read drafts and public Releases via `gh api --paginate --slurp repos/nan-mu/libbpf-mcu/releases`, matching `tag_name`. A single matching tag can be reused. Resolve ambiguity before allocating another tag. Create a missing tag with the POST below. If creation races with another publisher, read the resulting ref before proceeding. A ref for the pinned commit can be reused. A tag already assigned to this attempt that points elsewhere requires stopping and reporting the difference. If a concurrent publish took an unassigned candidate for another commit, refresh the tag and Release lists before selecting the next version. Read the exact remote ref and confirm its commit before creating or reusing a draft.
+
+   ```sh
+   gh api --hostname github.com -X POST repos/nan-mu/libbpf-mcu/git/refs \
+     -f ref="refs/tags/$tag" -f sha="$sha"
+   gh api --hostname github.com "repos/nan-mu/libbpf-mcu/git/ref/tags/$tag"
+   gh release create "$tag" -R nan-mu/libbpf-mcu --verify-tag --draft --generate-notes
+   ```
+
+3. **Upload and verify.** Find the draft's numeric Release ID in the REST response. List every asset by Release ID, flatten the paginated arrays, and compare names, upload states and digests to the package receipt and original local files. Reuse an asset only if its name is expected, its state is `uploaded` and its digest is exactly `sha256:<local SHA-256>`. Upload each missing archive using the command below. Stop on an unexpected name, duplicate name, wrong digest or non-uploaded asset. After an upload error, re-read the assets before retrying. Never use `--clobber`.
+
+   ```sh
+   gh api --hostname github.com --paginate --slurp \
+     "repos/nan-mu/libbpf-mcu/releases/$release_id/assets"
+   gh release upload "$tag" "$archive" -R nan-mu/libbpf-mcu
+   ```
+
+4. **Publish and read back.** Immediately before changing draft status, re-read the tag, the Release and all its asset pages. Check the pinned SHA, exact set of asset names, `uploaded` states and matching SHA-256 digests. Once these checks pass, run the edit command. Read the Release again by its numeric ID and verify `draft=false`. Return its `html_url`, tag, commit SHA and attachment names and digests.
+
+   ```sh
+   gh release edit "$tag" -R nan-mu/libbpf-mcu --draft=false
+   gh api --hostname github.com "repos/nan-mu/libbpf-mcu/releases/$release_id"
+   ```
+
+A retry with a correct tag and no draft creates the missing draft. A draft carrying only verified assets resumes with the missing files from the original local set. If the same Release is already public, verify its tag and entire asset set and return the existing link. If any release input or remote asset differs, preserve the draft and report the difference. [GitHub Release API](https://docs.github.com/en/rest/releases/releases) · [GitHub asset digests](https://docs.github.com/en/rest/releases/assets) · [GitHub CLI release commands](https://cli.github.com/manual/gh_release)

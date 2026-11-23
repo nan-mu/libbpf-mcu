@@ -104,7 +104,7 @@ def published_path(path: Path) -> str:
 
 
 def write_stamp(stamp: Path, obj: Path, program: ProgramRef) -> None:
-    from layout import sha256_file, verifier_identity
+    from layout import sha256_file
 
     body = (
         f"section={program.section}\n"
@@ -112,7 +112,7 @@ def write_stamp(stamp: Path, obj: Path, program: ProgramRef) -> None:
         f"bpf_o={published_path(obj)}\n"
         f"bpf_sha256={sha256_file(obj)}\n"
         f"verifier=prevail\n"
-        f"verifier_id={verifier_identity()}\n"
+        f"verifier_id={sha256_file(prevail_bin())}\n"
         f"options=stack-size=512\n"
     )
     tmp = stamp.with_name(stamp.name + ".tmp")
@@ -129,55 +129,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="prevail_gate")
     parser.add_argument("--obj", type=Path, required=True)
     parser.add_argument("--stamp", type=Path, required=True)
-    parser.add_argument("--build-dir", type=Path)
-    parser.add_argument("--program", default="")
     args = parser.parse_args()
-    try:
-        stamp_aot(args.obj, args.stamp)
-    except SystemExit:
-        _record_gate(args, accepted=False)
-        raise
-    _record_gate(args, accepted=True)
-
-
-def _record_gate(args: argparse.Namespace, accepted: bool) -> None:
-    if args.build_dir is None or not args.program:
-        return
-    from layout import LayoutError, parse_stamp, record_verification, retract_mode, sha256_file
-
-    try:
-        if accepted:
-            parsed = parse_stamp(args.stamp.read_text())
-            record_verification(
-                args.build_dir,
-                args.program,
-                {
-                    "status": "accepted",
-                    "input_sha256": parsed.get("bpf_sha256", ""),
-                    "verifier": "prevail",
-                    "verifier_id": parsed.get("verifier_id", ""),
-                    "options": parsed.get("options", ""),
-                },
-            )
-            return
-        digest = sha256_file(args.obj) if args.obj.is_file() else ""
-        record_verification(
-            args.build_dir,
-            args.program,
-            {
-                "status": "rejected",
-                "input_sha256": digest,
-                "verifier": "prevail",
-                "verifier_id": "",
-                "options": "stack-size=512",
-            },
-        )
-        retract_mode(args.build_dir, args.program, "rv32", "PREVAIL rejected the program")
-        retract_mode(
-            args.build_dir, args.program, "bpf-xpost", "PREVAIL rejected the program"
-        )
-    except LayoutError as exc:
-        sys.stderr.write(f"{exc}\n")
+    stamp_aot(args.obj, args.stamp)
 
 
 if __name__ == "__main__":

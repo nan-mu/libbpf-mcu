@@ -12,9 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 FAILED = ROOT / "tests" / "unused"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prevail_gate import prevail_bin  # noqa: E402
+from llvm_tools import resolve_llvm_tool  # noqa: E402
 
 PREVAIL = prevail_bin()
-CLANG = "clang"
+CLANG = resolve_llvm_tool("clang", prefer_homebrew=True)
 
 CASES = [
     ("xdp_oob_packet.c", "xdp", None),

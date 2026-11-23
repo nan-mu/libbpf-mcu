@@ -762,7 +762,7 @@ def analyze(obj_path: Path) -> dict[str, Any]:
     return {"maps": maps, "core": core}
 
 
-from obj_report import append_multiline, toml_string
+from layout import append_multiline, q as toml_string
 
 
 def _maps_table_name(name: str) -> str:

@@ -1,37 +1,75 @@
-"""Build orchestration for libbpf-mcu (ninja: compile + object reports + pack)."""
+"""Configure and run the producer's Ninja build."""
 
 from __future__ import annotations
 
 import json
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+from build_state import PRIVATE_MODES, reconcile, render_reports
+from layout import (
+    ROOT,
+    LayoutError,
+    bpf_path,
+    check_program,
+    container_path,
+    lock,
+    source_path,
+    sha256_file,
+    state_path,
+    write_if_changed,
+)
 from llvm_tools import resolve_llvm_tool
-from jit_publish import JitDeliverables
-from layout import mode_dir, report_path, spec_path, stamp_path
 from prevail_gate import prevail_bin
 from tiny_log import error, info
 
-MAKE_DIR = Path(__file__).resolve().parent
-ROOT = MAKE_DIR.parent
-WORKSPACE_ROOT = ROOT.parent
-DEFAULT_BUILD_DIR = WORKSPACE_ROOT / "build"
-TESTS_DIR = ROOT / "tests"
-NINJA_DIR = MAKE_DIR / "ninja"
-LINKER_DIR = MAKE_DIR / "linker"
-TOOLS_DIR = ROOT / "tools"
-TOOLS_MANIFEST = TOOLS_DIR / "Cargo.toml"
-TOOLS_TARGET = TOOLS_DIR / "target"
-XPOST_ELF_MANIFEST = WORKSPACE_ROOT / "xpost" / "xpost-elf" / "Cargo.toml"
+MAKE = ROOT / "make"
+DEFAULT_BUILD_DIR = ROOT / "build"
 CLANG = resolve_llvm_tool("clang", prefer_homebrew=True)
 DEFAULT_OBJDUMP = resolve_llvm_tool("llvm-objdump")
 DEFAULT_OBJCOPY = resolve_llvm_tool("llvm-objcopy")
-SLOT_LD_TMPL = LINKER_DIR / "esp32c3-slot.ld.tmpl"
-XPOST_ESP32_C3_ARCH = 1
+SLOT_LD_TMPL = MAKE / "linker" / "esp32c3-slot.ld.tmpl"
+TOOLS_MANIFEST = ROOT / "tools" / "Cargo.toml"
+
+BPF_FLAGS = [
+    "-O2",
+    "--target=bpf",
+    "-Wall",
+    "-Wno-missing-declarations",
+    "-fno-stack-protector",
+    "-g",
+    f"-ffile-prefix-map={ROOT}/=",
+    "-fdebug-compilation-dir=.",
+    "-I",
+    str(ROOT / "include-bpf"),
+    "-include",
+    "vmlinux.h",
+]
+MCU_FLAGS = [
+    "-O2",
+    "--target=riscv32-unknown-none-elf",
+    "-march=rv32imc",
+    "-mabi=ilp32",
+    "-nostdlib",
+    "-ffreestanding",
+    "-fno-builtin",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-fno-jump-tables",
+    "-fno-omit-frame-pointer",
+    "-Wall",
+    "-Wno-unused-function",
+    "-g",
+    "-I",
+    str(ROOT / "include"),
+    "-include",
+    "vmlinux.h",
+]
 
 
 @dataclass(frozen=True)
@@ -43,186 +81,29 @@ class MemMapV0:
     table_len: int
 
 
-@dataclass(frozen=True)
-class McuLink:
-    """Present only when this graph may compile ESP32-C3 code."""
-
-    mem: MemMapV0
-    linker: Path
-    tool_bin: Path
-    firmware: Path
-    compact_elf: bool
-    image_name: str | None = None
-    slot_symbol: str | None = None
-    engine: str = "aot"
-
-    def __post_init__(self) -> None:
-        if self.engine not in {"aot", "rbpf"}:
-            raise ValueError(f"engine must be aot or rbpf, got {self.engine!r}")
-
-
-@dataclass(frozen=True)
-class JitLink:
-    """JIT publication. Slot and helper stay in the firmware file."""
-
-    firmware: Path
-    tool_bin: Path
-    mem: MemMapV0
-    image_name: str | None = None
-
-
-@dataclass(frozen=True)
-class PrevailStamp:
-    """Absence is the refusal."""
-
-    stem: str
-    build_dir: Path
-
-    @property
-    def path(self) -> Path:
-        return stamp_path(self.build_dir, self.stem)
-
-
-@dataclass(frozen=True)
-class GraphPlan:
-    sources: tuple[Path, ...]
-    backend: McuLink | JitLink | None
-    release: bool
-    objdump: str
-    build_dir: Path
-
-
-@dataclass(frozen=True)
-class BuildPaths:
-    inputs: list[Path]
-    outputs: list[Path]
-
-
-@dataclass(frozen=True)
-class BuildTarget:
-    target: str
-    inputs: list[Path]
-    outputs: list[Path]
-
-
-TARGETS = ("bpf", "esp32c3")
-EXPLICIT_TARGETS = (*TARGETS, "jit")
-
-
-def _split_paths(value):
-    if value is None:
-        return None
-    return [item for item in value.split() if item]
-
-
-def _default_inputs(crate: str | None = None):
-    inputs = sorted(
-        path
-        for path in TESTS_DIR.rglob("*.c")
-        if "unused" not in path.relative_to(TESTS_DIR).parts
-    )
-    if crate is not None:
-        matched = [path for path in inputs if path.stem == crate]
-        if not matched:
-            error(f"未找到 stem={crate!r} 的测试源（tests/**/{crate}.c）")
-            sys.exit(1)
-        if len(matched) > 1:
-            error(f"stem={crate!r} 匹配多个文件: {matched}")
-            sys.exit(1)
-        inputs = matched
-    if not inputs:
-        error(f"默认测试输入为空: {TESTS_DIR}")
-        sys.exit(1)
-    return inputs
-
-
-def _derive_default_outputs(inputs, target, build_dir: Path):
-    outputs = []
-    seen = {}
-    mode = "rv32" if target == "esp32c3" else "bpf"
-    suffix = "_rv32.o" if target == "esp32c3" else "_bpf.o"
-    for input_path in inputs:
-        stem = Path(input_path).stem
-        output_path = build_dir / stem / mode / f"{stem}{suffix}"
-        if stem in seen:
-            error(
-                f"默认输出冲突: {seen[stem]} 与 {input_path} 都映射到 {output_path}"
-            )
-            sys.exit(1)
-        seen[stem] = input_path
-        outputs.append(output_path)
-    return outputs
-
-
-def check_build_args(target, inputs, outputs, crate: str | None = None, build_dir: Path = DEFAULT_BUILD_DIR):
-    if target is None:
-        targets = list(TARGETS)
+def resolve_sources(inputs: str | None, crate: str | None) -> list[Path]:
+    if inputs is not None and crate is not None:
+        raise LayoutError("--inputs and -c are mutually exclusive")
+    if inputs is not None:
+        sources = [Path(item).expanduser().resolve() for item in shlex.split(inputs)]
     else:
-        normalized_target = target.lower()
-        if normalized_target not in EXPLICIT_TARGETS:
-            error(f"未找到 target: {target}")
-            sys.exit(1)
-        targets = [normalized_target]
-
-    input_items = _split_paths(inputs)
-    output_items = _split_paths(outputs)
-
-    if crate is not None and input_items is not None:
-        error("不能同时指定 -c 与 --inputs/-i")
-        sys.exit(1)
-
-    if output_items is not None:
-        error(
-            "--output 不再选择产物路径。文件名由程序名和模式决定，目录由 --build-dir 决定。"
-            "旧布局用 artifacts export-legacy 导出到另一个目录。"
+        sources = sorted(
+            path
+            for path in (ROOT / "tests").rglob("*.c")
+            if "unused" not in path.relative_to(ROOT / "tests").parts
+            and (crate is None or path.stem == crate)
         )
-        sys.exit(2)
-
-    raw_inputs = (
-        _default_inputs(crate)
-        if input_items is None
-        else [Path(item) for item in input_items]
-    )
-
-    builds = []
-    for item in targets:
-        raw_outputs = (
-            _derive_default_outputs(raw_inputs, item, build_dir)
-            if output_items is None
-            else [Path(path) for path in output_items]
-        )
-        if len(raw_inputs) != len(raw_outputs):
-            error(
-                f"输入文件和输出文件数量不一致: inputs={len(raw_inputs)}, outputs={len(raw_outputs)}"
-            )
-            sys.exit(1)
-        builds.append(BuildTarget(item, raw_inputs, raw_outputs))
-
-    return builds
-
-
-def check_build_fs(paths):
-    checked_inputs = []
-    checked_outputs = []
-    for input_path, output_path in zip(paths.inputs, paths.outputs):
-        resolved_input = input_path.expanduser().resolve()
-        if not resolved_input.is_file():
-            error(f"输入文件不可用: {resolved_input}")
-            sys.exit(1)
-        if resolved_input.suffix != ".c":
-            error(f"输入文件必须是 .c: {resolved_input}")
-            sys.exit(1)
-
-        resolved_output = output_path.expanduser().resolve()
-        if resolved_output.exists() and resolved_output.is_dir():
-            error(f"输出路径必须是文件，不能是目录: {resolved_output}")
-            sys.exit(1)
-
-        resolved_output.parent.mkdir(parents=True, exist_ok=True)
-        checked_inputs.append(resolved_input)
-        checked_outputs.append(resolved_output)
-
-    return BuildPaths(checked_inputs, checked_outputs)
+    if not sources:
+        raise LayoutError(f"no C sources selected for {crate or 'build'}")
+    seen = set()
+    for path in sources:
+        if path.suffix != ".c" or not path.is_file():
+            raise LayoutError(f"expected a C source file: {path}")
+        name = check_program(path.stem).casefold()
+        if name in seen:
+            raise LayoutError(f"conflicting program output: {path.stem}")
+        seen.add(name)
+    return sources
 
 
 def _host_triple() -> str:
@@ -239,60 +120,32 @@ def _host_triple() -> str:
     return "aarch64-apple-darwin"
 
 
-def tool_bin_path() -> Path:
-    return TOOLS_TARGET / _host_triple() / "release" / "xpost-mcu-elf"
+def tool_bin_path(build_dir: Path) -> Path:
+    return build_dir / ".ninja" / "cargo" / _host_triple() / "release" / "xpost-mcu-elf"
 
 
-def _generate_esp32c3_slot_ld(mem: MemMapV0, out_dir: Path) -> Path:
-    if not SLOT_LD_TMPL.is_file():
-        error(f"linker template missing: {SLOT_LD_TMPL}")
-        sys.exit(1)
-    tmpl = SLOT_LD_TMPL.read_text()
-    body = tmpl.format(
-        slot_index=0,
-        origin=mem.slot_addr,
-        length=mem.slot_len,
-        helper_base=mem.helper_addr,
-    )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "esp32c3-slot-0.ld"
-    if not out_path.is_file() or out_path.read_text() != body:
-        out_path.write_text(body)
-    return out_path
-
-
-def _linker_script(target: str, mem: MemMapV0 | None, build_dir: Path) -> Path | None:
-    if target != "esp32c3":
-        path = LINKER_DIR / f"{target}.ld"
-        return path if path.is_file() else None
-    assert mem is not None
-    return _generate_esp32c3_slot_ld(mem, build_dir / ".ninja")
-
-
-def ensure_tool(force: bool = False) -> Path:
-    """Return xpost-mcu-elf path; cargo-build only if missing or force."""
-    import os
+def ensure_tool(build_dir: Path) -> Path:
+    """Let Cargo check the Rust tool and its sibling XPOST dependencies."""
 
     if not TOOLS_MANIFEST.is_file():
         error(f"tools manifest missing: {TOOLS_MANIFEST}")
         sys.exit(1)
-    out = tool_bin_path()
-    if out.is_file() and not force:
-        return out
+    out = tool_bin_path(build_dir)
     cmd = [
         "cargo",
         "build",
         "--manifest-path",
         str(TOOLS_MANIFEST),
         "--release",
+        "--locked",
+        "--target-dir",
+        str(build_dir / ".ninja" / "cargo"),
         "--target",
         _host_triple(),
         "--bin",
         "xpost-mcu-elf",
     ]
-    run_env = os.environ.copy()
-    run_env["CARGO_TARGET_DIR"] = str(TOOLS_TARGET)
-    proc = subprocess.run(cmd, env=run_env)
+    proc = subprocess.run(cmd)
     if proc.returncode != 0:
         error(f"cargo build xpost-mcu-elf failed: exit={proc.returncode}")
         sys.exit(proc.returncode)
@@ -302,13 +155,17 @@ def ensure_tool(force: bool = False) -> Path:
     return out
 
 
-def load_mem_map_from_firmware(firmware_elf: Path, tool: Path) -> MemMapV0:
+def load_mem_map_from_firmware(
+    firmware_elf: Path, tool: Path, generation: list[dict]
+) -> MemMapV0:
     """Read `.xpost.mem` via prebuilt `xpost-mcu-elf mem-map`."""
     if not firmware_elf.is_file():
         error(f"firmware ELF not found: {firmware_elf}")
         sys.exit(1)
+    argv = [str(tool), "mem-map", str(firmware_elf)]
+    generation.append({"step": "firmware", "argv": argv})
     proc = subprocess.run(
-        [str(tool), "mem-map", str(firmware_elf)],
+        argv,
         capture_output=True,
         text=True,
     )
@@ -335,10 +192,14 @@ def load_mem_map_from_firmware(firmware_elf: Path, tool: Path) -> MemMapV0:
         sys.exit(1)
 
 
-def apply_slot_symbol(mem: MemMapV0, firmware_elf: Path, tool: Path, name: str) -> MemMapV0:
+def apply_slot_symbol(
+    mem: MemMapV0, firmware_elf: Path, tool: Path, name: str, generation: list[dict]
+) -> MemMapV0:
     """Replace the XPM1 slot with one firmware symbol. Images are not relocatable."""
+    argv = [str(tool), "symbol", str(firmware_elf), name]
+    generation.append({"step": "slot symbol", "argv": argv})
     proc = subprocess.run(
-        [str(tool), "symbol", str(firmware_elf), name],
+        argv,
         capture_output=True,
         text=True,
     )
@@ -365,318 +226,233 @@ def apply_slot_symbol(mem: MemMapV0, firmware_elf: Path, tool: Path, name: str) 
     return replace(mem, slot_addr=addr, slot_len=size)
 
 
-def mcu_cc_edge(src: Path, obj: Path, stamp: PrevailStamp, depfile: Path) -> str:
-    """Explicit input is src only. Implicit input is stamp.path."""
-    return f"build {obj}: mcu_cc {src} | {stamp.path}\n  depfile = {depfile}"
+def _ninja(value: str | Path) -> str:
+    return str(value).replace("$", "$$").replace(" ", "$ ").replace(":", "$:")
 
 
-def compact_name(plan: GraphPlan, stem: str) -> str:
-    """Container name. A second link of the same source passes `--image-name`."""
-    backend = plan.backend
-    if isinstance(backend, (McuLink, JitLink)) and backend.image_name:
-        return backend.image_name
-    return stem
-
-
-def _defaults_for_stem(src: Path, plan: GraphPlan) -> list[Path]:
-    stem = src.stem
-    root = plan.build_dir
-    paths = [report_path(root, stem, "bpf")]
-    backend = plan.backend
-    if isinstance(backend, JitLink):
-        paths.extend(
-            JitDeliverables.for_stem(
-                root, stem, compact_name(plan, stem)
-            ).outputs()
-        )
-    elif isinstance(backend, McuLink):
-        paths.append(report_path(root, stem, "rv32"))
-        if backend.compact_elf:
-            paths.append(spec_path(root, stem, "rv32", "xpost_container"))
-        if backend.engine == "rbpf":
-            paths.append(report_path(root, stem, "bpf-xpost"))
-    return paths
-
-
-def _publish_inputs() -> str:
-    names = (
-        "layout.py",
-        "obj_report.py",
-        "btf.py",
-        "prevail_gate.py",
-        "jit_publish.py",
-        "xdp_section.py",
-        "llvm_tools.py",
-    )
-    return " ".join(str(MAKE_DIR / name) for name in names)
-
-
-def edges_for_stem(src: Path, plan: GraphPlan) -> str:
-    """Emit one stem. plan.backend is the MCU cone, the jit edge, or neither."""
-    stem = src.stem
-    root = plan.build_dir
-    bpf_dir = mode_dir(root, stem, "bpf")
-    bpf_o = bpf_dir / f"{stem}_bpf.o"
-    dep = bpf_dir / f"{stem}_bpf.d"
-    bpf_report = report_path(root, stem, "bpf")
-    release = "1" if plan.release else "0"
-    scripts = _publish_inputs()
+def _edge(
+    outputs: list[Path],
+    deps: list[Path],
+    argv: list,
+    label: str,
+    *,
+    depfile: Path | None = None,
+) -> str:
+    rule = "compile" if depfile is not None else "produce"
     lines = [
-        f"build {bpf_o}: bpf_cc {src}\n  depfile = {dep}",
-        (
-            f"build {bpf_report}: commit_bpf {bpf_o} | {scripts}\n"
-            f"  program = {stem}\n"
-            f"  src = {src}\n"
-            f"  build_dir = {root}\n"
-            f"  headers = {dep}\n"
-            f"  release = {release}"
-        ),
+        f"build {' '.join(map(_ninja, outputs))}: {rule} {' '.join(map(_ninja, deps))}",
+        f"  argv = {shlex.join(map(str, argv)).replace('$', '$$')}",
+        f"  label = {label}",
     ]
-    backend = plan.backend
-    if backend is None:
-        return "\n".join(lines)
-    if isinstance(backend, JitLink):
-        deliver = JitDeliverables.for_stem(root, stem, compact_name(plan, stem))
-        outs = " ".join(str(path) for path in deliver.outputs())
-        lines.append(
-            f"build {outs}: jit_publish {bpf_o} | "
-            f"{backend.tool_bin} {backend.firmware} {bpf_report} {scripts}\n"
-            f"  src = {src}\n"
-            f"  obj = {bpf_o}\n"
-            f"  bpf_toml = {bpf_report}\n"
-            f"  firmware = {backend.firmware}\n"
-            f"  stem = {stem}\n"
-            f"  name = {compact_name(plan, stem)}\n"
-            f"  out_dir = {deliver.jit_bin.parent}\n"
-            f"  tool = {backend.tool_bin}\n"
-            f"  build_dir = {root}\n"
-            f"  release = {release}"
-        )
-        return "\n".join(lines)
-
-    stamp = PrevailStamp(stem, root)
-    rv = mode_dir(root, stem, "rv32")
-    mcu_o = rv / f"{stem}_rv32.o"
-    mcu_dep = rv / f"{stem}_rv32.d"
-    debug = rv / f"{stem}_rv32.debug.elf"
-    image = rv / f"{stem}_rv32.bin"
-    body = rv / ".stage" / "body.toml"
-    rv_report = report_path(root, stem, "rv32")
-    mem = backend.mem
-    content = " --no-content" if plan.release else ""
-    lines.append(
-        f"build {stamp.path}: prevail {bpf_o} | {prevail_bin()} {scripts} || {bpf_report}\n"
-        f"  build_dir = {root}\n"
-        f"  program = {stem}"
-    )
-    lines.append(mcu_cc_edge(src, mcu_o, stamp, mcu_dep))
-    lines.append(f"build {debug}: link {mcu_o} | {backend.linker}")
-    lines.append(f"build {image}: bin {debug}")
-    lines.append(
-        f"build {body}: report {debug} | {bpf_report} {scripts}\n"
-        f"  src = {src}\n"
-        f"  report_flags = --body-only --maps-from {bpf_report} --merge-aot-addrs{content}"
-    )
-    image_name = compact_name(plan, stem)
-    container_arg = ""
-    aot_container: Path | None = None
-    if backend.compact_elf:
-        aot_container = spec_path(root, stem, "rv32", "xpost_container")
-        container_arg = f"--container {aot_container}"
-        lines.append(
-            f"build {aot_container}: pack {image} | "
-            f"{backend.tool_bin} {bpf_report} {body}\n"
-            f"  image = {image}\n"
-            f"  bpf_toml = {bpf_report}\n"
-            f"  addr_toml = {body}\n"
-            f"  name = {image_name}\n"
-            f"  slot = {mem.slot_addr:#x}\n"
-            f"  helper = {mem.helper_addr:#x}\n"
-            f"  machine = {XPOST_ESP32_C3_ARCH}\n"
-            f"  engine_flags = {engine_flags('aot', bpf_o)}\n"
-            f"  export_flags = \n"
-            f"  out_file = {aot_container}"
-        )
-    commit_inputs = f"{mcu_o} {debug} {image} {body}"
-    if aot_container is not None:
-        commit_inputs = f"{commit_inputs} {aot_container}"
-    slot_symbol = backend.slot_symbol or ""
-    lines.append(
-        f"build {rv_report}: commit_rv32 {commit_inputs} | "
-        f"{stamp.path} {bpf_o} {backend.linker} {backend.firmware} {scripts}\n"
-        f"  program = {stem}\n"
-        f"  src = {src}\n"
-        f"  build_dir = {root}\n"
-        f"  object = {mcu_o}\n"
-        f"  debug = {debug}\n"
-        f"  image = {image}\n"
-        f"  body = {body}\n"
-        f"  container_arg = {container_arg}\n"
-        f"  bpf_object = {bpf_o}\n"
-        f"  stamp = {stamp.path}\n"
-        f"  linker = {backend.linker}\n"
-        f"  firmware = {backend.firmware}\n"
-        f"  release = {release}\n"
-        f"  engine = aot\n"
-        f"  image_arg = {('--image-name ' + image_name) if backend.image_name else ''}\n"
-        f"  slot_arg = {('--slot-symbol ' + slot_symbol) if slot_symbol else ''}\n"
-        f"  headers = {mcu_dep}\n"
-        f"  helper = {mem.helper_addr:#x}\n"
-        f"  slot = {mem.slot_addr:#x}\n"
-        f"  slot_len = {mem.slot_len:#x}\n"
-        f"  table = {mem.table_addr:#x}\n"
-        f"  table_len = {mem.table_len:#x}"
-    )
-    if backend.engine == "rbpf":
-        xdir = mode_dir(root, stem, "bpf-xpost")
-        section = xdir / ".stage" / "section.bin"
-        patched = spec_path(root, stem, "bpf-xpost", "image")
-        pack_out = spec_path(root, stem, "bpf-xpost", "xpost_container")
-        lines.append(
-            f"build {section}: section {bpf_o} | {MAKE_DIR / 'xdp_section.py'} {MAKE_DIR / 'llvm_tools.py'}\n"
-            f"  obj = {bpf_o}\n"
-            f"  sec_out = {section}"
-        )
-        lines.append(
-            f"build {pack_out} {patched}: pack {section} | "
-            f"{backend.tool_bin} {bpf_report} {rv_report}\n"
-            f"  image = {section}\n"
-            f"  bpf_toml = {bpf_report}\n"
-            f"  addr_toml = {rv_report}\n"
-            f"  name = {image_name}\n"
-            f"  slot = {mem.slot_addr:#x}\n"
-            f"  helper = {mem.helper_addr:#x}\n"
-            f"  machine = {XPOST_ESP32_C3_ARCH}\n"
-            f"  engine_flags = {engine_flags('rbpf', bpf_o)}\n"
-            f"  export_flags = --export-image {patched}\n"
-            f"  out_file = {pack_out}"
-        )
-        xreport = report_path(root, stem, "bpf-xpost")
-        patched = spec_path(root, stem, "bpf-xpost", "image")
-        lines.append(
-            f"build {xreport}: commit_xpost {patched} {pack_out} | "
-            f"{rv_report} {bpf_o} {stamp.path} {scripts}\n"
-            f"  program = {stem}\n"
-            f"  src = {src}\n"
-            f"  build_dir = {root}\n"
-            f"  image = {patched}\n"
-            f"  container = {pack_out}\n"
-            f"  bpf_object = {bpf_o}\n"
-            f"  addr_report = {rv_report}\n"
-            f"  stamp = {stamp.path}\n"
-            f"  firmware = {backend.firmware}\n"
-            f"  release = {release}\n"
-            f"  image_arg = {'--slot-symbol '+ slot_symbol if slot_symbol else ''} {'--image-name '+ image_name if backend.image_name else ''}\n"
-            f"  helper = {mem.helper_addr:#x}\n"
-            f"  slot = {mem.slot_addr:#x}\n"
-            f"  slot_len = {mem.slot_len:#x}\n"
-            f"  table = {mem.table_addr:#x}\n"
-            f"  table_len = {mem.table_len:#x}"
-        )
+    if depfile is not None:
+        lines.append(f"  depfile = {_ninja(depfile)}")
     return "\n".join(lines)
 
 
-def _tool_inputs() -> list[Path]:
-    paths = [
-        TOOLS_MANIFEST,
-        XPOST_ELF_MANIFEST,
-        ROOT / "jit" / "Cargo.toml",
-    ]
-    paths.extend(sorted((TOOLS_DIR / "src").glob("*.rs")))
-    paths.extend(sorted((ROOT / "jit" / "src").glob("*.rs")))
-    return [path for path in paths if path.is_file()]
-
-
-def engine_flags(engine: str, bpf_o: Path) -> str:
-    """Extra `pack` arguments for one engine.
-
-    A bytecode image needs its map references turned into indices. The map
-    identity lives in the object's relocation table, not in the bytes, so the
-    object is passed along; without it `pack` cannot tell which `lddw` refers to
-    which map and refuses rather than guessing.
-    """
-    if engine == "rbpf":
-        return f"--map-index --obj {bpf_o}"
-    return ""
-
-
-def write_build_ninja(plan: GraphPlan) -> Path:
-    """Fill make/ninja/graph.ninja into <build>/.ninja/build.ninja."""
-    backend = plan.backend
-    if isinstance(backend, (McuLink, JitLink)) and not prevail_bin().is_file():
-        error(f"PREVAIL binary missing: {prevail_bin()}")
-        sys.exit(1)
-
-    template = NINJA_DIR / "graph.ninja"
-    if not template.is_file():
-        error(f"ninja 模板不可用: {template}")
-        sys.exit(1)
-
-    ninja_dir = plan.build_dir / ".ninja"
-    ninja_dir.mkdir(parents=True, exist_ok=True)
-    ninja_file = ninja_dir / "build.ninja"
-
-    edges: list[str] = []
-    defaults: list[Path] = []
-    needs_tool = isinstance(backend, JitLink) or (
-        isinstance(backend, McuLink) and backend.compact_elf
-    )
-    if needs_tool:
-        tool_deps = " ".join(str(path) for path in _tool_inputs())
-        edges.append(f"build {backend.tool_bin}: tool | {tool_deps}")
-    for src in plan.sources:
-        edges.append(edges_for_stem(src, plan))
-        defaults.extend(_defaults_for_stem(src, plan))
-
-    linker = backend.linker if isinstance(backend, McuLink) else None
-    tool_bin = backend.tool_bin if isinstance(backend, (McuLink, JitLink)) else tool_bin_path()
-    content = template.read_text()
-    content = content.replace("@ROOT@", str(ROOT))
-    content = content.replace("@CLANG@", CLANG)
-    content = content.replace("@PYTHON@", sys.executable)
-    content = content.replace("@MAKE@", str(MAKE_DIR))
-    content = content.replace("@OBJDUMP@", plan.objdump)
-    content = content.replace("@OBJCOPY@", DEFAULT_OBJCOPY)
-    content = content.replace("@LINKER@", str(linker) if linker is not None else "")
-    content = content.replace("@TOOLS_MANIFEST@", str(TOOLS_MANIFEST))
-    content = content.replace("@TOOLS_TARGET@", str(TOOLS_TARGET))
-    content = content.replace("@HOST_TRIPLE@", _host_triple())
-    content = content.replace("@TOOL_BIN@", str(tool_bin))
-    content = content.replace("@EDGES@", "\n".join(edges))
-    content = content.replace("@DEFAULT@", " ".join(str(path) for path in defaults))
-    ninja_file.write_text(content)
-
-    info(f"已生成 ninja: {ninja_file}")
-    if linker is not None:
-        info(f"linker: {linker}")
-    return ninja_file
-
-
-def run_ninja(ninja_file, force=False, build_dir: Path = DEFAULT_BUILD_DIR):
-    build_dir.mkdir(parents=True, exist_ok=True)
-    if force:
-        info("强制重建: ninja -t clean")
-        clean = subprocess.run(
-            ["ninja", "-f", str(ninja_file), "-t", "clean"],
-            cwd=build_dir,
+def write_build_ninja(
+    root: Path, sources: list[Path], mode: str, args, backend: dict
+) -> Path:
+    template = MAKE / "ninja" / "graph.ninja"
+    scripts = [
+        MAKE / name
+        for name in (
+            "build.py",
+            "build_steps.py",
+            "build_state.py",
+            "layout.py",
+            "btf.py",
+            "xpost_elf.py",
         )
-        if clean.returncode != 0:
-            error(f"ninja clean 失败: exit={clean.returncode}")
-            sys.exit(clean.returncode)
+    ] + [template]
+    edges, targets = [], []
+    for src in sources:
+        name = src.stem
+        bpf = bpf_path(root, name)
+        snapshot = source_path(root, name)
+        bpf_state = state_path(root, name, "bpf")
+        gate = state_path(root, name, "prevail")
+        stamp = bpf.parent / "prevail.ok"
+        modes = ["bpf"]
+        if mode != "bpf":
+            modes.append("prevail")
+        if mode == "ebpf":
+            modes.append("ebpf-native")
+        if mode != "bpf":
+            modes.append(mode)
+        targets.append(state_path(root, name, mode))
+        for item in modes:
+            state = state_path(root, name, item)
+            outputs, deps = [state], list(scripts)
+            cfg = None
+            depfile = None
+            if item == "bpf":
+                cfg = {"clang": CLANG, "flags": BPF_FLAGS, "objdump": args.objdump}
+                outputs.extend([bpf, snapshot])
+                deps.extend([src, Path(CLANG)])
+                depfile = state.with_name("headers.d")
+            elif item == "prevail":
+                outputs.append(stamp)
+                deps.extend([bpf_state, bpf, prevail_bin(), MAKE / "prevail_gate.py"])
+            else:
+                cfg = dict(
+                    backend,
+                    objdump=args.objdump,
+                    objcopy=args.objcopy,
+                    image_name=args.image_name or name,
+                )
+                deps.extend([Path(cfg["firmware"]), Path(cfg["tool"])])
+                if item in ("llvm-aot", "ebpf-native"):
+                    cfg.update(clang=CLANG, flags=MCU_FLAGS)
+                    linker = state.with_name("slot.ld")
+                    write_if_changed(
+                        linker,
+                        SLOT_LD_TMPL.read_text()
+                        .format(
+                            slot_index=0,
+                            origin=cfg["slot_addr"],
+                            length=cfg["slot_len"],
+                            helper_base=cfg["helper_addr"],
+                        )
+                        .encode(),
+                    )
+                    cfg["linker"] = str(linker)
+                    deps.extend([src, gate, Path(CLANG), linker])
+                    depfile = state.with_name("headers.d")
+                    native = root / name / item if item == "llvm-aot" else state.parent
+                    outputs.extend(
+                        [native / f"{name}_rv32.o", native / f"{name}_rv32.debug.elf"]
+                    )
+                    if item == "llvm-aot":
+                        outputs.append(native / f"{name}_rv32.bin")
+                        deps.append(Path(cfg["objcopy"]))
+                        if cfg["compact"]:
+                            outputs.append(container_path(root, name, item))
+                elif item == "ebpf":
+                    deps.extend(
+                        [
+                            state_path(root, name, "ebpf-native"),
+                            Path(cfg["objcopy"]),
+                            MAKE / "xdp_section.py",
+                        ]
+                    )
+                    outputs.extend(
+                        [
+                            container_path(root, name, item),
+                            root / name / item / f"{name}_bpf-xpost.bin",
+                        ]
+                    )
+                else:
+                    deps.append(gate)
+                    container = container_path(root, name, item)
+                    outputs.extend([container, container.with_name("jit.bin")])
+            argv = [sys.executable, MAKE / "build_steps.py", item, root, src]
+            if cfg is not None:
+                config = state.with_name("config.json")
+                write_if_changed(config, json.dumps(cfg, sort_keys=True).encode())
+                deps.append(config)
+                argv.append(config)
+            for out in outputs:
+                out.parent.mkdir(parents=True, exist_ok=True)
+            edges.append(_edge(outputs, deps, argv, f"{item} {name}", depfile=depfile))
+    path = root / ".ninja" / "build.ninja"
+    body = template.read_text().replace("@EDGES@", "\n\n".join(edges))
+    body = body.replace("@DEFAULT@", " ".join(map(_ninja, targets)))
+    write_if_changed(path, body.encode())
+    return path
 
-    info(f"运行 ninja: {ninja_file}")
-    result = subprocess.run(
-        ["ninja", "-f", str(ninja_file)], cwd=build_dir
-    )
-    if result.returncode != 0:
-        error(f"ninja 失败: exit={result.returncode}")
-        sys.exit(result.returncode)
-    info("ninja 完成")
+
+def build(root: Path, sources: list[Path], mode: str, args) -> None:
+    selected = (mode,)
+    with lock(root):
+        if (root / "index.toml").exists():
+            raise LayoutError(
+                f"{root}: use a separate build root from existing artifact indexes"
+            )
+        names = {src.stem for src in sources}
+        programs = names | {
+            p.name for p in (root / ".ninja").glob("*") if (p / "bpf").is_dir()
+        }
+        # Withhold any mode being replaced, while preserving unrelated valid
+        # modes. Ninja and the receipts determine which modes can return.
+        for program in sorted(programs):
+            reconcile(root, program, selected if program in names else ())
+        backend = {}
+        graph_ready = False
+        failure = ""
+        try:
+            if mode != "bpf":
+                if not prevail_bin().is_file():
+                    raise LayoutError(f"PREVAIL binary missing: {prevail_bin()}")
+                firmware = args.firmware.expanduser().resolve()
+                if not firmware.is_file():
+                    raise LayoutError(f"firmware ELF not found: {firmware}")
+                generation = []
+                firmware_digest = sha256_file(firmware)
+                tool = ensure_tool(root)
+                mem = load_mem_map_from_firmware(firmware, tool, generation)
+                if args.slot_symbol:
+                    mem = apply_slot_symbol(
+                        mem, firmware, tool, args.slot_symbol, generation
+                    )
+                backend = dict(
+                    asdict(mem),
+                    firmware=str(firmware),
+                    tool=str(tool),
+                    compact=not args.no_compact_elf,
+                    firmware_calls=generation,
+                    firmware_digest=firmware_digest,
+                )
+            path = write_build_ninja(root, sources, mode, args, backend)
+            graph_ready = True
+            force_modes = {mode, "bpf"}
+            if mode != "bpf":
+                force_modes.add("prevail")
+            if mode == "ebpf":
+                force_modes.add("ebpf-native")
+            for src in sources:
+                reasons = reconcile(root, src.stem, selected)
+                for item in PRIVATE_MODES:
+                    receipt = state_path(root, src.stem, item)
+                    if item in reasons or (args.force and item in force_modes):
+                        receipt.unlink(missing_ok=True)
+            with (root / ".ninja" / f"{mode}.log").open("w") as log:
+                with subprocess.Popen(
+                    ["ninja", "-f", str(path), "-k", "0"],
+                    cwd=root,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                ) as proc:
+                    for line in proc.stdout:
+                        log.write(line)
+                        print(line, end="", flush=True)
+                if proc.returncode:
+                    raise LayoutError(
+                        f"Ninja failed ({proc.returncode}), see {log.name}"
+                    )
+        except (OSError, ValueError, SystemExit, KeyboardInterrupt) as exc:
+            failure = str(exc)
+            if not graph_ready:
+                for src in sources:
+                    state_path(root, src.stem, mode).unlink(missing_ok=True)
+            raise
+        finally:
+            for program in sorted(programs):
+                reconcile(
+                    root,
+                    program,
+                    failure=failure,
+                    attempted=selected if program in names else (),
+                )
+        for src in sources:
+            try:
+                render_reports(root, src.stem)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                print(f"{src.stem}: report generation failed: {exc}", file=sys.stderr)
 
 
-def clean_build():
-    if not DEFAULT_BUILD_DIR.exists():
-        info(f"构建目录不存在，无需清理: {DEFAULT_BUILD_DIR}")
-        return
-    shutil.rmtree(DEFAULT_BUILD_DIR)
-    info(f"已清空构建目录: {DEFAULT_BUILD_DIR}")
+def clean_build() -> None:
+    with lock(DEFAULT_BUILD_DIR):
+        if DEFAULT_BUILD_DIR.exists():
+            shutil.rmtree(DEFAULT_BUILD_DIR)
+            info(f"removed {DEFAULT_BUILD_DIR}")

@@ -14,12 +14,12 @@ ELF32_SHDR_SIZE = 40
 SHT_SIZE = 4 * ELF32_SHDR_SIZE
 META_OFFSET = ELF32_EHDR_SIZE + SHT_SIZE
 IMAGE_DIGEST_SIZE = 32
-MAX_CONTAINER_SIZE = 4096
+MAX_CONTAINER_SIZE = 8192
 MAX_META_SIZE = 1024
 MAX_MAPS = 8
 MAX_NAME = 31
 MAX_LAYOUT = 32
-MAX_ENTRIES = 64
+MAX_ENTRIES = 256
 XPOST_VERSION = 0
 SHT_XPOST_META = 0x80000001
 SHT_XPOST_IMAGE = 0x80000002
@@ -130,7 +130,7 @@ def build_container(image: bytes, metadata: ImageMetadataV0) -> bytes:
     names_off = image_off + len(image)
     digest_off = align4(names_off + len(SECTION_NAMES))
     if digest_off + IMAGE_DIGEST_SIZE > MAX_CONTAINER_SIZE:
-        raise ValueError("container exceeds 4096 bytes")
+        raise ValueError(f"container exceeds {MAX_CONTAINER_SIZE} bytes")
     if metadata.slot_address + len(image) > 0x100000000:
         raise ValueError("image address extent overflows ELF32")
     header = EHDR.pack(IDENT, 1, 243, 1, 0, 0, ELF32_EHDR_SIZE, 1, 52, 0, 0, 40, 4, 3)
@@ -240,7 +240,7 @@ def metadata_from_bpf_toml(path: Path, *, name: str, slot_address: int,
             if kind not in (1, 2):
                 continue
             max_entries = item["max_entries"]
-            if not isinstance(max_entries, int) or not 1 <= max_entries <= 64:
+            if not isinstance(max_entries, int) or not 1 <= max_entries <= MAX_ENTRIES:
                 continue
             layouts = []
             for field in ("key", "value"):

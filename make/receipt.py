@@ -18,11 +18,12 @@ from pathlib import Path
 
 MAKE_DIR = Path(__file__).resolve().parent
 ROOT = MAKE_DIR.parent
-WORKSPACE = ROOT.parent
 
 # Late import so `python receipt.py` works from make/.
 sys.path.insert(0, str(MAKE_DIR))
-from layout import LayoutError, load_mode, report_path, spec_path  # noqa: E402
+from layout import LayoutError, bpf_path, load_index  # noqa: E402
+from btf import analyze  # noqa: E402
+from legacy_export import parse_maps_aot_addrs  # noqa: E402
 from llvm_tools import resolve_llvm_tool  # noqa: E402
 from prevail_gate import prevail_bin  # noqa: E402
 
@@ -103,32 +104,6 @@ def mcu_elf_checks(elf: Path, objdump: str, readelf: str) -> dict:
     }
 
 
-def parse_bpf_toml_maps(bpf_toml: Path) -> list[dict]:
-    if not bpf_toml.is_file():
-        return []
-    text = bpf_toml.read_text()
-    maps = []
-    for m in re.finditer(
-        r"^\[maps\.([^\]]+)\]\s*\n(.*?)(?=^\[|\Z)", text, re.M | re.S
-    ):
-        name = m.group(1)
-        body = m.group(2)
-        def field(key: str) -> str | None:
-            mm = re.search(rf"^{key}\s*=\s*(.+)$", body, re.M)
-            return mm.group(1).strip().strip('"') if mm else None
-
-        maps.append(
-            {
-                "name": name,
-                "map_type": field("map_type"),
-                "key_size": field("key_size"),
-                "value_size": field("value_size"),
-                "aot_addr": field("aot_addr"),
-            }
-        )
-    return maps
-
-
 def build_receipt(
     *,
     source: Path,
@@ -140,28 +115,26 @@ def build_receipt(
     objdump: str,
     readelf: str,
 ) -> dict:
-    try:
-        load_mode(build_dir, stem, "bpf")
-        load_mode(build_dir, stem, "rv32")
-    except LayoutError as exc:
-        raise FileNotFoundError(str(exc)) from exc
-    bpf_o = spec_path(build_dir, stem, "bpf", "bpf_object")
-    bpf_toml = report_path(build_dir, stem, "bpf")
-    rv_toml = report_path(build_dir, stem, "rv32")
-    mcu_elf = spec_path(build_dir, stem, "rv32", "debug_elf")
-    mcu_bin = spec_path(build_dir, stem, "rv32", "image")
-
-    missing = [str(p) for p in (source, bpf_o, bpf_toml, rv_toml) if not p.is_file()]
-    if missing:
-        raise FileNotFoundError(f"missing required artifacts: {missing}")
-
+    program = build_dir / stem
+    index = load_index(program, stem)
+    bpf_o = bpf_path(build_dir, stem)
+    mcu_elf = program / "llvm-aot" / f"{stem}_rv32.debug.elf"
+    mcu_bin = program / "llvm-aot" / f"{stem}_rv32.bin"
+    if sha256_file(source) != index["source"]["sha256"]:
+        raise LayoutError(f"{source} differs from the built source snapshot")
+    addrs = parse_maps_aot_addrs(objdump, mcu_elf) if mcu_elf.is_file() else {}
     prev = prevail_accept(prevail, bpf_o, section, function)
     bpf_chk = bpf_elf_checks(bpf_o, readelf, section)
-    maps = parse_bpf_toml_maps(bpf_toml)
-    rv_maps = {item["name"]: item.get("aot_addr") for item in parse_bpf_toml_maps(rv_toml)}
-    for item in maps:
-        if not item.get("aot_addr"):
-            item["aot_addr"] = rv_maps.get(item["name"])
+    maps = [
+        {
+            "name": item["name"],
+            "map_type": item["map_type_name"],
+            "key_size": str(item["key_size"]),
+            "value_size": str(item["value_size"]),
+            "aot_addr": hex(addrs[item["name"]]) if item["name"] in addrs else None,
+        }
+        for item in analyze(bpf_o)["maps"]["items"]
+    ]
 
     mcu_chk = None
     if mcu_elf.is_file():
@@ -209,8 +182,6 @@ def build_receipt(
         "bpf": {
             "path": show(bpf_o),
             "sha256": sha256_file(bpf_o),
-            "toml_path": show(bpf_toml),
-            "toml_sha256": sha256_file(bpf_toml),
             "section": section,
             "function": function,
             "checks": bpf_chk,
@@ -241,7 +212,7 @@ def main() -> None:
         default=None,
         help="C source (default: libbpf-mcu/tests/xdp/<stem>.c)",
     )
-    parser.add_argument("--build-dir", type=Path, default=WORKSPACE / "build")
+    parser.add_argument("--build-dir", type=Path, default=ROOT / "build")
     parser.add_argument("--section", default="xdp1")
     parser.add_argument("--function", default="xdp_prog1")
     parser.add_argument("--prevail", type=Path, default=DEFAULT_PREVAIL)
@@ -261,7 +232,7 @@ def main() -> None:
     args = parser.parse_args()
 
     source = args.source or (ROOT / "tests" / "xdp" / f"{args.stem}.c")
-    out = args.out or (args.build_dir / args.stem / "rv32" / "safety-receipt.json")
+    out = args.out or (args.build_dir / args.stem / "llvm-aot" / "safety-receipt.json")
 
     try:
         receipt = build_receipt(

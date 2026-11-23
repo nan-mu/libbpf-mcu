@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from xpost_elf import (
-    ImageMetadataV0, MapDescriptorV0, build_container, parse_container,
+    MAX_CONTAINER_SIZE, MAX_ENTRIES, ImageMetadataV0, MapDescriptorV0, build_container, parse_container,
     metadata_from_bpf_toml, SECTION_NAMES,
 )
 
@@ -105,19 +105,19 @@ class CompactElfTests(unittest.TestCase):
 
     def test_exact_container_limit(self):
         meta = replace(self.meta, maps=(), name='x')
-        # 52 EHDR + 160 SHT + 12 metadata + 3804 image + 36 names + 32 digest.
-        data = build_container(bytes(3804), meta)
-        self.assertEqual(len(data), 4096)
+        max_image = MAX_CONTAINER_SIZE - (52 + 160 + 12 + 36 + 32)
+        data = build_container(bytes(max_image), meta)
+        self.assertEqual(len(data), MAX_CONTAINER_SIZE)
         parse_container(data)
-        with self.assertRaisesRegex(ValueError, '4096'):
-            build_container(bytes(3805), meta)
+        with self.assertRaisesRegex(ValueError, str(MAX_CONTAINER_SIZE)):
+            build_container(bytes(max_image + 1), meta)
 
     def test_profile_rejections(self):
         bad_maps = [
             replace(self.map, name=''), replace(self.map, name='a'*32),
             replace(self.map, name='a\0b'), replace(self.map, name='汉'),
             replace(self.map, map_type=27), replace(self.map, map_type=0),
-            replace(self.map, len=0), replace(self.map, len=65),
+            replace(self.map, len=0), replace(self.map, len=MAX_ENTRIES + 1),
             replace(self.map, map_vma=0), replace(self.map, map_vma=5),
             replace(self.map, key_layout=(32,)), replace(self.map, value_layout=None),
             replace(self.map, value_layout=()), replace(self.map, value_layout=(0,)),
@@ -179,7 +179,7 @@ class CompilerIntegrationTests(unittest.TestCase):
         if not all((clang, objcopy, objdump, readelf)):
             self.skipTest('LLVM clang/objcopy/objdump/readelf required')
         from btf import analyze, format_btf_toml
-        from obj_report import parse_maps_aot_addrs, merge_aot_addrs_into_toml
+        from legacy_export import parse_maps_aot_addrs, merge_aot_addrs_into_toml
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             src = root/'sample.c'
