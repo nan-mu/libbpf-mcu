@@ -18,6 +18,6 @@ clap = { version = "4", features = ["derive"] }
 object = { version = "0.36", default-features = false, features = ["read", "elf"] }
 toml = "1.1.3"
 heapless = "0.9.3"
-xpost-elf = { path = "../../xpost/xpost-elf" }
-rbpf = { path = "../../xpost/rbpf", default-features = false, features = ["mcu"] }
+xpost-elf = { git = "https://github.com/nan-mu/xpost.git", rev = "9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56" }
+rbpf = { git = "https://github.com/nan-mu/xpost.git", rev = "9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56", default-features = false, features = ["mcu"] }
 xpost-jit = { path = "../jit" }

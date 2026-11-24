@@ -307,6 +307,7 @@ dependencies = [
 [[package]]
 name = "rbpf"
 version = "0.4.1"
+source = "git+https://github.com/nan-mu/xpost.git?rev=9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56#9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56"
 dependencies = [
  "byteorder",
  "combine",
@@ -497,6 +498,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 [[package]]
 name = "xpost-elf"
 version = "0.1.0"
+source = "git+https://github.com/nan-mu/xpost.git?rev=9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56#9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56"
 dependencies = [
  "heapless",
  "sha2",
@@ -510,6 +512,7 @@ version = "0.1.0"
 [[package]]
 name = "xpost-macros"
 version = "0.1.0"
+source = "git+https://github.com/nan-mu/xpost.git?rev=9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56#9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56"
 dependencies = [
  "proc-macro2",
  "quote",

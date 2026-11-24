@@ -1,6 +1,6 @@
 # Program artifacts and local releases
 
-The `rv32imc` build target uses the ILP32 ABI and no FPU. The current XPOST machine profile supports ESP32-C3. The Rust host tool uses `xpost-elf` for XPM1 and Compact ELF V0. The local verifier checks the V0 field bounds, layout and payload digest. XPOST owns installation and device storage limits.
+The `rv32imc` build target uses the ILP32 ABI and no FPU. The current XPOST machine profile supports ESP32-C3. The Rust host tool uses `xpost-elf` for XPM1 and Compact ELF V0. Its Rust dependencies on XPOST are pinned in `tools/Cargo.toml` and `tools/Cargo.lock` to the main commit that merged the dynamic host encoder. The local verifier checks the V0 field bounds, layout and payload digest. XPOST owns installation and device storage limits.
 
 ## Program layout
 
