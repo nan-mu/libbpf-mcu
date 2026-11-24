@@ -18,3 +18,8 @@
 从正式入口生成候选，用 `verify-release` 对实际归档核对成员、v3 索引和容器内容。预期程序是 `firewall`、`just_drop`、`just_tx`、`noop`、`prime`、`log2`、`copy`、`fletcher32`、`bsort`、`strcmp`、`case_swap`、`case_mark`，每个程序须有 AOT、rBPF、JIT，共 36 项。缺少输入就记录文件名及受影响的产物。PR 附代码依据和候选取得方式，实测结果与待验证项分别记录。
 
 本轮交付候选批次与 PR 更新。公开 `v0.1.1` 由维护者另行授权，版本仅递增最后一段，前两段固定，同一次发布重试复用已分配的 tag。
+
+## 澄清记录
+
+- 问：XPOST 编码器配套 PR 通过验收后，是否由当前会话合入 XPOST main？
+- 答：由维护者审核合并。
