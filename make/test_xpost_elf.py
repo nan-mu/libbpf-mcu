@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from xpost_elf import (
-    MAX_CONTAINER_SIZE, MAX_ENTRIES, ImageMetadataV0, MapDescriptorV0, build_container, parse_container,
+    MAX_ENTRIES, ImageMetadataV0, MapDescriptorV0, build_container, parse_container,
     SECTION_NAMES,
 )
 
@@ -103,15 +103,6 @@ class CompactElfTests(unittest.TestCase):
             struct.pack_into('<I', data, offset, 0xffffffff)
             with self.assertRaises(ValueError):
                 parse_container(bytes(data))
-
-    def test_exact_container_limit(self):
-        meta = replace(self.meta, maps=(), name='x')
-        max_image = MAX_CONTAINER_SIZE - (52 + 160 + 12 + 36 + 32)
-        data = build_container(bytes(max_image), meta)
-        self.assertEqual(len(data), MAX_CONTAINER_SIZE)
-        parse_container(data)
-        with self.assertRaisesRegex(ValueError, str(MAX_CONTAINER_SIZE)):
-            build_container(bytes(max_image + 1), meta)
 
     def test_profile_rejections(self):
         bad_maps = [

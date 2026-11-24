@@ -401,7 +401,7 @@ def write_build_ninja(
 
 
 def deployment_backend(
-    firmware: Path, tool: Path, args, *, cold_capacity: int | None = None
+    firmware: Path, tool: Path, args, *, verify_symbols: bool = False
 ) -> dict:
     name = firmware.name
     firmware = firmware.expanduser().resolve()
@@ -411,17 +411,11 @@ def deployment_backend(
     generation = []
     facts = {"file": name, "path": str(firmware), "sha256": digest}
     mem = load_mem_map_from_firmware(firmware, tool, generation)
-    if cold_capacity is not None:
+    if verify_symbols:
         slot = read_symbol(firmware, tool, "xdp_slot", generation)
         helper, _ = read_symbol(firmware, tool, "helper_dispatcher", generation)
         if slot != (mem.slot_addr, mem.slot_len) or helper != mem.helper_addr:
             raise LayoutError(f"{firmware}: XPM1 disagrees with linked slot or helper symbols")
-        if mem.table_len < cold_capacity:
-            raise LayoutError(
-                f"{firmware}: XPM1 table holds {mem.table_len} bytes, "
-                f"release cold cell requires {cold_capacity}"
-            )
-        facts["cold_capacity"] = cold_capacity
     if args.slot_symbol:
         mem = apply_slot_symbol(mem, firmware, tool, args.slot_symbol, generation)
     generation.append({
@@ -489,8 +483,8 @@ def build(root: Path, sources: list[Path], mode: str | None, args) -> None:
             if mode is None:
                 tool = ensure_tool(root)
                 carriers = {
-                    name: deployment_backend(firmware, tool, args, cold_capacity=capacity)
-                    for name, (firmware, capacity) in inputs.items()
+                    name: deployment_backend(firmware, tool, args, verify_symbols=True)
+                    for name, firmware in inputs.items()
                 }
                 backends = {
                     (program, deployment): carriers[firmware_name(carrier, deployment)]

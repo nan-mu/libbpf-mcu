@@ -26,7 +26,7 @@ from layout import (
     state_path,
     write_if_changed,
 )
-from release_firmware import CARRIERS, PROGRAMS, cold_capacity, firmware_name
+from release_firmware import CARRIERS, PROGRAMS, firmware_name
 from retarget import retarget
 
 LEDGER = "release.json"
@@ -116,9 +116,7 @@ def verify_deployment(directory: Path, index: dict, row: dict, build: Path,
     cfg = read_state(state.with_name("config.json"))
     source = cfg["firmware_provenance"]
     expected = firmware_name(carrier, mode)
-    if (source.get("file"), source.get("path"), source.get("cold_capacity")) != (
-        expected, cfg["firmware"], cold_capacity(carrier)
-    ):
+    if (source.get("file"), source.get("path")) != (expected, cfg["firmware"]):
         raise LayoutError(f"expected a release build using supplied firmware {expected}")
     if sha256_file(Path(cfg["firmware"])) != cfg["firmware_digest"] or cfg["firmware_digest"] != source["sha256"]:
         raise LayoutError("firmware digest differs from the verified build")

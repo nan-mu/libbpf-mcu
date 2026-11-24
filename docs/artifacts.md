@@ -1,6 +1,6 @@
 # Program artifacts and local releases
 
-The `rv32imc` build target uses the ILP32 ABI and no FPU. The current XPOST machine profile supports ESP32-C3. The Rust host tool uses the sibling XPOST workspace's `xpost-elf` crate for XPM1 and Compact ELF V0. The local verifier checks the same wire format and payload digest. The 8192-byte container ceiling and 256-entry map limit mirror XPOST revision `94bfe6d8`. The device builder uses the same map limit and checks the configured image cell capacity. [XPOST encoder](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/xpost-elf/src/encode.rs#L8-L17) · [Device image and map builder](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/src/xdp/image/builder.rs#L209-L266) · [Device storage default](https://github.com/nan-mu/xpost/blob/94bfe6d8dc7747b7565ba6e3be20e9083ea893e8/src/xdp/table/storage.rs#L17-L21)
+The `rv32imc` build target uses the ILP32 ABI and no FPU. The current XPOST machine profile supports ESP32-C3. The Rust host tool uses `xpost-elf` for XPM1 and Compact ELF V0. The local verifier checks the V0 field bounds, layout and payload digest. XPOST owns installation and device storage limits.
 
 ## Program layout
 
@@ -40,14 +40,14 @@ Run `pixi run python make/layout.py reports --build-dir build` to regenerate rep
 
 Supply a directory of linked ESP32-C3 XPOST firmware ELFs. The release build looks up each required file by the names below. Set `LIBBPF_MCU_FIRMWARE_DIR` for `pixi run build` without arguments, or pass `--firmware-dir DIR` to `build` or `prepare-release`.
 
-| Required programs | Native for LLVM AOT and JIT | Interpreter for rBPF | Release cold cell B |
-| --- | --- | --- | ---: |
-| `firewall` | `firewall-native.elf` | `firewall-interp.elf` | 4096 |
-| `just_drop`, `just_tx` | `just_xdp-native.elf` | `just_xdp-interp.elf` | 4096 |
-| `noop`, `prime`, `log2`, `copy`, `fletcher32`, `bsort`, `strcmp` | `exec_bench-native.elf` | `exec_bench-interp.elf` | 8192 |
-| `case_swap`, `case_mark` | `case_xdp-native.elf` | `case_xdp-interp.elf` | 4096 |
+| Required programs | Native for LLVM AOT and JIT | Interpreter for rBPF |
+| --- | --- | --- |
+| `firewall` | `firewall-native.elf` | `firewall-interp.elf` |
+| `just_drop`, `just_tx` | `just_xdp-native.elf` | `just_xdp-interp.elf` |
+| `noop`, `prime`, `log2`, `copy`, `fletcher32`, `bsort`, `strcmp` | `exec_bench-native.elf` | `exec_bench-interp.elf` |
+| `case_swap`, `case_mark` | `case_xdp-native.elf` | `case_xdp-interp.elf` |
 
-Supply firmware with the matching engine and a cold cell that supports the release layout above. The build reads XPM1 and cross-checks `xdp_slot` and `helper_dispatcher` in the ELF symbol table. It checks payload size against the linked SRAM slot and container size against the release cold cell limit. It records the selected filename, resolved input path, SHA-256 and target layout. Keep the supplied ELFs available when verifying or retrying a batch.
+Supply firmware with the matching engine. The build reads XPM1 and cross-checks `xdp_slot` and `helper_dispatcher` in the ELF symbol table. It checks payload size against the linked SRAM slot. The complete ELF is checked against the V0 wire layout. It records the selected filename, resolved input path, SHA-256 and target layout. Keep the supplied ELFs available when verifying or retrying a batch.
 
 A missing ELF reports the affected programs, modes and filename. If a mode fails a capacity check, its build log and diagnostic identify the failed deployment. The release remains incomplete until every required mode passes.
 

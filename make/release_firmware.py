@@ -24,11 +24,7 @@ def firmware_name(carrier: str, mode: str) -> str:
     return f"{carrier}-{variant}.elf"
 
 
-def cold_capacity(carrier: str) -> int:
-    return 8192 if carrier == "exec_bench" else 4096
-
-
-def release_inputs(directory: Path | None) -> dict[str, tuple[Path, int]]:
+def release_inputs(directory: Path | None) -> dict[str, Path]:
     """Require all eight files before configuring deployments."""
     if directory is None and (configured := os.environ.get(FIRMWARE_DIR_ENV)):
         directory = Path(configured)
@@ -44,7 +40,7 @@ def release_inputs(directory: Path | None) -> dict[str, tuple[Path, int]]:
             if directory is None or not path.is_file():
                 missing.setdefault(path, []).extend(f"{program}/{mode}" for program in programs)
             else:
-                files[name] = (path, cold_capacity(carrier))
+                files[name] = path
     if missing:
         details = "\n".join(f"{', '.join(modes)}: required linked ELF {path}"
                             for path, modes in missing.items())

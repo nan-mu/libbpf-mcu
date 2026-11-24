@@ -259,9 +259,6 @@ def check_deployment(cfg: dict, data: bytes):
         raise LayoutError("container target differs from the linked firmware")
     if len(payload) > cfg["slot_len"]:
         raise LayoutError(f"image is {len(payload)} bytes but target slot holds {cfg['slot_len']}")
-    cold_capacity = cfg["firmware_provenance"].get("cold_capacity")
-    if cold_capacity is not None and len(data) > cold_capacity:
-        raise LayoutError(f"container is {len(data)} bytes but cold slot holds {cold_capacity}")
     return meta, payload
 
 
