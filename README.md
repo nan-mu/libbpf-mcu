@@ -20,7 +20,7 @@ Run commands from this repository's root. The Pixi manifest and lock file target
 - Install Pixi, Ninja, Cargo, and Rust. Install `7zz` or `7z` for packaging. `tools/Cargo.toml` uses Rust edition 2024, and `jit/Cargo.toml` uses edition 2021. Use a toolchain that supports these editions and their dependencies. These manifests declare no `rust-version`, and the repository does not pin a Rust toolchain.
 - Install LLVM with the BPF and RISC-V backends, LLD, `llvm-objcopy`, and `llvm-objdump`. Apple Clang does not supply the required BPF backend. The build prefers Homebrew LLVM for Clang and has no enforced LLVM minimum version. Set `LIBBPF_MCU_OBJCOPY` or `LIBBPF_MCU_OBJDUMP` to select another LLVM executable.
 - Initialize the PREVAIL submodule and build it manually. Every build requires the verifier. The default is `prevail/bin/prevail`; set `PREVAIL` to select a built executable. PREVAIL's own [build instructions](prevail/README.md#building) describe its C++23 compiler and native dependencies.
-- Place an XPOST Git checkout beside this checkout, or set `LIBBPF_MCU_XPOST` to its path for the default build. Fetch the pinned revision from the [firmware matrix](docs/artifacts.md#release-firmware) and install its nightly toolchain with `rust-src` and the `riscv32imc-unknown-none-elf` target. Explicit builds and tests resolve `xpost-elf` from the sibling XPOST workspace.
+- Place the XPOST workspace beside this checkout. The host tools use its `xpost-elf` and rBPF crates. For the release matrix, supply already-linked target ELFs with the [required filenames](docs/artifacts.md#release-firmware).
 - For explicit deployment builds, supply a linked firmware ELF with a `.xpost.mem` XPM1 record. XPM1 provides the helper dispatcher, code slot, and table addresses and lengths.
 
 For example, initialize and build PREVAIL after installing its native dependencies:
@@ -39,7 +39,7 @@ On macOS, use the Homebrew compiler and include/library configuration described 
 Build all 12 release programs in LLVM AOT, rBPF and JIT modes, or select one program for a BPF-only build:
 
 ```bash
-pixi run build
+LIBBPF_MCU_FIRMWARE_DIR=/path/to/linked-firmware pixi run build
 pixi run build -c firewall
 ```
 
@@ -70,6 +70,7 @@ Use `-h` or `--help` on any task.
 | `--inputs FILE [FILE ...]` | Select C sources by path, mutually exclusive with `-c`. Quote each path containing spaces once. |
 | `--build-dir DIR` | Choose the whole output root (default `build/`). |
 | `--force` | Rerun the selected build graph, including verification. |
+| `--firmware-dir DIR` | Supply the linked ELF directory for the release matrix. Defaults to `LIBBPF_MCU_FIRMWARE_DIR`. |
 | `--firmware ELF` | Required for `rv32imc` and `jit`. The linked firmware supplies the XPM1 slot, its capacity, and the helper address. |
 | `--engine aot\|rbpf` | Select native LLVM AOT or interpreted eBPF for `rv32imc`. |
 | `--slot-symbol SYMBOL` | For a deployment, use this firmware symbol's address and size as the slot. |
@@ -86,7 +87,7 @@ pixi run test
 pixi run python make/layout.py verify --build-dir build
 ```
 
-Run `pixi run prepare-release --archive-dir DIR` from a clean worktree to build and verify the complete 12-program batch. The [publication procedure](docs/artifacts.md#publish-program-artifacts) covers the separate authorized upload and retry steps.
+Run `pixi run prepare-release --firmware-dir FIRMWARE_DIR --archive-dir DIR` from a clean worktree to build and verify the complete 12-program batch. The [publication procedure](docs/artifacts.md#publish-program-artifacts) covers the separate authorized upload and retry steps.
 
 ## License
 

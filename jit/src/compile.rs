@@ -1274,115 +1274,81 @@ fn emit_mem(ctx: &mut Ctx<'_>, insn: Insn, pc: usize, store: bool) -> Result<usi
         });
     }
     if store && insn.class() == CLASS_ST {
-        if size == SIZE_DW {
-            emit_imm32(&mut ctx.code, TMP2, insn.imm);
-        } else {
-            emit_imm(&mut ctx.code, TMP2.lo, insn.imm);
-        }
-        let base = get32(&mut ctx.code, bpf_slot(insn.dst), TMP1.lo);
+        emit_imm32(&mut ctx.code, TMP2, insn.imm);
+        let base = get64(&mut ctx.code, bpf_slot(insn.dst), TMP1);
         emit_store(&mut ctx.code, base, TMP2, insn.off, size);
     } else if store {
         check_reg(pc, insn.src)?;
-        let base = get32(&mut ctx.code, bpf_slot(insn.dst), TMP1.lo);
-        let src = bpf_slot(insn.src);
-        let val = if size == SIZE_DW {
-            get64(&mut ctx.code, src, TMP2)
-        } else {
-            Live {
-                lo: get32(&mut ctx.code, src, TMP2.lo),
-                ..TMP2
-            }
-        };
+        let base = get64(&mut ctx.code, bpf_slot(insn.dst), TMP1);
+        let val = get64(&mut ctx.code, bpf_slot(insn.src), TMP2);
         emit_store(&mut ctx.code, base, val, insn.off, size);
     } else {
         check_reg(pc, insn.src)?;
         let dst = bpf_slot(insn.dst);
-        let rd = if dst.lo < 0 {
-            TMP1
-        } else {
-            Live {
-                lo: dst.lo as u8,
-                hi: dst.hi as u8,
-            }
-        };
-        let base = get32(&mut ctx.code, bpf_slot(insn.src), TMP2.lo);
-        let preserve = size != SIZE_B && rd.lo == base;
-        let (addr, disp) = memory_operand(&mut ctx.code, base, insn.off, size, preserve);
+        let rd = get64(&mut ctx.code, dst, TMP1);
+        let base = get64(&mut ctx.code, bpf_slot(insn.src), TMP2);
+        emit_imm(&mut ctx.code, T0, i32::from(insn.off));
+        ctx.code.push(add(T0, T0, base.lo));
         match size {
             SIZE_B => {
-                ctx.code.push(lbu(rd.lo, disp, addr));
+                ctx.code.push(lbu(rd.lo, 0, T0));
+                ctx.code.push(addi(rd.hi, ZERO, 0));
             }
             // eBPF allows an unaligned address. A half or word `lhu`/`lw` is
             // not defined there: packet fields often sit at 2-mod-4.
             SIZE_H => {
-                emit_load_le(&mut ctx.code, rd.lo, addr, 2, disp);
+                emit_load_le(&mut ctx.code, rd.lo, T0, 2, 0);
+                ctx.code.push(addi(rd.hi, ZERO, 0));
             }
             SIZE_W => {
-                emit_load_le(&mut ctx.code, rd.lo, addr, 4, disp);
+                emit_load_le(&mut ctx.code, rd.lo, T0, 4, 0);
+                ctx.code.push(addi(rd.hi, ZERO, 0));
             }
             SIZE_DW => {
-                emit_load_le(&mut ctx.code, rd.lo, addr, 4, disp);
-                emit_load_le(&mut ctx.code, rd.hi, addr, 4, disp + 4);
+                emit_load_le(&mut ctx.code, rd.lo, T0, 4, 0);
+                emit_load_le(&mut ctx.code, rd.hi, T0, 4, 4);
             }
             _ => unreachable!(),
         }
-        if size == SIZE_DW {
-            put64(&mut ctx.code, dst, rd);
-        } else {
-            put32(&mut ctx.code, dst, rd.lo);
-        }
+        put64(&mut ctx.code, dst, rd);
     }
     Ok(1)
 }
 
-fn memory_operand(code: &mut Vec<u32>, base: u8, off: i16, size: u8, preserve: bool) -> (u8, i32) {
-    let disp = i32::from(off);
-    let last = match size {
-        SIZE_B => 0,
-        SIZE_H => 1,
-        SIZE_W => 3,
-        SIZE_DW => 7,
-        _ => unreachable!(),
-    };
-    if (-2048..=2047 - last).contains(&disp) {
-        if preserve {
-            code.push(addi(T0, base, disp));
-            return (T0, 0);
-        }
-        return (base, disp);
-    }
-    emit_imm(code, T0, disp);
-    code.push(add(T0, T0, base));
-    (T0, 0)
-}
-
-fn emit_store(code: &mut Vec<u32>, base: u8, val: Live, off: i16, size: u8) {
-    let (addr, disp) = memory_operand(code, base, off, size, false);
+fn emit_store(code: &mut Vec<u32>, base: Live, val: Live, off: i16, size: u8) {
+    emit_imm(code, T0, i32::from(off));
+    code.push(add(T0, T0, base.lo));
     match size {
-        SIZE_B => code.push(sb(val.lo, disp, addr)),
-        SIZE_H => emit_store_le(code, addr, val.lo, 2, disp),
-        SIZE_W => emit_store_le(code, addr, val.lo, 4, disp),
+        SIZE_B => code.push(sb(val.lo, 0, T0)),
+        SIZE_H => emit_store_le(code, T0, val.lo, 2, 0),
+        SIZE_W => emit_store_le(code, T0, val.lo, 4, 0),
         SIZE_DW => {
-            emit_store_le(code, addr, val.lo, 4, disp);
-            emit_store_le(code, addr, val.hi, 4, disp + 4);
+            emit_store_le(code, T0, val.lo, 4, 0);
+            emit_store_le(code, T0, val.hi, 4, 4);
         }
         _ => unreachable!(),
     }
 }
 
 fn emit_load_le(code: &mut Vec<u32>, dst: u8, addr: u8, n: u8, disp: i32) {
-    code.push(lbu(dst, disp, addr));
-    for i in 1..n {
+    code.push(addi(dst, ZERO, 0));
+    for i in 0..n {
         code.push(lbu(T1, disp + i32::from(i), addr));
-        code.push(slli(T1, T1, u32::from(i) * 8));
+        if i != 0 {
+            code.push(slli(T1, T1, u32::from(i) * 8));
+        }
         code.push(or(dst, dst, T1));
     }
 }
 
 fn emit_store_le(code: &mut Vec<u32>, addr: u8, src: u8, n: u8, disp: i32) {
-    code.push(sb(src, disp, addr));
-    for i in 1..n {
-        code.push(srli(T1, src, u32::from(i) * 8));
+    for i in 0..n {
+        if i == 0 {
+            code.push(andi(T1, src, 0xff));
+        } else {
+            code.push(srli(T1, src, u32::from(i) * 8));
+            code.push(andi(T1, T1, 0xff));
+        }
         code.push(sb(T1, disp + i32::from(i), addr));
     }
 }

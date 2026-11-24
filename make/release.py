@@ -26,7 +26,7 @@ from layout import (
     state_path,
     write_if_changed,
 )
-from release_firmware import CARRIERS, PROGRAMS, XPOST_REV, firmware_profile
+from release_firmware import CARRIERS, PROGRAMS, cold_capacity, firmware_name
 from retarget import retarget
 
 LEDGER = "release.json"
@@ -108,15 +108,18 @@ def extract_archive(tool: str, archive: Path, directory: Path, program: str) -> 
 
 
 def verify_deployment(directory: Path, index: dict, row: dict, build: Path,
-                      profile: str, checked: dict, work: Path) -> dict:
+                      carrier: str, checked: dict, work: Path) -> dict:
     name, mode = index["program"], row["name"]
     state = state_path(build, name, mode)
     if reason := verify_state(state, checked):
         raise LayoutError(reason)
     cfg = read_state(state.with_name("config.json"))
     source = cfg["firmware_provenance"]
-    if source.get("revision") != XPOST_REV or source.get("profile") != firmware_profile(profile, mode):
-        raise LayoutError("expected a build for the pinned XPOST carrier")
+    expected = firmware_name(carrier, mode)
+    if (source.get("file"), source.get("path"), source.get("cold_capacity")) != (
+        expected, cfg["firmware"], cold_capacity(carrier)
+    ):
+        raise LayoutError(f"expected a release build using supplied firmware {expected}")
     if sha256_file(Path(cfg["firmware"])) != cfg["firmware_digest"] or cfg["firmware_digest"] != source["sha256"]:
         raise LayoutError("firmware digest differs from the verified build")
     file = directory / row["elf"]["path"]
@@ -164,7 +167,7 @@ def verify_batch(build: Path, archives: Path, unpacked: Path, ledger: dict | Non
     entries = []
     checked = {}
     unpacked.mkdir()
-    for profile, programs in CARRIERS.items():
+    for carrier, programs in CARRIERS.items():
         for name in programs:
             archive = contained(archives, f"{name}.7z")
             digest = sha256_file(archive)
@@ -180,7 +183,7 @@ def verify_batch(build: Path, archives: Path, unpacked: Path, ledger: dict | Non
             for row in index["mode"]:
                 with tempfile.TemporaryDirectory(dir=unpacked.parent) as tmp:
                     try:
-                        modes.append(verify_deployment(directory, index, row, build, profile,
+                        modes.append(verify_deployment(directory, index, row, build, carrier,
                                                        checked, Path(tmp)))
                     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
                         raise LayoutError(f"{name}/{row['name']}: {exc}") from exc
@@ -196,7 +199,7 @@ def clean_commit() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 
 
-def prepare(build: Path, destination: Path) -> None:
+def prepare(build: Path, destination: Path, firmware_dir: Path | None) -> None:
     if destination.exists() or destination.is_relative_to(build):
         raise LayoutError("--archive-dir must be a new directory outside the build root")
     tool = archiver()
@@ -204,6 +207,8 @@ def prepare(build: Path, destination: Path) -> None:
     command = [sys.executable, ROOT / "make" / "cli.py", "build"]
     if build != DEFAULT_BUILD_DIR:
         command.extend(["--build-dir", build])
+    if firmware_dir is not None:
+        command.extend(["--firmware-dir", firmware_dir])
     subprocess.run(command, check=True, cwd=ROOT)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with lock(build), tempfile.TemporaryDirectory(dir=destination.parent) as temp:
@@ -254,6 +259,8 @@ def main() -> None:
         command.add_argument("--archive-dir", type=Path, required=True)
         if verb == "verify":
             command.add_argument("--unpack-dir", type=Path, required=True)
+        else:
+            command.add_argument("--firmware-dir", type=Path)
     tag = commands.add_parser("next-tag")
     tag.add_argument("--commit", required=True)
     tag.add_argument("--remote", default="origin")
@@ -264,7 +271,10 @@ def main() -> None:
             refs = subprocess.check_output(["git", "ls-remote", "--tags", args.remote], cwd=ROOT, text=True)
             print(select_tag(refs, args.commit, args.allocated))
         elif args.command == "prepare":
-            prepare(args.build_dir.resolve(), args.archive_dir.resolve())
+            firmware_dir = (
+                args.firmware_dir.expanduser().resolve() if args.firmware_dir is not None else None
+            )
+            prepare(args.build_dir.resolve(), args.archive_dir.resolve(), firmware_dir)
         else:
             build, archives = args.build_dir.resolve(), args.archive_dir.resolve()
             document = read_state(contained(archives, LEDGER))

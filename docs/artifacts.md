@@ -38,21 +38,18 @@ Run `pixi run python make/layout.py reports --build-dir build` to regenerate rep
 
 ## Release firmware
 
-The default build uses [XPOST `b5a44072ed57657c7482758412cccf1fd93df6fa`](https://github.com/nan-mu/xpost/tree/b5a44072ed57657c7482758412cccf1fd93df6fa). Place a Git checkout containing that commit at `../xpost` or set `LIBBPF_MCU_XPOST`. The build takes the source tree from that commit, including `profiles.toml`, each carrier's `Cargo.lock` and the `xpost-elf` crate. It uses the XPOST nightly toolchain with `rust-src` and builds the firmware with locked Cargo dependencies. Linked firmware ELFs and their source snapshot stay under the build root's private `.ninja/` directory.
+Supply a directory of linked ESP32-C3 XPOST firmware ELFs. The release build looks up each required file by the names below. Set `LIBBPF_MCU_FIRMWARE_DIR` for `pixi run build` without arguments, or pass `--firmware-dir DIR` to `build` or `prepare-release`.
 
-```sh
-git -C ../xpost fetch origin b5a44072ed57657c7482758412cccf1fd93df6fa
-rustup toolchain install nightly --component rust-src --target riscv32imc-unknown-none-elf
-```
+| Required programs | Native for LLVM AOT and JIT | Interpreter for rBPF | Release cold cell B |
+| --- | --- | --- | ---: |
+| `firewall` | `firewall-native.elf` | `firewall-interp.elf` | 4096 |
+| `just_drop`, `just_tx` | `just_xdp-native.elf` | `just_xdp-interp.elf` | 4096 |
+| `noop`, `prime`, `log2`, `copy`, `fletcher32`, `bsort`, `strcmp` | `exec_bench-native.elf` | `exec_bench-interp.elf` | 8192 |
+| `case_swap`, `case_mark` | `case_xdp-native.elf` | `case_xdp-interp.elf` | 4096 |
 
-| Required programs | Native carrier for LLVM AOT and JIT | Interpreter carrier for rBPF |
-| --- | --- | --- |
-| `firewall` | `firewall-cag` | `firewall-cag` with `xpost/interp` |
-| `just_drop`, `just_tx` | `just-drop-cag`, `just-tx-cag` (same `just_xdp` build) | Same profiles with `xpost/interp` |
-| `noop`, `prime`, `log2`, `copy`, `fletcher32`, `bsort`, `strcmp` | `exec-bench-aot` | `exec-bench-rbpf` |
-| `case_swap`, `case_mark` | `case-cag` with `xpost/perf-aggregate` | `case-cag` with `xpost/perf-aggregate,xpost/interp` |
+Supply firmware with the matching engine and a cold cell that supports the release layout above. The build reads XPM1 and cross-checks `xdp_slot` and `helper_dispatcher` in the ELF symbol table. It checks payload size against the linked SRAM slot and container size against the release cold cell limit. It records the selected filename, resolved input path, SHA-256 and target layout. Keep the supplied ELFs available when verifying or retrying a batch.
 
-The pinned case ingress references the aggregate timer unconditionally. Its carrier builds enable that feature. The release gate compares XPM1 with the linked slot and helper symbols and checks both the payload size in SRAM and the Compact ELF size in the cold cell. The report and release ledger record the XPOST revision, firmware build command, compiler, firmware SHA-256 and target layout. HAL remains an XPOST firmware condition.
+A missing ELF reports the affected programs, modes and filename. If a mode fails a capacity check, its build log and diagnostic identify the failed deployment. The release remains incomplete until every required mode passes.
 
 ### Prepare a native image for a different slot
 
@@ -69,11 +66,11 @@ Use `--mode jit` to regenerate the JIT relocation records from the indexed BPF o
 
 An explicit request to publish the current `nan-mu/libbpf-mcu` `main` authorizes the agent to build, tag, upload and publish the GitHub Release. The required release matrix is the 12 programs above with all three modes, for 36 deployments. Keep the v3 program index and the eight members shown under [Program layout](#program-layout).
 
-1. **Pin the build.** Confirm the destination and authenticated account with `gh repo view nan-mu/libbpf-mcu --json nameWithOwner` and `gh auth status --hostname github.com`. Fetch `main`, record its full SHA, and create a fresh detached worktree at that SHA with an empty `build/`. Initialize PREVAIL at the pinned revision or select a verified binary built from that revision with `PREVAIL`. Set up the pinned [release firmware](#release-firmware).
-2. **Build, archive and verify the batch locally.** In that worktree run the following with `$archives` set to a new absolute directory outside the checkout. The prepare command runs the same build as `pixi run build` without arguments. It runs PREVAIL, checks the required matrix, archives each program, validates every archive listing, extracts it into a separate empty directory, verifies the canonical v3 roles, lengths, hashes and Compact ELFs, and compares the eight extracted files against the build. It verifies rBPF map bindings and regenerates each native container from the archived objects at its actual linked target. A failed check stops this step before any tag or upload.
+1. **Pin the build.** Confirm the destination and authenticated account with `gh repo view nan-mu/libbpf-mcu --json nameWithOwner` and `gh auth status --hostname github.com`. Fetch `main`, record its full SHA, and create a fresh detached worktree at that SHA with an empty `build/`. Initialize PREVAIL at the pinned revision or select a verified binary built from that revision with `PREVAIL`. Supply the linked [release firmware](#release-firmware).
+2. **Build, archive and verify the batch locally.** In that worktree run the following with `$archives` set to a new absolute directory outside the checkout. Set `$firmware_dir` to the linked ELF directory. The prepare command runs the same release build as `pixi run build` with `LIBBPF_MCU_FIRMWARE_DIR`. It runs PREVAIL, checks the required matrix, archives each program, validates every archive listing, extracts it into a separate empty directory, verifies the canonical v3 roles, lengths, hashes and Compact ELFs, and compares the eight extracted files against the build. It verifies rBPF map bindings and regenerates each native container from the archived objects at its actual linked target. A failed check stops this step before any tag or upload.
 
    ```sh
-   pixi run prepare-release --archive-dir "$archives"
+   pixi run prepare-release --firmware-dir "$firmware_dir" --archive-dir "$archives"
    pixi run python make/layout.py verify --build-dir build
    pixi run verify-release --archive-dir "$archives" --unpack-dir "$unpacked_batch"
    ```

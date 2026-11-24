@@ -139,18 +139,18 @@ def tool_bin_path(build_dir: Path) -> Path:
     return build_dir / ".ninja" / "cargo" / _host_triple() / "release" / "xpost-mcu-elf"
 
 
-def ensure_tool(build_dir: Path, manifest: Path = TOOLS_MANIFEST) -> Path:
-    """Let Cargo check the Rust tool and its XPOST dependencies."""
+def ensure_tool(build_dir: Path) -> Path:
+    """Build the host tool that reads and writes ELF artifacts."""
 
-    if not manifest.is_file():
-        error(f"tools manifest missing: {manifest}")
+    if not TOOLS_MANIFEST.is_file():
+        error(f"tools manifest missing: {TOOLS_MANIFEST}")
         sys.exit(1)
     out = tool_bin_path(build_dir)
     cmd = [
         "cargo",
         "build",
         "--manifest-path",
-        str(manifest),
+        str(TOOLS_MANIFEST),
         "--release",
         "--locked",
         "--target-dir",
@@ -400,25 +400,35 @@ def write_build_ninja(
     return path
 
 
-def deployment_backend(firmware: Path, tool: Path, args, facts: dict) -> dict:
+def deployment_backend(
+    firmware: Path, tool: Path, args, *, cold_capacity: int | None = None
+) -> dict:
+    name = firmware.name
     firmware = firmware.expanduser().resolve()
     if not firmware.is_file():
         raise LayoutError(f"firmware ELF not found: {firmware}")
     digest = sha256_file(firmware)
     generation = []
-    if facts:
-        if digest != facts["sha256"]:
-            raise LayoutError(f"firmware changed after compilation: {firmware}")
-        generation.append({"step": "XPOST carrier", "call": "release_firmware.prepare_firmware", "parameters": facts})
+    facts = {"file": name, "path": str(firmware), "sha256": digest}
     mem = load_mem_map_from_firmware(firmware, tool, generation)
-    if facts:
+    if cold_capacity is not None:
         slot = read_symbol(firmware, tool, "xdp_slot", generation)
         helper, _ = read_symbol(firmware, tool, "helper_dispatcher", generation)
         if slot != (mem.slot_addr, mem.slot_len) or helper != mem.helper_addr:
             raise LayoutError(f"{firmware}: XPM1 disagrees with linked slot or helper symbols")
+        if mem.table_len < cold_capacity:
+            raise LayoutError(
+                f"{firmware}: XPM1 table holds {mem.table_len} bytes, "
+                f"release cold cell requires {cold_capacity}"
+            )
+        facts["cold_capacity"] = cold_capacity
     if args.slot_symbol:
         mem = apply_slot_symbol(mem, firmware, tool, args.slot_symbol, generation)
-    generation.append({"step": "target layout", "call": "build.deployment_backend", "parameters": dict(asdict(mem), sha256=digest)})
+    generation.append({
+        "step": "target layout",
+        "call": "build.deployment_backend",
+        "parameters": dict(asdict(mem), firmware=facts),
+    })
     return dict(
         asdict(mem),
         firmware=str(firmware),
@@ -468,22 +478,31 @@ def build(root: Path, sources: list[Path], mode: str | None, args) -> None:
         graph_ready = False
         failure = ""
         try:
+            if mode is None:
+                from release_firmware import CARRIERS, firmware_name, release_inputs
+
+                inputs = release_inputs(args.firmware_dir)
             if not prevail_bin().is_file():
                 for src in sources:
                     state_path(root, src.stem, "prevail").unlink(missing_ok=True)
                 raise LayoutError(f"PREVAIL binary missing: {prevail_bin()}")
             if mode is None:
-                from release_firmware import prepare_firmware
-
-                deployments, manifest = prepare_firmware(root)
-                tool = ensure_tool(root, manifest)
-                for key, (firmware, facts) in deployments.items():
-                    backends[key] = deployment_backend(firmware, tool, args, facts)
+                tool = ensure_tool(root)
+                carriers = {
+                    name: deployment_backend(firmware, tool, args, cold_capacity=capacity)
+                    for name, (firmware, capacity) in inputs.items()
+                }
+                backends = {
+                    (program, deployment): carriers[firmware_name(carrier, deployment)]
+                    for carrier, programs in CARRIERS.items()
+                    for program in programs
+                    for deployment in selected
+                }
             elif mode != "bpf":
                 firmware = args.firmware.expanduser().resolve()
                 if not firmware.is_file():
                     raise LayoutError(f"firmware ELF not found: {firmware}")
-                backend = deployment_backend(firmware, ensure_tool(root), args, {})
+                backend = deployment_backend(firmware, ensure_tool(root), args)
                 backends = {(name, mode): backend for name in names}
             path = write_build_ninja(root, sources, selected, args, backends)
             for src in sources:
@@ -531,11 +550,12 @@ def build(root: Path, sources: list[Path], mode: str | None, args) -> None:
             final_errors = []
             for program in sorted(programs):
                 reasons = reconcile(root, program)
-                if program in names and not failure:
+                if program in names and (not failure or (mode is None and graph_ready)):
                     for step in attempted:
                         if step in reasons:
                             final_errors.append(f"{program}/{step}: {reasons[step]}")
-                            break
+                            if mode is not None:
+                                break
                 if "bpf" in reasons or "prevail" in reasons:
                     continue
                 try:

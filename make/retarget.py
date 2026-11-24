@@ -58,7 +58,7 @@ def main() -> None:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             tool = ensure_tool(work)
-            cfg = deployment_backend(args.firmware, tool, args, {})
+            cfg = deployment_backend(args.firmware, tool, args)
             cfg.update(clang=CLANG, objcopy=os.environ.get("LIBBPF_MCU_OBJCOPY", DEFAULT_OBJCOPY))
             write_if_changed(args.output, retarget(program, index, row, cfg, work))
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
