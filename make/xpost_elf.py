@@ -10,7 +10,6 @@ ELF32_SHDR_SIZE = 40
 SHT_SIZE = 4 * ELF32_SHDR_SIZE
 META_OFFSET = ELF32_EHDR_SIZE + SHT_SIZE
 IMAGE_DIGEST_SIZE = 32
-MAX_CONTAINER_SIZE = 8192
 MAX_META_SIZE = 1024
 MAX_MAPS = 8
 MAX_NAME = 31
@@ -124,9 +123,7 @@ def build_container(image: bytes, metadata: ImageMetadataV0) -> bytes:
         raise ValueError("raw image must be nonempty")
     image_off = META_OFFSET + len(meta)
     names_off = image_off + len(image)
-    digest_off = align4(names_off + len(SECTION_NAMES))
-    if digest_off + IMAGE_DIGEST_SIZE > MAX_CONTAINER_SIZE:
-        raise ValueError(f"container exceeds {MAX_CONTAINER_SIZE} bytes")
+    _integer(names_off, 0, 0xFFFFFFFF, "section name table offset")
     if metadata.slot_address + len(image) > 0x100000000:
         raise ValueError("image address extent overflows ELF32")
     header = EHDR.pack(IDENT, 1, 243, 1, 0, 0, ELF32_EHDR_SIZE, 1, 52, 0, 0, 40, 4, 3)
@@ -162,7 +159,7 @@ def _read_name(data: bytes, offset: int) -> tuple[str, int]:
 
 def parse_container(data: bytes) -> tuple[ImageMetadataV0, bytes]:
     """Strict bounds/profile/canonical validation and raw-image checksum check."""
-    if not 52 <= len(data) <= MAX_CONTAINER_SIZE:
+    if len(data) < ELF32_EHDR_SIZE:
         raise ValueError("invalid container size")
     header = EHDR.unpack_from(data)
     if header != (IDENT, 1, 243, 1, 0, 0, ELF32_EHDR_SIZE, 1, 52, 0, 0, 40, 4, 3):
@@ -199,8 +196,8 @@ def parse_container(data: bytes) -> tuple[ImageMetadataV0, bytes]:
     image = _range(data, sections[2][4], sections[2][5], "image")
     metadata = ImageMetadataV0(sections[2][3], helper, machine, name, tuple(maps))
     expected = build_container(image, metadata)
-    if expected[:-32] != data[:-32]:
+    if expected[:-IMAGE_DIGEST_SIZE] != data[:-IMAGE_DIGEST_SIZE]:
         raise ValueError("noncanonical section headers, offsets, padding or metadata")
-    if expected[-32:] != data[-32:]:
+    if expected[-IMAGE_DIGEST_SIZE:] != data[-IMAGE_DIGEST_SIZE:]:
         raise ValueError("raw image SHA-256 mismatch")
     return metadata, image

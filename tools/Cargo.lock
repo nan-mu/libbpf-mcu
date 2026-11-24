@@ -126,6 +126,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "combine"
+version = "4.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4356eba6976435498d05a311ee9fc486da3bc81c200d3f0d7dd9703b41913f92"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -231,6 +240,7 @@ dependencies = [
  "clap",
  "heapless",
  "object",
+ "rbpf",
  "serde_json",
  "toml",
  "xpost-elf",
@@ -242,6 +252,12 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "log"
+version = "0.4.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "memchr"
@@ -265,6 +281,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "portable-atomic"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -280,6 +302,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "rbpf"
+version = "0.4.1"
+source = "git+https://github.com/nan-mu/xpost.git?rev=9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56#9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56"
+dependencies = [
+ "byteorder",
+ "combine",
+ "log",
+ "portable-atomic",
 ]
 
 [[package]]
@@ -465,6 +498,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 [[package]]
 name = "xpost-elf"
 version = "0.1.0"
+source = "git+https://github.com/nan-mu/xpost.git?rev=9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56#9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56"
 dependencies = [
  "heapless",
  "sha2",
@@ -478,6 +512,7 @@ version = "0.1.0"
 [[package]]
 name = "xpost-macros"
 version = "0.1.0"
+source = "git+https://github.com/nan-mu/xpost.git?rev=9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56#9cb03b795c8d45c5d107cf8e63b90dca6f1dcb56"
 dependencies = [
  "proc-macro2",
  "quote",
