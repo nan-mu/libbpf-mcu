@@ -1417,6 +1417,16 @@ pub fn link(image: &Image, input: &LinkIn<'_>) -> Result<Vec<u32>, JitError> {
             detail: "address is 0".into(),
         });
     }
+    apply_relocations(image, input)
+}
+
+/// Close map addresses relative to base zero, retaining the helper's unresolved
+/// zero immediate. The archived call fixups must be applied before execution.
+pub fn link_at_zero(image: &Image, maps: &HashMap<String, u32>) -> Result<Vec<u32>, JitError> {
+    apply_relocations(image, &LinkIn { helper: 0, maps })
+}
+
+fn apply_relocations(image: &Image, input: &LinkIn<'_>) -> Result<Vec<u32>, JitError> {
     let mut code = image.code.clone();
     for reloc in &image.relocs {
         match reloc.kind {

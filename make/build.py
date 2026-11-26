@@ -30,6 +30,7 @@ from layout import (
     container_path,
     lock,
     native_object_path,
+    portable_paths,
     source_path,
     sha256_file,
     state_path,
@@ -292,6 +293,9 @@ def write_build_ninja(
             "layout.py",
             "btf.py",
             "xpost_elf.py",
+            "native_image.py",
+            "portable_build.py",
+            "rv32_release_elf.py",
         )
     ] + [template]
     compiler_env = {key: os.environ.get(key) for key in ("CPATH", "C_INCLUDE_PATH")}
@@ -305,7 +309,7 @@ def write_build_ninja(
         raw_obj = bpf_state.with_name(f"{name}_bpf.o")
         raw_src = bpf_state.with_name(f"{name}.c")
         modes = ["bpf", "prevail"]
-        if "ebpf" in selected:
+        if selected == ("ebpf",):
             modes.append("ebpf-native")
         modes.extend(mode for mode in selected if mode != "bpf")
         targets.extend(gate if mode == "bpf" else state_path(root, name, mode) for mode in selected)
@@ -344,47 +348,69 @@ def write_build_ninja(
                     objcopy=args.objcopy,
                     image_name=args.image_name or name,
                 )
-                deps.extend([Path(cfg["firmware"]), Path(cfg["tool"])])
-                if item in ("llvm-aot", "ebpf-native"):
-                    cfg.update(clang=CLANG, flags=MCU_FLAGS, compiler_env=compiler_env)
-                    linker = state.with_name("slot.ld")
-                    write_slot_linker(linker, cfg)
-                    cfg["linker"] = str(linker)
-                    deps.extend([src, gate, Path(CLANG), linker])
-                    depfile = state.with_name("headers.d")
-                    outputs.extend(
-                        [
+                deps.append(Path(cfg["tool"]))
+                if cfg.get("portable"):
+                    image, layout = portable_paths(root, name, item)
+                    outputs.extend([image, layout])
+                    deps.append(gate)
+                    if item == "llvm-aot":
+                        cfg.update(clang=CLANG, flags=[*MCU_FLAGS, "-mno-relax"],
+                                   compiler_env=compiler_env)
+                        linker = state.with_name("slot.ld")
+                        write_slot_linker(linker, cfg)
+                        cfg["linker"] = str(linker)
+                        deps.extend([src, Path(CLANG), linker])
+                        depfile = state.with_name("headers.d")
+                        outputs.extend([
+                            native_object_path(root, name),
                             state.with_name(f"{name}_rv32.o"),
                             state.with_name(f"{name}_rv32.debug.elf"),
-                        ]
-                    )
-                    if item == "llvm-aot":
+                        ])
+                    elif item == "ebpf":
+                        deps.extend([state_path(root, name, "llvm-aot"),
+                                     portable_paths(root, name, "llvm-aot")[1]])
+                else:
+                    deps.append(Path(cfg["firmware"]))
+                    if item in ("llvm-aot", "ebpf-native"):
+                        cfg.update(clang=CLANG, flags=MCU_FLAGS, compiler_env=compiler_env)
+                        linker = state.with_name("slot.ld")
+                        write_slot_linker(linker, cfg)
+                        cfg["linker"] = str(linker)
+                        deps.extend([src, gate, Path(CLANG), linker])
+                        depfile = state.with_name("headers.d")
                         outputs.extend(
                             [
-                                state.with_name(f"{name}_rv32.bin"),
-                                native_object_path(root, name),
-                                container_path(root, name, item),
+                                state.with_name(f"{name}_rv32.o"),
+                                state.with_name(f"{name}_rv32.debug.elf"),
                             ]
                         )
-                        deps.append(Path(cfg["objcopy"]))
-                elif item == "ebpf":
-                    deps.extend(
-                        [
-                            state_path(root, name, "ebpf-native"),
-                            Path(cfg["objcopy"]),
-                            MAKE / "xdp_section.py",
-                        ]
-                    )
-                    outputs.extend(
-                        [
-                            container_path(root, name, item),
-                            state.with_name("rewritten.bin"),
-                        ]
-                    )
-                else:
-                    deps.append(gate)
-                    container = container_path(root, name, item)
-                    outputs.extend([container, state.with_name("jit.bin")])
+                        if item == "llvm-aot":
+                            outputs.extend(
+                                [
+                                    state.with_name(f"{name}_rv32.bin"),
+                                    native_object_path(root, name),
+                                    container_path(root, name, item),
+                                ]
+                            )
+                            deps.append(Path(cfg["objcopy"]))
+                    elif item == "ebpf":
+                        deps.extend(
+                            [
+                                state_path(root, name, "ebpf-native"),
+                                Path(cfg["objcopy"]),
+                                MAKE / "xdp_section.py",
+                            ]
+                        )
+                        outputs.extend(
+                            [
+                                container_path(root, name, item),
+                                state.with_name("rewritten.bin"),
+                            ]
+                        )
+                    else:
+                        deps.append(gate)
+                        container = container_path(root, name, item)
+                        outputs.extend([container, state.with_name("jit.bin")])
             argv = [sys.executable, MAKE / "build_steps.py", item, root, src]
             if cfg is not None:
                 config = state.with_name("config.json")
@@ -472,26 +498,17 @@ def build(root: Path, sources: list[Path], mode: str | None, args) -> None:
         graph_ready = False
         failure = ""
         try:
-            if mode is None:
-                from release_firmware import CARRIERS, firmware_name, release_inputs
-
-                inputs = release_inputs(args.firmware_dir)
             if not prevail_bin().is_file():
                 for src in sources:
                     state_path(root, src.stem, "prevail").unlink(missing_ok=True)
                 raise LayoutError(f"PREVAIL binary missing: {prevail_bin()}")
             if mode is None:
                 tool = ensure_tool(root)
-                carriers = {
-                    name: deployment_backend(firmware, tool, args, verify_symbols=True)
-                    for name, firmware in inputs.items()
-                }
-                backends = {
-                    (program, deployment): carriers[firmware_name(carrier, deployment)]
-                    for carrier, programs in CARRIERS.items()
-                    for program in programs
-                    for deployment in selected
-                }
+                from rv32_release_elf import ALLOCATION_LIMIT
+
+                backend = dict(portable=True, tool=str(tool), slot_addr=0, helper_addr=0,
+                               slot_len=ALLOCATION_LIMIT)
+                backends = {(name, item): backend for name in names for item in selected}
             elif mode != "bpf":
                 firmware = args.firmware.expanduser().resolve()
                 if not firmware.is_file():
@@ -502,7 +519,7 @@ def build(root: Path, sources: list[Path], mode: str | None, args) -> None:
             for src in sources:
                 update_diagnostic(root, src.stem, f"preflight/{label}", None)
             force_modes = set(attempted)
-            if "ebpf" in selected:
+            if selected == ("ebpf",):
                 force_modes.add("ebpf-native")
             for src in sources:
                 reasons = reconcile(root, src.stem, selected)

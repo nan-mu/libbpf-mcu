@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -11,24 +12,28 @@ import sys
 import tempfile
 from pathlib import Path
 
-from build import DEFAULT_BUILD_DIR
-from build_state import read_state, verify_state
-from build_steps import check_deployment
+from build import CLANG, DEFAULT_BUILD_DIR, DEFAULT_OBJDUMP, tool_bin_path
+from native_image import ROLES, read_document
+from prevail_gate import prevail_bin
 from layout import (
     MODES,
     ROOT,
     LayoutError,
     contained,
-    container_path,
     load_index,
     lock,
     sha256_file,
-    state_path,
+    member,
+    portable_paths,
     write_if_changed,
 )
-from release_firmware import CARRIERS, PROGRAMS, firmware_name
-from retarget import retarget
 
+# The release matrix is independent of the files produced by the build.
+PROGRAMS = (
+    "firewall", "just_drop", "just_tx", "noop", "prime", "log2", "copy",
+    "fletcher32", "bsort", "strcmp", "case_swap", "case_mark",
+)
+SCHEMA_LEDGER = "libbpf-mcu.release.v1"
 LEDGER = "release.json"
 RELEASE_TAG = re.compile(r"refs/tags/(v0\.1\.(0|[1-9][0-9]*))(\^\{\})?")
 
@@ -37,8 +42,8 @@ def expected_files(program: str) -> set[str]:
     return {
         "index.toml", "report.md", f"{program}.c",
         f"objects/{program}_bpf.o", f"objects/{program}_rv32.o",
-        *(container_path(Path(), program, mode).relative_to(program).as_posix()
-          for mode in MODES),
+        *(path.relative_to(program).as_posix()
+          for mode in MODES for path in portable_paths(Path(), program, mode)),
     }
 
 
@@ -51,10 +56,13 @@ def require_program(directory: Path, program: str) -> dict:
     if missing:
         mode = sorted(missing)[0]
         raise LayoutError(f"{program}/{mode}: missing required deployment")
+    for row in index["mode"]:
+        if row["role"] != ROLES[row["name"]]:
+            raise LayoutError(f"{program}/{row['name']}: release requires a portable image")
     paths = set()
     for path in directory.rglob("*"):
         relative = path.relative_to(directory).as_posix()
-        if not path.is_symlink() and path.is_dir() and relative in ("containers", "objects"):
+        if not path.is_symlink() and path.is_dir() and relative in ("images", "objects"):
             continue
         if path.is_symlink() or not path.is_file():
             raise LayoutError(f"{program}: invalid member {relative}")
@@ -88,7 +96,7 @@ def read_archive_paths(tool: str, archive: Path, program: str) -> set[str]:
             "Symbolic Link" in fields
             or "Hard Link" in fields
             or (len(attrs) > 1 and not attrs[1].startswith(("d", "-")))
-            or relative not in ({"objects", "containers"} if directory else wanted)
+            or relative not in ({"objects", "images"} if directory else wanted)
         ):
             raise LayoutError(f"{program}: unexpected archive member {relative!r}")
         if not directory:
@@ -107,45 +115,6 @@ def extract_archive(tool: str, archive: Path, directory: Path, program: str) -> 
     return index
 
 
-def verify_deployment(directory: Path, index: dict, row: dict, build: Path,
-                      carrier: str, checked: dict, work: Path) -> dict:
-    name, mode = index["program"], row["name"]
-    state = state_path(build, name, mode)
-    if reason := verify_state(state, checked):
-        raise LayoutError(reason)
-    cfg = read_state(state.with_name("config.json"))
-    source = cfg["firmware_provenance"]
-    expected = firmware_name(carrier, mode)
-    if (source.get("file"), source.get("path")) != (expected, cfg["firmware"]):
-        raise LayoutError(f"expected a release build using supplied firmware {expected}")
-    if sha256_file(Path(cfg["firmware"])) != cfg["firmware_digest"] or cfg["firmware_digest"] != source["sha256"]:
-        raise LayoutError("firmware digest differs from the verified build")
-    file = directory / row["elf"]["path"]
-    data = file.read_bytes()
-    meta, image = check_deployment(cfg, data)
-    if meta.name != name:
-        raise LayoutError(f"unexpected embedded name {meta.name!r}")
-    subprocess.run([cfg["tool"], "scan", file], check=True, stdout=subprocess.DEVNULL)
-    bindings = None
-    if mode == "ebpf":
-        bindings = json.loads(subprocess.check_output(
-            [cfg["tool"], "check-ebpf", file, directory / index["bpf"]["path"]], text=True
-        ))
-    elif retarget(directory, index, row, cfg, work) != data:
-        raise LayoutError("rebuilding from archived objects differs from the linked deployment")
-    return {
-        **row["elf"],
-        "name": mode,
-        "image_bytes": len(image),
-        "slot_address": hex(meta.slot_address),
-        "helper_address": hex(meta.helper_address),
-        "slot_capacity": cfg["slot_len"],
-        "firmware": source,
-        "maps": [dict(name=m.name, vma=hex(m.map_vma), capacity=m.len) for m in meta.maps],
-        "rbpf_bindings": bindings,
-    }
-
-
 def archiver() -> str:
     tool = shutil.which("7zz") or shutil.which("7z")
     if tool is None:
@@ -153,42 +122,62 @@ def archiver() -> str:
     return tool
 
 
-def verify_batch(build: Path, archives: Path, unpacked: Path, ledger: dict | None = None) -> list[dict]:
+def verify_batch(
+    build: Path | None, archives: Path, unpacked: Path, ledger: dict | None = None,
+) -> list[dict]:
     names = {path.name for path in archives.iterdir() if path.suffix.lower() == ".7z"}
     wanted = {f"{name}.7z" for name in PROGRAMS}
     if names != wanted:
         raise LayoutError(f"release archives: missing {sorted(wanted - names)}, extra {sorted(names - wanted)}")
-    extra = {p.parent.name for p in build.glob("*/index.toml")} - set(PROGRAMS)
-    if extra:
-        raise LayoutError(f"release build: unexpected programs {sorted(extra)}")
+    if build is not None:
+        extra = {p.parent.name for p in build.glob("*/index.toml")} - set(PROGRAMS)
+        if extra:
+            raise LayoutError(f"release build: unexpected programs {sorted(extra)}")
     tool = archiver()
     entries = []
-    checked = {}
     unpacked.mkdir()
-    for carrier, programs in CARRIERS.items():
-        for name in programs:
-            archive = contained(archives, f"{name}.7z")
-            digest = sha256_file(archive)
-            if ledger is not None and ledger.get(archive.name) != digest:
-                raise LayoutError(f"{name}: archive SHA-256 differs from release ledger")
-            directory = unpacked / name
-            index = extract_archive(tool, archive, directory, name)
+    for name in PROGRAMS:
+        archive = contained(archives, f"{name}.7z")
+        digest = sha256_file(archive)
+        if ledger is not None and ledger.get(archive.name) != digest:
+            raise LayoutError(f"{name}: archive SHA-256 differs from release ledger")
+        directory = unpacked / name
+        index = extract_archive(tool, archive, directory, name)
+        members = [member(directory, directory / path) for path in sorted(expected_files(name))]
+        if build is not None:
             require_program(build / name, name)
-            for path in sorted(expected_files(name)):
-                if sha256_file(directory / path) != sha256_file(build / name / path):
+            for item in members:
+                path = item["path"]
+                if member(build / name, build / name / path) != item:
                     raise LayoutError(f"{name}: extracted {path} differs from the build")
-            modes = []
-            for row in index["mode"]:
-                with tempfile.TemporaryDirectory(dir=unpacked.parent) as tmp:
-                    try:
-                        modes.append(verify_deployment(directory, index, row, build, carrier,
-                                                       checked, Path(tmp)))
-                    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
-                        raise LayoutError(f"{name}/{row['name']}: {exc}") from exc
-            entries.append({"program": name, "archive": archive.name, "sha256": digest,
-                            "members": sorted(expected_files(name)), "modes": modes})
-            print(f"verified {archive.name}: {', '.join(row['name'] for row in modes)}")
+        modes = []
+        for row in index["mode"]:
+            doc = read_document(directory / row["layout"]["path"])
+            modes.append({**row, "entry_offset": doc["entry_offset"],
+                          "image_bytes": row["image"]["size_bytes"],
+                          "maps": len(doc["maps"])})
+        entries.append({"program": name, "archive": archive.name, "sha256": digest,
+                        "size_bytes": archive.stat().st_size, "members": members, "modes": modes})
+        print(f"verified {archive.name}: {', '.join(row['name'] for row in modes)}")
     return entries
+
+
+def toolchain(archiver: str, build: Path) -> dict:
+    def version(*cmd):
+        return subprocess.check_output(cmd, text=True).strip().splitlines()[0]
+
+    return {
+        "clang": version(CLANG, "--version"),
+        "lld": version("ld.lld", "--version"),
+        "llvm_objdump": version(os.environ.get("LIBBPF_MCU_OBJDUMP", DEFAULT_OBJDUMP), "--version"),
+        "rustc": version("rustc", "--version"),
+        "cargo": version("cargo", "--version"),
+        "ninja": version("ninja", "--version"),
+        "7z": version(archiver, "i"),
+        "python": sys.version.split()[0],
+        "prevail_sha256": sha256_file(prevail_bin()),
+        "encoder_sha256": sha256_file(tool_bin_path(build)),
+    }
 
 
 def clean_commit() -> str:
@@ -197,7 +186,7 @@ def clean_commit() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 
 
-def prepare(build: Path, destination: Path, firmware_dir: Path | None) -> None:
+def prepare(build: Path, destination: Path) -> None:
     if destination.exists() or destination.is_relative_to(build):
         raise LayoutError("--archive-dir must be a new directory outside the build root")
     tool = archiver()
@@ -205,8 +194,6 @@ def prepare(build: Path, destination: Path, firmware_dir: Path | None) -> None:
     command = [sys.executable, ROOT / "make" / "cli.py", "build"]
     if build != DEFAULT_BUILD_DIR:
         command.extend(["--build-dir", build])
-    if firmware_dir is not None:
-        command.extend(["--firmware-dir", firmware_dir])
     subprocess.run(command, check=True, cwd=ROOT)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with lock(build), tempfile.TemporaryDirectory(dir=destination.parent) as temp:
@@ -219,7 +206,8 @@ def prepare(build: Path, destination: Path, firmware_dir: Path | None) -> None:
         entries = verify_batch(build, stage, Path(temp) / "unpacked")
         if clean_commit() != commit:
             raise LayoutError("checkout changed during preparation")
-        write_if_changed(stage / LEDGER, (json.dumps({"commit": commit, "archives": entries}, indent=2) + "\n").encode())
+        ledger = dict(schema=SCHEMA_LEDGER, commit=commit, toolchain=toolchain(tool, build), archives=entries)
+        write_if_changed(stage / LEDGER, (json.dumps(ledger, indent=2) + "\n").encode())
         if destination.exists():
             raise LayoutError(f"archive directory already exists: {destination}")
         stage.rename(destination)
@@ -253,12 +241,10 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     for verb in ("prepare", "verify"):
         command = commands.add_parser(verb)
-        command.add_argument("--build-dir", type=Path, default=DEFAULT_BUILD_DIR)
+        command.add_argument("--build-dir", type=Path)
         command.add_argument("--archive-dir", type=Path, required=True)
         if verb == "verify":
             command.add_argument("--unpack-dir", type=Path, required=True)
-        else:
-            command.add_argument("--firmware-dir", type=Path)
     tag = commands.add_parser("next-tag")
     tag.add_argument("--commit", required=True)
     tag.add_argument("--remote", default="origin")
@@ -269,23 +255,28 @@ def main() -> None:
             refs = subprocess.check_output(["git", "ls-remote", "--tags", args.remote], cwd=ROOT, text=True)
             print(select_tag(refs, args.commit, args.allocated))
         elif args.command == "prepare":
-            firmware_dir = (
-                args.firmware_dir.expanduser().resolve() if args.firmware_dir is not None else None
-            )
-            prepare(args.build_dir.resolve(), args.archive_dir.resolve(), firmware_dir)
+            build = args.build_dir.resolve() if args.build_dir else DEFAULT_BUILD_DIR
+            prepare(build, args.archive_dir.resolve())
         else:
-            build, archives = args.build_dir.resolve(), args.archive_dir.resolve()
-            document = read_state(contained(archives, LEDGER))
-            if document["commit"] != clean_commit():
-                raise LayoutError("release ledger is for a different commit")
+            archives = args.archive_dir.resolve()
+            build = args.build_dir.resolve() if args.build_dir else None
+            document = read_document(contained(archives, LEDGER))
+            if (document.get("schema") != SCHEMA_LEDGER
+                    or not re.fullmatch(r"[0-9a-f]{40}", document.get("commit", ""))
+                    or not isinstance(document.get("toolchain"), dict)):
+                raise LayoutError("invalid portable release ledger or provenance")
             digests = {entry["archive"]: entry["sha256"] for entry in document["archives"]}
             if set(digests) != {f"{name}.7z" for name in PROGRAMS} or len(document["archives"]) != len(PROGRAMS):
                 raise LayoutError("release ledger does not identify the complete program matrix")
-            with lock(build):
-                entries = verify_batch(build, archives, args.unpack_dir.resolve(), digests)
+            unpacked = args.unpack_dir.resolve()
+            if build is None:
+                entries = verify_batch(None, archives, unpacked, digests)
+            else:
+                with lock(build):
+                    entries = verify_batch(build, archives, unpacked, digests)
             if entries != document["archives"]:
                 raise LayoutError("release ledger differs from the verified archives and bindings")
-    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         parser.exit(1, f"{exc}\n")
 
 

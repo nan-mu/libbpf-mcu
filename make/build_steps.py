@@ -292,7 +292,7 @@ def link_native(generation, cfg, obj: Path, debug: Path) -> None:
         [
             cfg["clang"], "-target", "riscv32-unknown-none-elf", "-nostdlib",
             "-fuse-ld=lld", "-Xlinker", "-T", "-Xlinker", cfg["linker"],
-            obj, "-o", debug,
+            *cfg.get("link_options", ()), obj, "-o", debug,
         ],
     )
 
@@ -310,6 +310,19 @@ def pack_native(generation, cfg, bpf: Path, debug: Path, image: Path) -> bytes:
     return data
 
 
+def compile_native_source(root, src, cfg, obj, state, generation):
+    snapshot = source_path(root, src.stem).read_bytes()
+    original, included = source_snapshot(src)
+    if original != snapshot:
+        raise LayoutError(f"{src} differs from the BPF source snapshot")
+    headers = compile_c(
+        generation, src, obj, state.with_name("headers.d"), cfg["clang"], cfg["flags"]
+    )
+    if source_snapshot(src) != (original, included):
+        raise LayoutError(f"{src} or its program headers changed during MCU compilation")
+    return headers
+
+
 def build_native(
     root: Path, mode: str, src: Path, cfg: dict, config: Path, state: Path
 ) -> None:
@@ -317,18 +330,8 @@ def build_native(
     out = state.parent
     obj = out / f"{name}_rv32.o"
     debug = out / f"{name}_rv32.debug.elf"
-    snapshot = source_path(root, name).read_bytes()
-    original, included = source_snapshot(src)
-    if original != snapshot:
-        raise LayoutError(f"{src} differs from the BPF source snapshot")
     generation = list(cfg["firmware_calls"])
-    headers = compile_c(
-        generation, src, obj, state.with_name("headers.d"), cfg["clang"], cfg["flags"]
-    )
-    if source_snapshot(src) != (original, included):
-        raise LayoutError(
-            f"{src} or its program headers changed during MCU compilation"
-        )
+    headers = compile_native_source(root, src, cfg, obj, state, generation)
     link_native(generation, cfg, obj, debug)
     files = [obj, debug]
     facts = {"linked_elf": str(debug)}
@@ -468,7 +471,11 @@ def main() -> None:
         cfg = json.loads(args.config.read_text()) if args.config else {}
         if "firmware" in cfg:
             check_firmware(cfg)
-        if args.mode == "bpf":
+        if cfg.get("portable"):
+            from portable_build import build_portable
+
+            build_portable(args.root, args.mode, args.src, cfg, args.config, state)
+        elif args.mode == "bpf":
             build_bpf(args.root, args.src, cfg, args.config, state)
         elif args.mode == "prevail":
             verify_bpf(args.root, args.src.stem, state, args.config)

@@ -2,6 +2,7 @@
 
 mod bpf_meta;
 mod jit_image;
+mod portable;
 
 use std::fs;
 use std::path::PathBuf;
@@ -93,6 +94,36 @@ enum Cmd {
         /// Directory named `.jit-stage`. The only place this command writes.
         #[arg(long)]
         stage: PathBuf,
+    },
+    /// Emit map descriptors and zero-relative VMRs from a canonical AOT ELF.
+    PortableMaps {
+        maps: PathBuf,
+        linked_elf: PathBuf,
+        name: String,
+    },
+    /// Save pre-link RV32IM code, layout and JIT fixups.
+    PortableJit {
+        obj: PathBuf,
+        maps: PathBuf,
+        name: String,
+        image: PathBuf,
+    },
+    /// Save independently verified map-indexed rBPF instructions.
+    PortableEbpf {
+        obj: PathBuf,
+        layout: PathBuf,
+        image: PathBuf,
+    },
+    /// Wrap already-bound bytes with resolved Compact ELF metadata.
+    PackResolved {
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long)]
+        metadata: PathBuf,
+        #[arg(long, value_parser = parse_u32)]
+        slot_length: u32,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Accept one Compact ELF file only when `scan_at` returns Ok.
     Scan {
@@ -355,6 +386,24 @@ fn scan_file(file: &PathBuf, json: bool) -> Result<()> {
 
 fn run(args: Args) -> Result<()> {
     match args.cmd {
+        Cmd::PortableMaps {
+            maps,
+            linked_elf,
+            name,
+        } => portable::describe_maps(&maps, &linked_elf, &name),
+        Cmd::PortableJit {
+            obj,
+            maps,
+            name,
+            image,
+        } => portable::emit_jit(&obj, &maps, &name, &image),
+        Cmd::PortableEbpf { obj, layout, image } => portable::emit_ebpf(&obj, &layout, &image),
+        Cmd::PackResolved {
+            image,
+            metadata,
+            slot_length,
+            out,
+        } => portable::pack_resolved(&image, &metadata, slot_length, &out),
         Cmd::Symbol { firmware, name } => dump_symbol(&firmware, &name),
         Cmd::MemMap { firmware } => dump_mem_map(&firmware),
         Cmd::CheckEbpf { file, obj } => check_ebpf(&file, &obj),

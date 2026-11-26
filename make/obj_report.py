@@ -138,11 +138,12 @@ def format_disasm(
     return "\n".join(lines) + "\n"
 
 
-def disassemble_payload(objdump: str, code: CodeSection, machine: int) -> str:
+def disassemble_payload(objdump: str, code: CodeSection, machine: int, *,
+                        compressed: bool = False) -> str:
     with tempfile.TemporaryDirectory(prefix="libbpf-disasm-") as tmp:
         elf = Path(tmp) / "payload.elf"
         elf.write_bytes(code_elf(code, machine))
-        return format_disasm(objdump, elf, code, bpf=machine == BPF)
+        return format_disasm(objdump, elf, code, bpf=machine == BPF, compressed=compressed)
 
 
 MACHINES = {
@@ -152,16 +153,15 @@ MACHINES = {
     ),
     "llvm-aot": (
         "RV32IMC, ILP32, no FPU. LLVM compiles the C source for the MCU. "
-        "The listing shows the linked instructions at their firmware slot addresses."
+        "The listing shows the linked instructions at their link addresses. Release listings use a zero base."
     ),
     "ebpf": (
-        "Little-endian eBPF for the rBPF interpreter on RV32IMC. The container payload "
+        "Little-endian eBPF for the rBPF interpreter on RV32IMC. The payload "
         "uses map indices. Addresses are byte offsets in the rewritten program."
     ),
     "jit": (
         "ILP32, no FPU. The host JIT translates eBPF to the RV32IM subset of RV32IMC. "
-        "The listing covers the linked instructions at their firmware slot addresses "
-        "and ends before map storage."
+        "The listing covers the linked instructions and ends before map storage. Release listings use a zero base."
     ),
 }
 
