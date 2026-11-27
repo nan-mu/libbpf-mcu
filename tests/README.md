@@ -1,33 +1,15 @@
-# libbpf-mcu tests
+# Toolchain tests
 
-Test and validation source for libbpf-mcu.
+Production programs live under `experiments/`. This directory contains explicit diagnostics, negative programs and stable packet and object fixtures.
 
-## Categories
+| Layer | Entry point | Scope |
+| --- | --- | --- |
+| L0 | `./mcu test --level 0` | Rust unit tests for library and binary logic |
+| L1 | `./mcu test --level 1` | Binary and public library contracts, JIT arithmetic and ABI checks |
+| L2 | `./mcu test --level 2` | Real Ninja incrementality, verifier substitution, interruption and failure cases |
+| L3 | `./mcu test --level 3` | Real LLVM, PREVAIL and Ninja for three programs and rejected inputs |
+| L4 | `./mcu test --level 4` | Clean-checkout release matrix, archive verification, two-layout direct-link comparisons |
 
-- **xdp/**: Default compute and networking programs. Shared headers live beside the programs that include them.
-- **diagnostics/**: Opt-in `helper_loop`, `merge_try` and `xdp_drop` probes.
-- **unused/**: Archived or negative cases; excluded from default builds.
+Use `./mcu test --all` for all layers. Run the [independent JIT Oracle](../jit/oracle/README.md) with `cargo test --locked -p xpost-jit-oracle --test differential`. The Oracle writes per-case results and distinguishes unsupported and inconclusive outcomes from passes.
 
-## Layout
-
-```
-tests/
-├── xdp/
-│   ├── exb2/
-│   ├── just_drop.c
-│   ├── just_tx.c
-│   └── firewall.c
-├── diagnostics/
-│   └── …
-└── unused/
-    └── …
-```
-
-## Naming
-
-- File stem matches the primary `SEC("xdp")` entry symbol when practical.
-- No redundant `xdp_` filename prefix under `tests/xdp/` (directory already scopes XDP).
-
-## Usage
-
-Use `pixi run build -c helper_loop` for an opt-in diagnostic. Select archived sources explicitly with `--inputs`. The [benchmark contracts](../docs/benchmarks.md) list the active workloads and the archived fixtures.
+`jit/scripts/check-xdp.sh` runs the JIT fixture checks with PREVAIL. For optional Sail diagnostics, `linker/sail/build.sh source.c` links a selected C fixture for the simulator. `cargo run --locked -p mcu-dev-tools -- stack-budget --help` documents the stack estimate CLI.

@@ -30,7 +30,7 @@ record_check() {
   shift 2
   log="$OUT/$(printf '%s' "$check_name" | tr / .).check"
   set +e
-  cargo run --quiet --release --manifest-path "$ROOT/jit/Cargo.toml" -- \
+  cargo run --quiet --locked --manifest-path "$ROOT/Cargo.toml" -p mcu-jit -- diagnostic \
     check "$@" >"$log" 2>"$log.err"
   code=$?
   set -e
@@ -54,7 +54,8 @@ while IFS= read -r source <&3; do
   "$CLANG" --target=bpf -O2 -g -Wall -Wno-missing-declarations -fno-stack-protector \
     -I "$ROOT/include-bpf" -include vmlinux.h -c "$src" -o "$obj"
   set +e
-  python3 "$ROOT/make/prevail_gate.py" --obj "$obj" \
+  cargo run --quiet --locked --manifest-path "$ROOT/Cargo.toml" -p mcu-object -- \
+    bpf-verify --checker "$PREVAIL" --input "$obj" --output "$OUT/$name.accepted.o" \
     >"$OUT/$name.prevail.out" 2>&1
   prev=$?
   set -e

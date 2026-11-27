@@ -1,6 +1,6 @@
 # Program artifacts and local releases
 
-The `rv32imc` build target uses the ILP32 ABI and no FPU. The current XPOST machine profile supports ESP32-C3. The Rust host tool uses `xpost-elf` for XPM1 and Compact ELF V0. Its Rust dependencies on XPOST are pinned in `tools/Cargo.toml` and `tools/Cargo.lock` to the main commit that merged the dynamic host encoder. The local verifier checks the V0 field bounds, layout and payload digest. XPOST owns installation and device storage limits.
+The `rv32imc` build target uses the ILP32 ABI and no FPU. The current XPOST machine profile supports ESP32-C3. The Rust host tool uses `xpost-elf` for XPM1 and Compact ELF V0. The workspace pins its Rust dependencies on XPOST in `Cargo.lock`. The local verifier checks the V0 field bounds, layout and payload digest. XPOST owns installation and device storage limits.
 
 ## Program layout
 
@@ -25,7 +25,7 @@ The default build produces this archive layout for each program.
     └── ebpf.json
 ```
 
-The v3 program index records the program identity, source snapshot, original BPF object and one `[[mode]]` per deployment. Each portable row contains `image` and `layout` member records with a canonical relative path, byte length and SHA-256. `fixup_sites` lists the required fixup offsets in order. The `llvm-aot` row also records `object`, the RV32IMC relocatable reference. The original BPF and RV32 objects support audit and independent reference builds.
+The v3 program index records the program identity, standalone source, original BPF object and one `[[mode]]` per deployment. Each portable row contains `image` and `layout` member records with a canonical relative path, byte length and SHA-256. `fixup_sites` lists the required fixup offsets in order. The `llvm-aot` row also records `object`, the RV32IMC relocatable reference. The original BPF and RV32 objects support audit and independent reference builds.
 
 | Mode | Role | Format |
 | --- | --- | --- |
@@ -33,21 +33,15 @@ The v3 program index records the program identity, source snapshot, original BPF
 | `jit` | `native_image` | `rv32im-le` |
 | `ebpf` | `interpreter_image` | `rbpf-map-index-le` |
 
-An explicit build with `--firmware ELF` still produces a `xpost_container` row with `format = "xpost-compact-elf-v0"` and the `elf` member under `containers/`. `layout.py verify` can check either representation. The release verifier requires portable rows in all three modes for all 12 programs.
-
-The top-level C snapshot incorporates quoted program headers resolved relative to the including file, including for sources selected outside the repository. It preserves comments, conditional branches for host, eBPF and RV32 compilation, and references to the target SDK. Conventional header guards also apply to recursive includes. Each `#pragma once` sets a guard for its header when the preprocessor reaches the directive. Ordinary headers can expand repeatedly under different macro definitions. Recompile the snapshot with the corresponding SDK headers and build flags. The report embeds these same source bytes, and the index hashes them.
-
-PREVAIL checks the original Clang object before the build exposes any program files, including in BPF-only builds. A rejected program requires investigation. In a deployment, the firmware supplies the slot address and capacity. The packer checks the final image size after map rewriting or native linking. Intermediate binaries, linked debug ELFs, linker scripts, dependency fingerprints and failure diagnostics belong to the build root’s private `.ninja/` directory.
+The C file preserves the exact bytes compiled by both target SDKs. PREVAIL checks the original Clang object before publication. Stable build intermediates and Ninja metadata live outside program directories.
 
 ## Reading the report
 
-Each program contains one `report.md`. Source appears once. The eBPF chapter groups the original object and the rewritten interpreter payload. The `RV32IMC` chapter groups LLVM AOT and host JIT. Only built modes appear. Each subsection includes a fixed description of its ISA and execution model, instruction bytes, disassembly, and the actual generation steps. BPF addresses are byte offsets in executable sections. The rBPF listing shows the map-indexed payload. Portable native listings use zero-relative addresses and end before map placeholders. Explicit firmware-bound listings use linked RV32 addresses. Build commands may include the build host’s absolute paths.
-
-Run `pixi run python make/layout.py reports --build-dir build` to regenerate reports from a completed local build. Verification of the indexed machine files is independent of Markdown rendering. The archive includes the report from the same build.
+Each program has one `report.md` with the source once and listings for the built modes. The eBPF listing uses section byte offsets. The native listings show RV32IMC AOT and RV32IM JIT instructions at their zero-relative link addresses. The build recipes come from the current Ninja graph.
 
 ## Portable image layout
 
-No-argument `pixi run build` and `prepare-release` produce the release matrix without firmware or a target layout. The programs are `firewall`, `just_drop`, `just_tx`, `noop`, `prime`, `log2`, `copy`, `fletcher32`, `bsort`, `strcmp`, `case_swap` and `case_mark`. XPOST supplies HAL.
+`./mcu build` produces the release matrix without firmware or a target layout. The programs are `firewall`, `just_drop`, `just_tx`, `noop`, `prime`, `log2`, `copy`, `fletcher32`, `bsort`, `strcmp`, `case_swap` and `case_mark`. XPOST supplies HAL.
 
 Each layout is a UTF-8 JSON object with `schema = "libbpf-mcu.portable-image.v1"` and the `program` and `mode` from the index.
 
@@ -67,33 +61,34 @@ The split uses the rounded high 20 bits and signed low 12 bits. The PC-relative 
 
 ## Bind a release image
 
-Build the host encoder once from this producer revision using `cargo build --release --locked --manifest-path tools/Cargo.toml`. Use the resulting executable with `--encoder` or put it on PATH as `xpost-mcu-elf`. Supply the actual slot and helper addresses and the slot capacity from the selected firmware layout.
+Use the indexed image and layout from an unpacked program directory. Supply the slot and helper addresses and slot capacity, or use `--firmware ELF` to read its XPM1 record.
 
 ```sh
-pixi run bind-release --program-dir "$unpacked" --mode llvm-aot \
+cargo run --locked -p mcu-object -- bind --program-dir "$unpacked" --mode llvm-aot \
   --slot-address 0x40380200 --slot-length 0xe00 --helper-address 0x40380000 \
-  --encoder "$encoder" --output "$output"
+  --output "$output"
 ```
 
-The binder only opens the index and the selected `image` and `layout` members. It checks the address ranges, alignment, helper disjointness, slot capacity and map VMRs. The encoder wraps the bound payload with `xpost-elf` Compact ELF V0. Completed output is written atomically outside the program directory after the encoded bytes and metadata are checked. For rBPF the binder copies the bytecode and binds its map descriptors to the slot. XPOST owns the subsequent firmware read, deployment integration and device validation.
+The binder checks the range, alignment, helper disjointness, map addresses and slot capacity and writes a Compact ELF V0 container. For rBPF it carries the same bytecode and binds the map descriptors to the slot. XPOST owns deployment and device validation.
 
-For an independent reference, `pixi run direct-link-reference --program-dir "$unpacked" --mode llvm-aot --firmware "$firmware" --output "$reference"` links the archived RV32 object using LLD. `--mode jit` compiles and links the archived BPF object with the host JIT. This separate CLI accepts `--slot-symbol`. The comparison script in `make/compare_release.py` runs the binding CLI with only the indexed binding members, and compares those bytes and metadata with direct links at both layouts.
+Use `cargo run --locked -p mcu-dev-tools -- reference --program-dir "$unpacked" --mode llvm-aot --firmware "$firmware" --work-dir "$build/intermediates/reference" --output "$reference"` to generate an independent direct link. Select `--mode jit` to compile and link the original eBPF with the host JIT.
 
 ## Publish program artifacts
 
 An explicit request to publish the current `nan-mu/libbpf-mcu` `main` authorizes the agent to build, tag, upload and publish the GitHub Release. The required release matrix is the 12 programs above with all three modes, for 36 deployment inputs. Keep the v3 program index and the [portable members](#program-layout).
 
 1. **Pin the build.** Confirm the destination and authenticated account with `gh repo view nan-mu/libbpf-mcu --json nameWithOwner` and `gh auth status --hostname github.com`. Fetch `main`, record its full SHA, and create a fresh detached worktree at that SHA with an empty `build/`. Initialize PREVAIL at the pinned revision or select a verified binary built from that revision with `PREVAIL`.
-2. **Build, archive and verify the batch locally.** In that worktree run the following with `$archives` set to a new absolute directory outside the checkout. The prepare command runs the no-argument release build and checks PREVAIL. It verifies the 12×3 matrix, extracts and validates each archive, and compares the extracted files with the build. Any failed check stops preparation before tagging or uploading.
+2. **Build, archive and verify the batch locally.** In that worktree run the following with `$archives` set to a new absolute directory outside the checkout. Build the no-argument release matrix first. Release preparation verifies the 12×3 matrix, extracts and validates each archive, and compares the extracted files with the build. Any failed check stops preparation before tagging or uploading.
 
    ```sh
-   pixi run prepare-release --archive-dir "$archives"
-   pixi run python make/layout.py verify --build-dir build
-   pixi run verify-release --archive-dir "$archives" --unpack-dir "$unpacked_batch"
+   ./mcu build
+   cargo run --locked -p mcu-object -- verify --build-dir build
+   cargo run --locked -p mcu-dev-tools -- release prepare --archive-dir "$archives"
+   cargo run --locked -p mcu-dev-tools -- release verify --archive-dir "$archives" --unpack-dir "$unpacked_batch"
    ```
 
-   `$unpacked_batch` must be a new directory. Keep the 12 verified `<program>.7z` files, and `release.json` for retries. The ledger names each asset and records its archive digest, program paths, member digests and lengths, mode records, build commit and toolchain. Use `verify-release` again before resuming any upload. Add `--build-dir build` to also compare to the build tree. Each asset name equals its archive filename.
-3. **Create or resume a draft.** Hold a lock for this repository on the publishing machine through draft discovery, upload and publication. Recheck the remote `main` SHA, the clean worktree and the ledger's commit. Look up tags and Releases for the commit and reuse the matching draft when unambiguous. Run `tag=$(pixi run next-release-tag --commit "$sha")` to resolve the current `v0.1` series. A new allocation increments the maximum decimal patch in that series, starting at `v0.1.0` when the series is empty. Save the pinned SHA and allocated tag alongside the verified batch. On retry, pass `--allocated "$tag"`. If another commit has claimed that ref, the command refreshes the remote tag list and returns the next numeric patch. Verify the tag's resolved commit before creating a draft.
+   `$unpacked_batch` must be a new directory. Keep the 12 verified `<program>.7z` files, and `release.json` for retries. The ledger names each asset and records its archive digest, program paths, member digests and lengths, mode records, build commit and toolchain. Use `tools release verify` again before resuming any upload. Add `--build-dir build` to also compare to the build tree. Each asset name equals its archive filename.
+3. **Create or resume a draft.** Hold a lock for this repository on the publishing machine through draft discovery, upload and publication. Recheck the remote `main` SHA, the clean worktree and the ledger's commit. Look up tags and Releases for the commit and reuse the matching draft when unambiguous. Run `tag=$(cargo run --locked -p mcu-dev-tools -- release next-tag --commit "$sha")` to resolve the current `v0.1` series. A new allocation increments the maximum decimal patch in that series, starting at `v0.1.0` when the series is empty. Save the pinned SHA and allocated tag alongside the verified batch. On retry, pass `--allocated "$tag"`. If another commit has claimed that ref, the command refreshes the remote tag list and returns the next numeric patch. Verify the tag's resolved commit before creating a draft.
 
    Create the tag ref if it is absent and the draft if it does not already exist.
 

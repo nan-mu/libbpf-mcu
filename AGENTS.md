@@ -1,11 +1,11 @@
 # Repository invariants
 
-- Name the RISC-V build target `rv32imc`. The supported MCU is ESP32-C3, with the ILP32 ABI and no FPU.
-- Keep `include-bpf/` for Clang BPF and `include/` for independently compiled freestanding AOT C. Host JIT compiles eBPF to RV32IM. The `ebpf` deployment rewrites map references to rBPF indices.
-- Preserve the original `<p>/objects/<p>_bpf.o`. Use `xpost-elf` for Compact ELF V0 and XPM1. Resolve firmware addresses from the supplied linked ELF. XPOST owns flashing, runtime caches and device experiments.
-- Keep the v3 per-program index as the machine contract. Validate relative paths, file sizes, hashes and container contents. Builds derive semantics from objects, firmware, linked ELF and private build inputs. Expose program files only after PREVAIL accepts the original object. Keep one human-readable `report.md` at the program root.
-- Keep `build/` as the default output root. `--build-dir` selects the full root and `pixi run clean` removes the default root. Keep Ninja files, depfiles, linker scripts, stamps and staging files out of program archives.
+- Target `rv32imc` on ESP32-C3 with ILP32 and no FPU. Host JIT emits RV32IM.
+- Compile the same standalone experiment C with the BPF SDK in `include-bpf/` and the MCU SDK in `include/`. Preserve `<p>/objects/<p>_bpf.o` byte for byte after PREVAIL acceptance.
+- Keep portable image v1, program index v3 and Compact ELF V0. Use `xpost-elf` for XPM1 and Compact ELF. Resolve firmware addresses from the supplied linked ELF. XPOST owns device deployment.
+- Keep stable Ninja intermediates under the selected build root and one `report.md` per program. Keep private intermediates out of archives. Validate relative paths, lengths, hashes and image contents.
+- Use the [architecture map](docs/architecture.md) for tool ownership.
 
-Run `pixi run test` for implementation changes. Verify generated artifacts with `pixi run python make/layout.py verify --build-dir DIR`. Check docs against the CLI and wire format, then run `git diff --check`. Keep verification local. Compilation, PREVAIL acceptance, byte integrity and device execution are separate evidence.
+Run `./mcu test` for implementation changes and the applicable [higher test layers](tests/README.md). Verify generated artifacts with `cargo run --locked -p mcu-object -- verify --build-dir DIR`. Check docs against the actual CLI and formats. Run `git diff --check`. Record compilation, PREVAIL acceptance, byte integrity, independent semantics and device execution separately.
 
-An explicit request to publish the current `main` authorizes a GitHub Release. Use a fresh worktree at that commit, run `pixi run build` without arguments and archive every program from the successful build as its own `.7z`. Verify the entire batch before uploading it. A build or PR review can exercise those steps locally. Follow the [publication instructions](docs/artifacts.md#publish-program-artifacts) for tagging, upload and retry.
+An explicit publication request authorizes a GitHub Release from clean `main`. Build the complete matrix in a fresh worktree, then archive and verify it locally. Follow the [publication procedure](docs/artifacts.md#publish-program-artifacts) for tags, upload and retry.

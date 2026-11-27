@@ -1,0 +1,11 @@
+[package]
+name = "mcu-report"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+object.workspace = true
+mcu-image.workspace = true
+mcu-index.workspace = true

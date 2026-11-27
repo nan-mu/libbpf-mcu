@@ -1,10 +1,10 @@
 tests/unused/div2.c
 tests/diagnostics/xdp_drop.c
-tests/xdp/case_mark.c
-tests/xdp/just_drop.c
-tests/xdp/just_tx.c
-tests/xdp/firewall.c
+experiments/case/case_mark.c
+experiments/just_drop/just_drop.c
+experiments/just_tx/just_tx.c
+experiments/firewall/firewall.c
 tests/unused/bitswap.c
-tests/xdp/bsort.c
-tests/xdp/noop.c
-tests/xdp/copy.c
+experiments/exec_bench/bsort.c
+experiments/exec_bench/noop.c
+experiments/exec_bench/copy.c

@@ -9,9 +9,9 @@ Host path only. A Clang eBPF object compiles to RV32IM, links with addresses fro
 | JIT tests | `cargo test --manifest-path jit/Cargo.toml` |
 | C to eBPF to JIT | `jit/scripts/check-xdp.sh` |
 | Independent oracle | `cargo test --manifest-path jit/oracle/Cargo.toml --release` |
-| Pack | `pixi run build jit -c <stem> --firmware <firmware.elf>` |
+| Pack | `./mcu build -c <stem> --modes jit` |
 
-Device RX, hot-switch, and the perf matrix are not commands in this tree. `pixi run build jit` does not talk to a board.
+Device RX, hot-switch, and the perf matrix are not commands in this tree. `./mcu build --modes jit` does not talk to a board.
 
 ## 2. The defect that mattered
 
@@ -106,13 +106,13 @@ than inferred.
 
 ```sh
 # Host: C -> eBPF -> PREVAIL -> RV32IM -> Compact ELF V0
-pixi run build jit -c firewall --firmware <firmware.elf>
+./mcu build -c firewall --modes jit
 
 # Independent differential oracle
 cargo test --manifest-path jit/oracle/Cargo.toml --release
 ```
 
-Device RX, hot-switch, and the perf matrix are not commands in this tree. Their scripts and report files were removed. `pixi run build jit` does not talk to a board.
+Device RX, hot-switch, and the perf matrix are not commands in this tree. Their scripts and report files were removed. `./mcu build --modes jit` does not talk to a board.
 
 `pack-jit` reads the firmware's `.xpost.mem` (XPM1), links at the slot base, places map
 placeholders inside the flat image, and encodes with `xpost_elf::build_container`. It then

@@ -1,6 +1,6 @@
 # Benchmark programs
 
-The default build publishes raw BPF for these twelve programs. Each firmware deployment is built separately for its target slot.
+The default build produces raw BPF and portable images for these twelve programs. XPOST binds deployment images to the firmware slot.
 
 | Programs | Behavior and source |
 | --- | --- |
@@ -16,7 +16,7 @@ The November 12 networking samples used XBT1 and a different measurement setup. 
 
 ## EXB2 compute ABI
 
-Allocate one mutable 8258-byte buffer with a 64-byte little-endian header. Initialize the input after the header, followed by writable scratch for `copy` or `bsort`, then pad to capacity. Hold the request stable for a single call. The XDP entry receives an `xdp_md` whose `data` and `data_end` delimit exactly that buffer. The standalone host entry, compiled with `-DEB_HOST_ENTRY`, receives the same raw buffer and byte length. Both run all `rounds` inside the call. The XDP entry returns `XDP_PASS` on success and `XDP_ABORTED` on error. Read the result in place after return. No map is involved.
+Allocate one mutable 8258-byte buffer with a 64-byte little-endian header. Initialize the input after the header, followed by writable scratch for `copy` or `bsort`, then pad to capacity. Hold the request stable for a single call. The XDP entry receives an `xdp_md` whose `data` and `data_end` delimit exactly that buffer. The independent XPOST HAL reference accepts the same raw buffer and byte length. Each program runs all `rounds` inside the call. The XDP entry returns `XDP_PASS` on success and `XDP_ABORTED` on error. Read the result in place after return. No map is involved.
 
 | Offsets | Fields |
 | --- | --- |

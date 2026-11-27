@@ -21,7 +21,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CLANG");
     let sources = root.join("jit/scripts/xdp-sources.txt");
     println!("cargo:rerun-if-changed={}", sources.display());
-    for path in ["tests/xdp", "tests/unused/exec_common.h", "include-bpf"] {
+    for path in ["experiments", "tests/unused/exec_common.h", "include-bpf"] {
         println!("cargo:rerun-if-changed={}", root.join(path).display());
     }
     for path in std::fs::read_to_string(sources).unwrap().lines() {
