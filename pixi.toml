@@ -12,7 +12,8 @@ test = "python make/cli.py test"
 prepare-release = "python make/release.py prepare"
 verify-release = "python make/release.py verify"
 next-release-tag = "python make/release.py next-tag"
-retarget = "python make/retarget.py"
+direct-link-reference = "python make/retarget.py"
+bind-release = "python make/native_image.py"
 
 [dependencies]
 python = ">=3.14.6,<3.15"

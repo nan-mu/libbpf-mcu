@@ -1,0 +1,129 @@
+{
+  "encoding": "base64",
+  "build_commit": "cc824e88e455b25aaeb03eafc6a8f68b42947930",
+  "assets": [
+    {
+      "name": "bsort.7z",
+      "size_bytes": 37656,
+      "sha256": "84eb14f93d5594065e93360fc507bc1e7f373d40a359176131afee4cb1da26d0",
+      "parts": [
+        "bsort.7z.001.b64"
+      ]
+    },
+    {
+      "name": "case_mark.7z",
+      "size_bytes": 12372,
+      "sha256": "e7a1db0b6232df71db21f02822e872968029555b4002188441ebf1fffe368cea",
+      "parts": [
+        "case_mark.7z.001.b64"
+      ]
+    },
+    {
+      "name": "case_swap.7z",
+      "size_bytes": 12365,
+      "sha256": "07a7a574ba9b83692134cd481c00fa43e35c2b57edba9142cc6297e842e3be64",
+      "parts": [
+        "case_swap.7z.001.b64"
+      ]
+    },
+    {
+      "name": "copy.7z",
+      "size_bytes": 28871,
+      "sha256": "58448e605793981a530a9fcd7deb27e90cd71acfbb07936664000bfb25d2970f",
+      "parts": [
+        "copy.7z.001.b64"
+      ]
+    },
+    {
+      "name": "evidence.7z",
+      "size_bytes": 489372,
+      "sha256": "413e0596f9a5a1aab42d37be3c154cb7e25662533a460bf1c073b15a4467e996",
+      "parts": [
+        "evidence.7z.001.b64",
+        "evidence.7z.002.b64",
+        "evidence.7z.003.b64",
+        "evidence.7z.004.b64",
+        "evidence.7z.005.b64",
+        "evidence.7z.006.b64",
+        "evidence.7z.007.b64",
+        "evidence.7z.008.b64",
+        "evidence.7z.009.b64",
+        "evidence.7z.010.b64",
+        "evidence.7z.011.b64"
+      ]
+    },
+    {
+      "name": "firewall.7z",
+      "size_bytes": 9684,
+      "sha256": "88bf2b0345bd14e032fa4a09748bbb0110fc2fd81597a8f76a27db4543d5a37c",
+      "parts": [
+        "firewall.7z.001.b64"
+      ]
+    },
+    {
+      "name": "fletcher32.7z",
+      "size_bytes": 31565,
+      "sha256": "f2e8208cd644c82322b4e2062d91e4a3337903bc616c7cd861ca98c7584e0e56",
+      "parts": [
+        "fletcher32.7z.001.b64"
+      ]
+    },
+    {
+      "name": "just_drop.7z",
+      "size_bytes": 4983,
+      "sha256": "0637c9512a0967918e3853a190e972e7807f7c2bbb0e8552122e523e50551b31",
+      "parts": [
+        "just_drop.7z.001.b64"
+      ]
+    },
+    {
+      "name": "just_tx.7z",
+      "size_bytes": 14021,
+      "sha256": "744da0b9cfb82730a52fe8e1ac3f1c531fd334e9742b5523994b69f99aa8acba",
+      "parts": [
+        "just_tx.7z.001.b64"
+      ]
+    },
+    {
+      "name": "log2.7z",
+      "size_bytes": 35176,
+      "sha256": "06aa5d243588d41eae4a6f79b94216799b912652d4f59fdb601f975d80f41698",
+      "parts": [
+        "log2.7z.001.b64"
+      ]
+    },
+    {
+      "name": "noop.7z",
+      "size_bytes": 23963,
+      "sha256": "cd3fc89f6b8d25f243f4c3fbaaec9463299d34f75f5f8579f531a7a1ef744aab",
+      "parts": [
+        "noop.7z.001.b64"
+      ]
+    },
+    {
+      "name": "prime.7z",
+      "size_bytes": 27704,
+      "sha256": "d43615c833d3c68fbba581bf682e6f2ec2abe3459ce1ea21df25d56f0847e088",
+      "parts": [
+        "prime.7z.001.b64"
+      ]
+    },
+    {
+      "name": "release.json",
+      "size_bytes": 51572,
+      "sha256": "1d765524d3f9ab5331eb903134222a3dc20b6b8ac611ff87d7e9460bed0968fa",
+      "parts": [
+        "release.json.001.b64",
+        "release.json.002.b64"
+      ]
+    },
+    {
+      "name": "strcmp.7z",
+      "size_bytes": 33158,
+      "sha256": "d97ee19bc99bf7ef0b92afdfa9db4c130d22bc2b6914c02dc94a31f480b4b3ec",
+      "parts": [
+        "strcmp.7z.001.b64"
+      ]
+    }
+  ]
+}

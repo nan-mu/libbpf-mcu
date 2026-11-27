@@ -1,4 +1,4 @@
-"""Prepare a native deployment from the objects in an extracted program archive."""
+"""Build an independent reference from archived compiler objects and a layout ELF."""
 
 from __future__ import annotations
 
@@ -16,15 +16,20 @@ from build import (
     write_slot_linker,
 )
 from build_steps import check_firmware, link_native, pack_jit, pack_native
-from layout import LayoutError, load_index, write_if_changed
+from layout import CONTAINER_ROLE, LayoutError, load_index, write_if_changed
 from prevail_gate import examine
 from xpost_elf import parse_container
 
 
 def retarget(program_root: Path, index: dict, row: dict, cfg: dict, work: Path) -> bytes:
     bpf = program_root / index["bpf"]["path"]
-    meta, _ = parse_container((program_root / row["elf"]["path"]).read_bytes())
-    cfg = dict(cfg, image_name=meta.name)
+    name = index["program"]
+    if row["role"] == CONTAINER_ROLE:
+        meta, _ = parse_container((program_root / row["elf"]["path"]).read_bytes())
+        name = meta.name
+    else:
+        cfg = dict(cfg, link_options=("-Wl,--no-relax",))
+    cfg = dict(cfg, image_name=name)
     steps = []
     if row["name"] == "jit":
         data, _ = pack_jit(steps, cfg, bpf, work / ".jit-stage")

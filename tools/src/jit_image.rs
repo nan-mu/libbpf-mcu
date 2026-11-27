@@ -20,7 +20,7 @@ use crate::bpf_meta::{metadata_from_value, read_maps};
 /// Bytes reserved per map inside the image, matching the AOT link's `.maps`
 /// placeholder. The firmware never reads them: it binds the address to real
 /// storage through its VMR table, so only the address carries meaning.
-const MAP_PLACEHOLDER: u32 = 16;
+pub(crate) const MAP_PLACEHOLDER: u32 = 16;
 
 /// Bytes of one successful assembly and the code extent inside its payload.
 pub struct JitArtifact {
@@ -51,44 +51,7 @@ impl JitArtifact {
         let image = compile(&loaded.insns, &loaded.symbols).map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let doc = read_maps(maps)?;
-        let provisional: HashMap<String, u32> = doc
-            .get("maps")
-            .and_then(Value::as_table)
-            .into_iter()
-            .flat_map(|table| table.keys())
-            .enumerate()
-            .map(|(i, n)| (n.clone(), 0x1000 + i as u32 * MAP_PLACEHOLDER))
-            .collect();
-        let probe = metadata_from_value(
-            &with_vmas(doc.clone(), &provisional),
-            "BTF maps",
-            name,
-            slot,
-            helper,
-            1,
-        )?;
-        let eligible: Vec<String> = probe
-            .maps
-            .iter()
-            .map(|m| m.name.as_str().to_string())
-            .collect();
-
-        for reloc in &image.relocs {
-            if reloc.kind != RelocKind::Lddw {
-                continue;
-            }
-            let sym = reloc
-                .symbol
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("lddw at bpf pc {} has no symbol", reloc.bpf_pc))?;
-            if !eligible.iter().any(|n| n == sym) {
-                bail!(
-                    "program references `{sym}` but it cannot enter Compact ELF V0; \
-                     recorded maps are {eligible:?}. Refusing rather than emitting a \
-                     reference the firmware would leave unbound."
-                );
-            }
-        }
+        let eligible = eligible_maps(&doc, name, &image)?;
 
         let code_bytes = (image.code.len() * 4) as u32;
         let holes = MAP_PLACEHOLDER
@@ -199,7 +162,7 @@ impl JitArtifact {
     }
 }
 
-fn with_vmas(mut doc: Value, vmas: &HashMap<String, u32>) -> Value {
+pub(crate) fn with_vmas(mut doc: Value, vmas: &HashMap<String, u32>) -> Value {
     if let Some(Value::Table(maps)) = doc.get_mut("maps") {
         for (name, fields) in maps {
             if let (Some(vma), Value::Table(fields)) = (vmas.get(name), fields) {
@@ -208,4 +171,51 @@ fn with_vmas(mut doc: Value, vmas: &HashMap<String, u32>) -> Value {
         }
     }
     doc
+}
+
+pub(crate) fn eligible_maps(
+    doc: &Value,
+    name: &str,
+    image: &xpost_jit::Image,
+) -> Result<Vec<String>> {
+    let provisional: HashMap<String, u32> = doc
+        .get("maps")
+        .and_then(Value::as_table)
+        .into_iter()
+        .flat_map(|table| table.keys())
+        .enumerate()
+        .map(|(i, n)| (n.clone(), 0x1000 + i as u32 * MAP_PLACEHOLDER))
+        .collect();
+    let probe = metadata_from_value(
+        &with_vmas(doc.clone(), &provisional),
+        "BTF maps",
+        name,
+        4,
+        4,
+        1,
+    )?;
+    let eligible: Vec<String> = probe
+        .maps
+        .iter()
+        .map(|m| m.name.as_str().to_string())
+        .collect();
+
+    for reloc in &image.relocs {
+        if reloc.kind != RelocKind::Lddw {
+            continue;
+        }
+        let sym = reloc
+            .symbol
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("lddw at bpf pc {} has no symbol", reloc.bpf_pc))?;
+        if !eligible.iter().any(|n| n == sym) {
+            bail!(
+                "program references `{sym}` but it cannot enter Compact ELF V0; \
+                 recorded maps are {eligible:?}. Refusing rather than emitting a \
+                 reference the firmware would leave unbound."
+            );
+        }
+    }
+
+    Ok(eligible)
 }

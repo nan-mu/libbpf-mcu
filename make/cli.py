@@ -64,11 +64,6 @@ def main():
         help="已链接固件 ELF（须含 .xpost.mem / XPM1）；rv32imc、jit 必填",
     )
     build_parser.add_argument(
-        "--firmware-dir",
-        type=Path,
-        help="发布矩阵的已链接固件目录，默认读取 LIBBPF_MCU_FIRMWARE_DIR",
-    )
-    build_parser.add_argument(
         "--slot-symbol",
         default=None,
         help="firmware ELF symbol; its address and size replace XPM1 slot_addr/slot_len",
@@ -105,8 +100,6 @@ def main():
                 args.engine, args.slot_symbol, args.image_name,
             )
         )
-        if args.firmware_dir is not None and not full:
-            build_parser.error("--firmware-dir is only available for the full release build")
         target = args.target or ("rv32imc" if args.firmware is not None else "bpf")
         if target != "rv32imc" and args.engine is not None:
             build_parser.error("--engine is only available for rv32imc")
@@ -131,7 +124,7 @@ def main():
         )
         try:
             if full:
-                from release_firmware import PROGRAMS
+                from release import PROGRAMS
 
                 sources = resolve_sources(
                     [str(ROOT / "tests" / "xdp" / f"{name}.c") for name in PROGRAMS],

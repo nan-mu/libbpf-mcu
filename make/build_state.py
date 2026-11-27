@@ -16,6 +16,7 @@ from layout import (
     container_path,
     make_index,
     native_object_path,
+    portable_paths,
     report_path,
     sha256_file,
     source_path,
@@ -33,6 +34,7 @@ from obj_report import (
     write_report,
 )
 from xpost_elf import parse_container
+from native_image import read_document
 
 PRIVATE_MODES = ("bpf", "prevail", "llvm-aot", "ebpf-native", "ebpf", "jit")
 
@@ -130,6 +132,7 @@ def prepare_program(root: Path, program: str) -> None:
         private,
         public / "objects",
         public / "containers",
+        public / "images",
         *(private / mode for mode in PRIVATE_MODES),
     ):
         if directory.is_symlink():
@@ -149,6 +152,7 @@ def prepare_program(root: Path, program: str) -> None:
         native_object_path(root, program),
         report_path(root, program),
         *(container_path(root, program, mode) for mode in MODES),
+        *(path for mode in MODES for path in portable_paths(root, program, mode)),
     ]
     if not v2:
         reserved.append(index)
@@ -206,18 +210,28 @@ def reconcile(
     if gate_invalid:
         obj.unlink(missing_ok=True)
         source.unlink(missing_ok=True)
+    portable = set()
     for mode in MODES:
         container = container_path(root, program, mode)
-        files = [container]
+        image_paths = portable_paths(root, program, mode)
+        if mode not in reasons:
+            state = read_state(states[mode])
+            if state.get("portable"):
+                portable.add(mode)
+        files = list(image_paths) if mode in portable else [container]
+        inactive = [container] if mode in portable else image_paths
         if mode == "llvm-aot":
             files.append(native_object_path(root, program))
-        if mode not in reasons:
-            recorded = read_state(states[mode])["outputs"]
-            if any(str(path) not in recorded for path in files):
-                reasons[mode] = "published outputs changed"
+        if mode not in reasons and any(str(path) not in state["outputs"] for path in files):
+            reasons[mode] = "published outputs changed"
         if gate_invalid or mode in reasons:
             for path in files:
                 path.unlink(missing_ok=True)
+        for path in inactive:
+            path.unlink(missing_ok=True)
+    for directory in (root / program / "containers", root / program / "images"):
+        if directory.is_dir() and not any(directory.iterdir()):
+            directory.rmdir()
     index_path = root / program / "index.toml"
     report = report_path(root, program)
     if gate_invalid or "bpf" in hidden:
@@ -228,7 +242,7 @@ def reconcile(
             mode for mode in MODES if mode not in reasons and mode not in hidden
         )
         before = index_path.read_bytes() if index_path.exists() else None
-        write_index(index_path, make_index(index_path.parent, program, modes))
+        write_index(index_path, make_index(index_path.parent, program, modes, portable=portable))
         if before != index_path.read_bytes():
             report.unlink(missing_ok=True)
     return reasons
@@ -298,6 +312,20 @@ def _render_reports(root: Path, program: str, report: Path, modes, force: bool) 
                 format_disasm(objdump, obj, code, bpf=True)
                 for code in executable_sections(obj.read_bytes())
             )
+        elif state.get("portable"):
+            image_path, layout_path = portable_paths(root, program, mode)
+            image = image_path.read_bytes()
+            doc = read_document(layout_path)
+            listing = "".join(
+                disassemble_payload(
+                    objdump,
+                    CodeSection(r["name"], r["offset"], image[r["offset"]:r["offset"] + r["size"]]),
+                    BPF if mode == "ebpf" else RISCV,
+                    compressed=mode == "llvm-aot",
+                )
+                for r in doc["regions"] if r["kind"] == "code"
+            )
+            generation.extend(state["generation"])
         else:
             container = container_path(root, program, mode)
             meta, image = parse_container(container.read_bytes())

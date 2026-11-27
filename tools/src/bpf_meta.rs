@@ -285,6 +285,6 @@ fn layout_vec(bits: &[u8]) -> Result<heapless::Vec<u8, MAX_LAYOUT>> {
     Ok(v)
 }
 
-fn heapless_name(s: &str) -> Result<heapless::String<{ MAX_NAME + 1 }>> {
+pub(crate) fn heapless_name(s: &str) -> Result<heapless::String<{ MAX_NAME + 1 }>> {
     heapless::String::try_from(s).map_err(|_| anyhow::anyhow!("name must be 1..{MAX_NAME} ASCII"))
 }

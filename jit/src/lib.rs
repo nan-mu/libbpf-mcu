@@ -46,7 +46,9 @@ pub use check::{check_packet, compare, Report};
 pub use check::{check_packet_with_expected, ExpectedArrayValue, ExpectedPacket};
 #[doc(hidden)]
 pub use check::{packet_world, PacketWorld, CTX, DATA, FLAT_LEN};
-pub use compile::{compile, frame_bytes, link, Image, JitError, LinkIn, Reloc, RelocKind};
+pub use compile::{
+    compile, frame_bytes, link, link_at_zero, Image, JitError, LinkIn, Reloc, RelocKind,
+};
 pub use host_abi::{dispatch, write_map, HELPER, KIND_ARRAY, KIND_HASH, MAP_MAGIC};
 pub use load::{load_bpf, LoadError, Source};
 pub use matrix::json as support_json;

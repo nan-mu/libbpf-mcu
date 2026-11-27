@@ -96,6 +96,11 @@ def container_path(root: Path, program: str, mode: str) -> Path:
     return root / program / "containers" / f"{program}-vm-{suffix}.elf"
 
 
+def portable_paths(root: Path, program: str, mode: str) -> tuple[Path, Path]:
+    base = root / program / "images" / mode
+    return base.with_suffix(".bin"), base.with_suffix(".json")
+
+
 def state_path(root: Path, program: str, mode: str) -> Path:
     return root / ".ninja" / program / mode / "state.json"
 
@@ -125,17 +130,27 @@ def member(root: Path, path: Path) -> dict:
     }
 
 
-def make_index(program_root: Path, program: str, modes: tuple[str, ...]) -> dict:
+def make_index(program_root: Path, program: str, modes: tuple[str, ...], *,
+               portable: set[str] = frozenset()) -> dict:
+    from native_image import FORMATS, ROLES, read_document
+
     check_program(program)
     root = program_root.parent
     rows = []
     for mode in modes:
-        row = {
-            "name": mode,
-            "role": CONTAINER_ROLE,
-            "format": CONTAINER_FORMAT,
-            "elf": member(program_root, container_path(root, program, mode)),
-        }
+        if mode in portable:
+            image, layout = portable_paths(root, program, mode)
+            row = {
+                "name": mode, "role": ROLES[mode], "format": FORMATS[mode],
+                "image": member(program_root, image),
+                "layout": member(program_root, layout),
+                "fixup_sites": [fixup["offset"] for fixup in read_document(layout)["fixups"]],
+            }
+        else:
+            row = {
+                "name": mode, "role": CONTAINER_ROLE, "format": CONTAINER_FORMAT,
+                "elf": member(program_root, container_path(root, program, mode)),
+            }
         if mode == "llvm-aot":
             row["object"] = member(program_root, native_object_path(root, program))
         rows.append(row)
@@ -170,9 +185,13 @@ def write_index(path: Path, index: dict) -> None:
                 f"name = {q(mode['name'])}",
                 f"role = {q(mode['role'])}",
                 f"format = {q(mode['format'])}",
-                f"elf = {_inline_member(mode['elf'])}",
             ]
         )
+        for key in ("elf", "image", "layout"):
+            if key in mode:
+                lines.append(f"{key} = {_inline_member(mode[key])}")
+        if "fixup_sites" in mode:
+            lines.append(f"fixup_sites = {json.dumps(mode['fixup_sites'])}")
         if "object" in mode:
             lines.append(f"object = {_inline_member(mode['object'])}")
     write_if_changed(path, ("\n".join(lines) + "\n").encode())
@@ -205,16 +224,13 @@ def check_relocatable(path: Path, *, bpf: bool) -> None:
         raise LayoutError(f"expected a little-endian relocatable {arch} ELF: {path}")
 
 
-def load_index(program_root: Path, program: str | None = None) -> dict:
+def _read_index(program_root: Path, program: str | None = None) -> dict:
     index = tomllib.loads(contained(program_root, "index.toml").read_text())
     if index.get("schema") != SCHEMA_INDEX:
         raise LayoutError(f"{program_root}: expected {SCHEMA_INDEX}")
     name = check_program(index.get("program"))
     if program is not None and name != program:
         raise LayoutError(f"{program_root}: program is {name}, expected {program}")
-    _verify_member(program_root, index.get("source"), f"{name}.c")
-    bpf = _verify_member(program_root, index.get("bpf"), f"objects/{name}_bpf.o")
-    check_relocatable(bpf, bpf=True)
     rows = index.setdefault("mode", [])
     if not isinstance(rows, list):
         raise LayoutError(f"{name}: mode must be an array of tables")
@@ -226,11 +242,63 @@ def load_index(program_root: Path, program: str | None = None) -> dict:
         if mode in seen:
             raise LayoutError(f"{name}/{mode}: duplicate mode")
         seen.add(mode)
-        if row.get("role") != CONTAINER_ROLE or row.get("format") != CONTAINER_FORMAT:
+    return index
+
+
+def _portable_inputs(root: Path, program: str, row: dict) -> tuple[bytes, dict]:
+    from native_image import FORMATS, ROLES, fields, read_document, validate_image
+
+    mode = row["name"]
+    reference = " object" if mode == "llvm-aot" else ""
+    fields(row, "name role format image layout fixup_sites" + reference, f"{mode} index row")
+    if (row["role"], row["format"]) != (ROLES[mode], FORMATS[mode]):
+        raise LayoutError(f"{program}/{mode}: invalid portable role or format")
+    image, layout = portable_paths(Path(), program, mode)
+    data = _verify_member(root, row["image"], image.relative_to(program).as_posix()).read_bytes()
+    doc = read_document(_verify_member(root, row["layout"], layout.relative_to(program).as_posix()))
+    validate_image(program, mode, data, doc, row["fixup_sites"])
+    return data, doc
+
+
+def load_portable_mode(root: Path, mode: str) -> tuple[str, dict, bytes, dict]:
+    """Open only the selected binding inputs, leaving audit objects unopened."""
+    index = _read_index(root)
+    program = index["program"]
+    row = next((row for row in index["mode"] if row["name"] == mode), None)
+    if row is None or row.get("role") == CONTAINER_ROLE:
+        raise LayoutError(f"{program}/{mode}: missing portable deployment")
+    image, doc = _portable_inputs(root, program, row)
+    return program, row, image, doc
+
+
+def load_index(program_root: Path, program: str | None = None) -> dict:
+    from rv32_release_elf import verify_aot_records
+
+    index = _read_index(program_root, program)
+    name = index["program"]
+    _verify_member(program_root, index.get("source"), f"{name}.c")
+    bpf = _verify_member(program_root, index.get("bpf"), f"objects/{name}_bpf.o")
+    check_relocatable(bpf, bpf=True)
+    layouts = {}
+    for row in index["mode"]:
+        mode = row["name"]
+        if row.get("role") != CONTAINER_ROLE:
+            try:
+                _, doc = _portable_inputs(program_root, name, row)
+                if mode == "llvm-aot":
+                    native = _verify_member(
+                        program_root, row["object"], f"objects/{name}_rv32.o"
+                    )
+                    verify_aot_records(native, doc)
+                layouts[mode] = doc
+            except ValueError as exc:
+                raise LayoutError(f"{name}/{mode}: {exc}") from exc
+            continue
+        if row.get("format") != CONTAINER_FORMAT:
             raise LayoutError(f"{name}/{mode}: invalid role or format")
-        suffix = {"llvm-aot": "aot", "ebpf": "ebpf", "jit": "jit"}[mode]
         path = _verify_member(
-            program_root, row.get("elf"), f"containers/{name}-vm-{suffix}.elf"
+            program_root, row.get("elf"),
+            container_path(Path(), name, mode).relative_to(name).as_posix(),
         )
         if mode == "llvm-aot":
             native = _verify_member(
@@ -243,6 +311,8 @@ def load_index(program_root: Path, program: str | None = None) -> dict:
             parse_container(path.read_bytes())
         except ValueError as exc:
             raise LayoutError(f"{name}/{mode}: {exc}") from exc
+    if {"llvm-aot", "ebpf"} <= layouts.keys() and layouts["llvm-aot"]["maps"] != layouts["ebpf"]["maps"]:
+        raise LayoutError(f"{name}/ebpf: map layout differs from AOT")
     return index
 
 
