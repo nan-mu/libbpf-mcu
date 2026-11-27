@@ -324,12 +324,13 @@ fn collect(
     Ok(delivered)
 }
 
-fn clean_commit(root: &Path) -> Result<String> {
+fn clean_commit(root: &Path, temp: &Path) -> Result<String> {
     let git = |args: &[&str]| {
         stdout(
             Command::new("git")
                 .current_dir(root)
                 .env("GIT_OPTIONAL_LOCKS", "0")
+                .env("TMPDIR", temp)
                 .args(args),
         )
     };
@@ -363,9 +364,9 @@ pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
         !destination.exists() && !destination.starts_with(&build),
         "archive directory must be new and outside the build root"
     );
-    let commit = clean_commit(root)?;
-    let names = programs(root)?;
     let temp = tempfile::tempdir()?;
+    let commit = clean_commit(root, temp.path())?;
+    let names = programs(root)?;
     let stage = temp.path().join("archives");
     fs::create_dir(&stage)?;
     for program in &names {
@@ -400,9 +401,13 @@ pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
         ("build_graph_sha256".to_owned(), sha256_hex(&graph).into()),
         (
             "rustc".to_owned(),
-            stdout(Command::new("rustc").arg("--version"))?
-                .trim()
-                .into(),
+            stdout(
+                Command::new("rustc")
+                    .env("TMPDIR", temp.path())
+                    .arg("--version"),
+            )?
+            .trim()
+            .into(),
         ),
         (
             "7z".to_owned(),
@@ -415,7 +420,7 @@ pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
         ),
     ]);
     ensure!(
-        clean_commit(root)? == commit,
+        clean_commit(root, temp.path())? == commit,
         "checkout changed during archive preparation"
     );
     let ledger = Ledger {

@@ -4,7 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
-SOURCE="${1:?Usage: build.sh path/to/sail-fixture.c}"
+SOURCE="${1:?Usage: build.sh path/to/sail-fixture.c [entry-symbol]}"
+ENTRY="${2:-xdp_prog1}"
 OUT_DIR="${OUT_DIR:-$ROOT/build/sail}"
 OUT_ELF="${OUT_ELF:-$OUT_DIR/sail-rv32.elf}"
 
@@ -28,7 +29,7 @@ mkdir -p "$OUT_DIR"
   --target=riscv32-unknown-none-elf -march=rv32imc -mabi=ilp32 \
   -nostdlib -ffreestanding -fuse-ld=lld -mno-relax \
   -Wl,-T,"$ROOT/linker/sail/sail-rv32.ld" \
-  -Wl,--build-id=none -Wl,--no-pie \
+  -Xlinker "--defsym=xdp_prog1=$ENTRY" -Wl,--build-id=none -Wl,--no-pie \
   "$OUT_DIR/sail-program.o" "$OUT_DIR/sail-runtime.o" \
   -o "$OUT_ELF"
 
