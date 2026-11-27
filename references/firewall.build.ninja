@@ -1,0 +1,140 @@
+# Design draft: firewall, all portable backends (PR7 artifact contract).
+# cwd: libbpf-mcu checkout root. mcu generates the graph and runs Ninja.
+# The proposed Rust CLI interfaces are not implemented yet.
+ninja_required_version = 1.10
+
+# Paths relative to the checkout. The generator resolves actual paths.
+builddir = build
+graph = $builddir/build.ninja
+source = experiments/firewall/firewall.c
+program = $builddir/firewall
+objects = $program/objects
+images = $program/images
+intermediate = $builddir/intermediates/firewall
+listing = $intermediate/report
+raw_bpf = $intermediate/firewall_bpf.o
+bpf = $objects/firewall_bpf.o
+rv32 = $objects/firewall_rv32.o
+linked = $intermediate/firewall_rv32.elf
+linker = $intermediate/zero.ld
+
+# External tools: actual absolute paths, resolved at graph generation.
+clang = /opt/homebrew/opt/llvm/bin/clang
+lld = /opt/homebrew/opt/llvm/bin/ld.lld
+prevail = /checkout/libbpf-mcu/prevail/bin/prevail
+objdump = /opt/homebrew/opt/llvm/bin/llvm-objdump
+ninja = /opt/homebrew/bin/ninja
+
+# Internal tools: actual Cargo output paths (examples, not fixed defaults).
+object = target/release/mcu-object
+jit = target/release/mcu-jit
+
+# Same source, distinct SDKs. The generator creates required directories.
+bpf_flags = -O2 --target=bpf -Wall -Wno-missing-declarations -fno-stack-protector -g -ffile-prefix-map=.= -fdebug-compilation-dir=. -I include-bpf -include vmlinux.h
+rv32_flags = -O2 --target=riscv32-unknown-none-elf -march=rv32imc -mabi=ilp32 -nostdlib -ffreestanding -fno-builtin -fno-exceptions -fno-rtti -fno-jump-tables -fno-omit-frame-pointer -Wall -Wno-unused-function -g -I include -include vmlinux.h -mno-relax
+
+# 1. Compile the BPF ELF; keep it as an ordinary incremental input.
+rule compile_bpf
+  command = "$clang" $bpf_flags -MD -MF "$intermediate/bpf.d" -MT "$raw_bpf" -c "$source" -o "$raw_bpf"
+  depfile = $intermediate/bpf.d
+  description = BPF COMPILE
+build $raw_bpf: compile_bpf $source | $clang
+
+# 2. Verify the original bytes. Rust owns entry selection, PREVAIL invocation,
+#    timeout, verdict parsing and error handling. It emits the identical ELF
+#    only after PASS; do not move away the input or modify its ELF sections.
+rule verify_bpf
+  command = "$object" bpf verify --checker "$prevail" --input "$raw_bpf" --output "$bpf"
+  description = BPF VERIFY
+build $bpf: verify_bpf $raw_bpf | $prevail $object
+
+# 3. Retain the exact C source. No program-header expansion.
+rule copy_source
+  command = cp "$source" "$program/firewall.c"
+  description = COPY SOURCE
+build $program/firewall.c: copy_source $source || $bpf
+
+# 4. AOT: independently compile C, then link at zero with retained relocations.
+rule compile_rv32
+  command = "$clang" $rv32_flags -MD -MF "$intermediate/rv32.d" -MT "$rv32" -c "$source" -o "$rv32"
+  depfile = $intermediate/rv32.d
+  description = RV32 COMPILE
+build $rv32: compile_rv32 $source | $clang || $bpf
+
+rule link_aot
+  command = "$lld" -m elf32lriscv --no-relax --emit-relocs -T "$linker" "$rv32" -o "$linked"
+  description = AOT LINK
+build $linked: link_aot $rv32 | $linker $lld || $bpf
+
+# 5. Produce the three portable image pairs. BPF metadata is read by the
+#    same shared Rust library, not dumped to another JSON file.
+rule image_aot
+  command = "$object" image aot --bpf "$bpf" --reference "$rv32" --elf "$linked" --output-dir "$images"
+  description = AOT IMAGE
+build $images/llvm-aot.bin $images/llvm-aot.json: image_aot $linked $rv32 $bpf | $object
+
+rule image_jit
+  command = "$jit" compile --input "$bpf" --output-dir "$images"
+  description = JIT IMAGE
+build $images/jit.bin $images/jit.json: image_jit $bpf | $jit
+
+# PR7: rBPF uses the canonical map order and offsets of the AOT layout.
+rule image_rbpf
+  command = "$object" image rbpf --input "$bpf" --map-layout "$images/llvm-aot.json" --output-dir "$images"
+  description = RBPF IMAGE
+build $images/ebpf.bin $images/ebpf.json: image_rbpf $bpf $images/llvm-aot.json | $object
+
+# 6. Report inputs are regular persistent build artifacts. Only wrap raw
+#    JIT/rBPF images for objdump; no duplicate BPF or AOT disassembly ELF.
+rule prepare_disassembly
+  command = "$object" report prepare --image "$image" --layout "$layout" --output $out
+  description = PREPARE DISASSEMBLY $out
+build $listing/jit.elf: prepare_disassembly $images/jit.bin $images/jit.json | $object
+  image = $images/jit.bin
+  layout = $images/jit.json
+build $listing/ebpf.elf: prepare_disassembly $images/ebpf.bin $images/ebpf.json | $object
+  image = $images/ebpf.bin
+  layout = $images/ebpf.json
+
+# Preserve unmodified objdump output. Rust interprets and checks the bytes.
+rule disassemble
+  command = "$objdump" -d -z $isa $in > $out
+  description = DISASSEMBLE $in
+build $listing/bpf.txt: disassemble $bpf | $objdump
+  isa =
+build $listing/aot.txt: disassemble $linked | $objdump
+  isa = --mattr=+m,+c
+build $listing/jit.txt: disassemble $listing/jit.elf | $objdump
+  isa = --mattr=+m,-c
+build $listing/ebpf.txt: disassemble $listing/ebpf.elf | $objdump
+  isa =
+
+# This file describes the current graph's build recipes, not execution history.
+rule recipes
+  command = "$ninja" -f "$graph" -t commands "$images/llvm-aot.bin" "$images/jit.bin" "$images/ebpf.bin" > $out
+  description = BUILD RECIPES
+build $listing/recipes.txt: recipes $graph | $ninja
+
+rule report
+  command = "$object" report generate --program-dir "$program" --linked-aot "$linked" --disassembly-dir "$listing" --recipes "$listing/recipes.txt" --output $out
+  description = REPORT
+build $program/report.md: report $
+    $program/firewall.c $bpf $rv32 $linked $
+    $images/llvm-aot.bin $images/llvm-aot.json $
+    $images/jit.bin $images/jit.json $
+    $images/ebpf.bin $images/ebpf.json $
+    $listing/bpf.txt $listing/aot.txt $listing/jit.txt $listing/ebpf.txt $
+    $listing/recipes.txt | $object
+
+# 7. Preserve the existing machine-readable index. No staging/commit tree.
+rule index
+  command = "$object" index --program-dir "$program" --modes llvm-aot,jit,ebpf --output "$program/index.toml"
+  description = INDEX
+build $program/index.toml: index $
+    $program/firewall.c $bpf $rv32 $program/report.md $
+    $images/llvm-aot.bin $images/llvm-aot.json $
+    $images/jit.bin $images/jit.json $
+    $images/ebpf.bin $images/ebpf.json | $object
+
+build firewall: phony $program/index.toml
+default firewall
