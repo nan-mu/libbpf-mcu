@@ -237,15 +237,15 @@ fn doctor(tools: Tools) -> Result<()> {
             tools.clang.display()
         );
     }
-    for tool in [
-        tools.lld,
-        tools.objdump,
-        tools.ninja,
-        tools.prevail,
-        tools.object,
-        tools.jit,
+    for (tool, flag) in [
+        (tools.lld, "--version"),
+        (tools.objdump, "--version"),
+        (tools.ninja, "--version"),
+        (tools.prevail, "--help"),
+        (tools.object, "--help"),
+        (tools.jit, "--help"),
     ] {
-        let report = verify_tool(&tool, &["--help"])?;
+        let report = verify_tool(&tool, &[flag])?;
         println!(
             "{} {}",
             tool.display(),

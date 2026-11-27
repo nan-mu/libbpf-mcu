@@ -194,11 +194,25 @@ fn level3_real_portable_smoke_and_rejection() {
     assert_eq!(mcu_index::verify_tree(&dir).unwrap().len(), 3);
 }
 
-fn cargo(root: &Path, package: &str) -> Command {
+fn built_binary(root: &Path, package: &str, name: &str) -> PathBuf {
     let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    cmd.current_dir(root)
-        .args(["run", "--quiet", "--locked", "-p", package, "--"]);
-    cmd
+    cmd.current_dir(root).args([
+        "build",
+        "--quiet",
+        "--locked",
+        "-p",
+        package,
+        "--message-format=json",
+    ]);
+    success(&mut cmd)
+        .lines()
+        .find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            (value["target"]["name"] == name)
+                .then(|| value["executable"].as_str().map(PathBuf::from))
+                .flatten()
+        })
+        .unwrap_or_else(|| panic!("Cargo did not produce {name}"))
 }
 
 fn image_bytes(root: &Path, relative: &str) -> Vec<u8> {
@@ -220,6 +234,8 @@ fn level4_archives_and_reference_links() {
     let archives = base.join("archives");
     let unpacked = base.join("unpacked");
     success(&mut build(&root, &built, &[]));
+    let tools = built_binary(&root, "mcu-dev-tools", "tools");
+    let object = built_binary(&root, "mcu-object", "mcu-object");
     let programs = mcu::program_sources(&root).unwrap();
     for source in &programs {
         let name = mcu_image::program_name(source).unwrap();
@@ -229,7 +245,7 @@ fn level4_archives_and_reference_links() {
         );
     }
     success(
-        cargo(&root, "mcu-dev-tools")
+        Command::new(&tools)
             .env("TMPDIR", &sys_temp)
             .args(["release", "prepare", "--build-dir"])
             .arg(&built)
@@ -237,7 +253,7 @@ fn level4_archives_and_reference_links() {
             .arg(&archives),
     );
     success(
-        cargo(&root, "mcu-dev-tools")
+        Command::new(&tools)
             .env("TMPDIR", &sys_temp)
             .args(["release", "verify", "--build-dir"])
             .arg(&built)
@@ -246,7 +262,14 @@ fn level4_archives_and_reference_links() {
             .arg("--unpack-dir")
             .arg(&unpacked),
     );
-    assert!(fs::read_dir(&sys_temp).unwrap().next().is_none());
+    let remaining = fs::read_dir(&sys_temp)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert!(
+        remaining.is_empty(),
+        "release left temporary paths {remaining:?}"
+    );
     let indexes = mcu_index::verify_tree(&unpacked).unwrap();
     assert_eq!(indexes.len(), 12);
     let minimal = base.join("unpacked-binding-input");
@@ -275,7 +298,7 @@ fn level4_archives_and_reference_links() {
                 let bound = base.join("bound.elf");
                 let reference = base.join("ref.elf");
                 success(
-                    cargo(&root, "mcu-object")
+                    Command::new(&object)
                         .args(["bind", "--program-dir"])
                         .arg(&minimal)
                         .args(["--mode", mode.name()])
@@ -284,7 +307,7 @@ fn level4_archives_and_reference_links() {
                         .arg(&bound),
                 );
                 success(
-                    cargo(&root, "mcu-dev-tools")
+                    Command::new(&tools)
                         .args(["reference", "--program-dir"])
                         .arg(&program)
                         .args(["--mode", mode.name()])
@@ -304,6 +327,7 @@ fn level4_archives_and_reference_links() {
         }
     }
     assert_eq!(total, 48);
+    println!("Compared 48 complete bound containers against independent direct links");
 
     let firewall = unpacked.join("firewall");
     let (bin, json) = image_paths(Mode::Aot);
@@ -322,7 +346,7 @@ fn level4_archives_and_reference_links() {
     row.layout = Some(mcu_index::Member::new(&minimal, json).unwrap());
     index.write(&minimal).unwrap();
     let denied = base.join("must-not-deploy.elf");
-    let rejected = cargo(&root, "mcu-object")
+    let rejected = Command::new(&object)
         .args(["bind", "--program-dir"])
         .arg(&minimal)
         .args([
