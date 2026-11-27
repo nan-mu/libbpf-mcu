@@ -203,7 +203,29 @@ fn level3_real_portable_smoke_and_rejection() {
         !dir.join("illegal_header/objects/illegal_header_bpf.o")
             .exists()
     );
-    assert_eq!(mcu_index::verify_tree(&dir).unwrap().len(), 3);
+    // Replace a previously accepted real program with an ELF that PREVAIL
+    // actually lists as two XDP entries.
+    let source = tmp.path().join("just_drop.c");
+    fs::write(&source, "#include <bpf/bpf_helpers.h>\nSEC(\"xdp\") int one(struct xdp_md *ctx) { (void)ctx; return XDP_DROP; }\nSEC(\"xdp1\") int two(struct xdp_md *ctx) { (void)ctx; return XDP_PASS; }\nchar LICENSE[] SEC(\"license\") = \"GPL\";\n").unwrap();
+    let duplicate = build(&root, &dir, &["--inputs", source.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&duplicate.stdout);
+    assert!(
+        !duplicate.status.success()
+            && stdout.contains("expected one XDP entry")
+            && stdout.contains("section=xdp function=one")
+            && stdout.contains("section=xdp1 function=two"),
+        "{stdout}"
+    );
+    assert!(!dir.join("just_drop/index.toml").exists());
+    assert!(!dir.join("just_drop/objects/just_drop_bpf.o").exists());
+    assert!(!dir.join("just_drop/images/jit.bin").exists());
+    assert!(
+        dir.join("intermediates/just_drop/just_drop_bpf.o")
+            .is_file()
+    );
+    assert_eq!(mcu_index::verify_tree(&dir).unwrap().len(), 2);
 }
 
 fn built_binary(root: &Path, package: &str, name: &str) -> PathBuf {
@@ -351,6 +373,26 @@ fn level4_archives_and_reference_links() {
     println!("Compared 48 complete bound containers against independent direct links");
 
     let firewall = unpacked.join("firewall");
+    let mismatched = base.join("mismatched-aot");
+    fs::create_dir(&mismatched).unwrap();
+    let rejected = Command::new(&object)
+        .arg("image-aot")
+        .arg("--program")
+        .arg("firewall")
+        .arg("--input")
+        .arg(firewall.join("objects/firewall_bpf.o"))
+        .arg("--reference")
+        .arg(built.join("just_drop/objects/just_drop_rv32.o"))
+        .arg("--elf")
+        .arg(built.join("intermediates/just_drop/just_drop_rv32.elf"))
+        .arg("--output-dir")
+        .arg(&mismatched)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("missing the BPF map"));
+    assert!(fs::read_dir(&mismatched).unwrap().next().is_none());
+
     let (bin, json) = image_paths(Mode::Aot);
     fs::copy(firewall.join(&bin), minimal.join(&bin)).unwrap();
     fs::copy(firewall.join("index.toml"), minimal.join("index.toml")).unwrap();
@@ -385,4 +427,28 @@ fn level4_archives_and_reference_links() {
         .output()
         .unwrap();
     assert!(!rejected.status.success() && !denied.exists());
+
+    // A consistent tamper of both site lists passes their cross-check.
+    // The full archive verifier must still consult the independent RV32 object.
+    let layout_path = image_paths(Mode::Aot).1;
+    fs::copy(minimal.join(&layout_path), firewall.join(&layout_path)).unwrap();
+    index
+        .mode
+        .iter_mut()
+        .find(|row| row.name == Mode::Aot)
+        .unwrap()
+        .fixup_sites = Some(layout.sites());
+    index.write(&firewall).unwrap();
+    let rejected = Command::new(&object)
+        .args(["verify", "--build-dir"])
+        .arg(&firewall)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("reference object's relocation inventory"),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
 }

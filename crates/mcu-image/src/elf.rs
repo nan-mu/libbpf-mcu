@@ -195,22 +195,23 @@ pub fn aot_payload(
     let map_section = elf.section_by_name(".maps").map(|section| section.index());
     let maps = mcu_bpf::maps(bpf)?
         .into_iter()
-        .filter_map(|(name, definition)| {
-            let symbol = elf.symbols().find(|sym| {
-                map_section.is_some()
-                    && sym.section_index() == map_section
-                    && sym.name() == Ok(&name)
-            })?;
-            Some((|| {
-                Ok(map_record(
-                    name,
-                    definition,
-                    u32::try_from(symbol.address())?
-                        .checked_sub(base)
-                        .context("map before image base")?,
-                    u32::try_from(symbol.size())?,
-                ))
-            })())
+        .map(|(name, definition)| {
+            let symbol = elf
+                .symbols()
+                .find(|sym| {
+                    map_section.is_some()
+                        && sym.section_index() == map_section
+                        && sym.name() == Ok(&name)
+                })
+                .with_context(|| format!("linked ELF is missing the BPF map {name:?}"))?;
+            Ok(map_record(
+                name,
+                definition,
+                u32::try_from(symbol.address())?
+                    .checked_sub(base)
+                    .context("map before image base")?,
+                u32::try_from(symbol.size())?,
+            ))
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((image, regions, maps))

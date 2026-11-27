@@ -8,3 +8,7 @@ tests/unused/bitswap.c
 experiments/exec_bench/bsort.c
 experiments/exec_bench/noop.c
 experiments/exec_bench/copy.c
+experiments/exec_bench/prime.c
+experiments/exec_bench/log2.c
+experiments/exec_bench/fletcher32.c
+experiments/exec_bench/strcmp.c

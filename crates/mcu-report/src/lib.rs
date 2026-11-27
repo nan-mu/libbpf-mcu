@@ -283,3 +283,42 @@ pub fn generate(program_dir: &Path, linked: &Path, listings: &Path, modes: &[Mod
 
 mod verify;
 pub use verify::verify;
+
+#[cfg(test)]
+mod tests {
+    use super::{Code, listing};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn rejects_corrupt_and_incomplete_objdump_sections() {
+        // eBPF EXIT is a single 8-byte instruction with opcode 0x95.
+        let sections = || {
+            BTreeMap::from([(
+                "xdp".into(),
+                Code {
+                    address: 0,
+                    bytes: &[0x95, 0, 0, 0, 0, 0, 0, 0],
+                },
+            )])
+        };
+        let heading = "Disassembly of section xdp:\n";
+        let instruction = "       0:\t95 00 00 00 00 00 00 00\texit\n";
+        let valid = format!("{heading}{instruction}");
+        assert!(
+            listing(&valid, sections(), true)
+                .unwrap()
+                .contains("00000000  95 00")
+        );
+        for malformed in [
+            valid.replace("95 ", "94 "),
+            valid.replace("section xdp", "section extra"),
+            format!("{valid}{heading}{instruction}"),
+            heading.to_owned(),
+        ] {
+            assert!(
+                listing(&malformed, sections(), true).is_err(),
+                "{malformed}"
+            );
+        }
+    }
+}

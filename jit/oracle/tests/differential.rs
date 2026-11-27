@@ -81,6 +81,54 @@ fn exb2_packets(cases: &mut Vec<J>) {
     }
 }
 
+fn exb2_kernel_answers(cases: &mut Vec<J>) {
+    // Known one-round answers from the protocol and small inputs. The two
+    // executors must both match the full expected packet, including digest.
+    let caseset: &[(&str, u32, u32, &[u8], u32, u32)] = &[
+        ("prime", 1, 10, &[], 4, 7),
+        ("log2", 2, 3, &[1, 0, 0, 0, 8, 0, 0, 0, 64, 0, 0, 0], 9, 136),
+        ("fletcher32", 4, 3, &[1, 0, 2], 0x0004_0003, 0),
+        ("strcmp", 6, 2, b"ab\0ac\0", u32::MAX, 2),
+    ];
+    fn field(packet: &mut [u8], at: usize, value: u32) {
+        packet[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for &(name, task, n, input, lo, hi) in caseset {
+        let mut packet = vec![0u8; 8258];
+        packet[0..8].copy_from_slice(b"EXB2\x02\x00\x40\x00");
+        field(&mut packet, 8, task);
+        field(&mut packet, 12, n);
+        field(&mut packet, 16, 1);
+        field(&mut packet, 28, input.len() as u32);
+        field(&mut packet, 36, u32::MAX);
+        packet[64..64 + input.len()].copy_from_slice(input);
+        let mut expected = packet.clone();
+        for (at, value) in [
+            (36, 0),
+            (40, 1),
+            (44, lo),
+            (48, hi),
+            (
+                52,
+                (0x811c_9dc5u32.rotate_left(5) ^ lo).wrapping_add(hi ^ 0x9e37_79b9),
+            ),
+        ] {
+            field(&mut expected, at, value);
+        }
+        run_program(
+            cases,
+            name,
+            "known-answer",
+            &packet,
+            Some(ExpectedPacket {
+                r0: 2,
+                bytes: &expected,
+                array: None,
+            }),
+        );
+    }
+}
+
 fn network_packets(cases: &mut Vec<J>) {
     let fixtures = root().join("../../tests/fixtures/network");
     for &(name, short, len) in NETWORK {
@@ -116,6 +164,7 @@ fn program_suite(cases: &mut Vec<J>) {
         run_program(cases, name, label, &unhex(packet_hex), None);
     }
     exb2_packets(cases);
+    exb2_kernel_answers(cases);
     network_packets(cases);
 }
 
