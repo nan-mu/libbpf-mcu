@@ -297,7 +297,7 @@ fn main() -> Result<()> {
             }
             .run()?;
             for source in &sources {
-                integrity::preflight(&root, &build, source, &modes, &tools, force)?;
+                integrity::preflight(&root, &build, source, &modes, &execute, force)?;
             }
             let execution = execute.run();
             let after = integrity::snapshot(&root, &sources, &modes);

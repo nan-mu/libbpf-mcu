@@ -129,7 +129,7 @@ pub fn preflight(
     build: &Path,
     source: &Path,
     modes: &[Mode],
-    tools: &super::Tools,
+    execute: &mcu::Execute,
     force: bool,
 ) -> Result<()> {
     let name = program_name(source)?;
@@ -145,15 +145,11 @@ pub fn preflight(
         source,
         &root.join("include-bpf"),
     );
-    let bpf_fresh = bpf_deps.as_ref().is_ok_and(|deps| {
-        let mut deps = deps.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        deps.push(&tools.clang);
-        fresh(&raw, &deps)
-    });
-    let mut valid = !force
-        && bpf_fresh
-        && fresh(&bpf, &[&raw, &tools.prevail, &tools.object])
-        && matching(&raw, &bpf);
+    let headers_current = bpf_deps
+        .as_ref()
+        .is_ok_and(|deps| fresh(&raw, &deps.iter().map(PathBuf::as_path).collect::<Vec<_>>()));
+    let mut valid =
+        !force && headers_current && execute.output_current(&bpf) && matching(&raw, &bpf);
     if bpf_deps.is_err() || force {
         remove(&raw)?;
     }

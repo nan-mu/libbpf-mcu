@@ -468,14 +468,17 @@ impl Generate<'_> {
         gate: Option<&Path>,
     ) -> Result<()> {
         use std::fmt::Write;
-        graph.record(&[object, depfile], &[source], &[&self.tools.clang]);
+        let outputs = [object, depfile];
+        let inputs = [source];
+        let tools = [self.tools.clang.as_path()];
+        graph.record(&outputs, &inputs, &tools);
         write!(
             graph,
             "build {} | {}: {rule} {} | {}",
-            paths(&[object])?,
-            paths(&[depfile])?,
-            paths(&[source])?,
-            paths(&[&self.tools.clang])?
+            paths(&outputs[..1])?,
+            paths(&outputs[1..])?,
+            paths(&inputs)?,
+            paths(&tools)?
         )?;
         if let Some(gate) = gate {
             write!(graph, " || {}", paths(&[gate])?)?;

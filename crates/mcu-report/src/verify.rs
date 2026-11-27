@@ -202,3 +202,27 @@ pub fn verify(root: &Path, index: &Index) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    #[test]
+    fn rejects_duplicate_modes_and_unclosed_markdown_fences() {
+        let source = concat!("## Source\n", "```c\n", "int example;\n", "```\n");
+        let recipes = concat!(
+            "## Build recipes\n",
+            "```sh\n",
+            "clang example.c\n",
+            "```\n"
+        );
+
+        let repeated = format!("{source}## RV32IM\n### jit\n### jit\n{recipes}");
+        let error = parse(&repeated).err().expect("duplicate mode accepted");
+        assert!(error.to_string().contains("duplicate report mode jit"));
+
+        let unclosed = format!("{source}{recipes}## eBPF\n### bpf\n```text\n");
+        let error = parse(&unclosed).err().expect("unclosed fence accepted");
+        assert!(error.to_string().contains("unclosed report fence"));
+    }
+}
