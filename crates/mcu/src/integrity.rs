@@ -161,6 +161,9 @@ pub fn preflight(
         remove(&bpf)?;
     }
     if let Ok(index) = Index::read(&program) {
+        if mcu_report::verify(&program, &index).is_err() {
+            remove(&program.join("report.md"))?;
+        }
         if !matching(source, &program.join(format!("{name}.c"))) {
             valid = false;
             remove(&raw)?;
@@ -184,6 +187,12 @@ pub fn preflight(
         }
     } else {
         valid = false;
+        // Without a trustworthy index the cached formal files have no byte identity.
+        if index_path.exists() || program.join("report.md").exists() {
+            for path in [&raw, &native, &bpf, &program.join("report.md")] {
+                remove(path)?;
+            }
+        }
     }
     if force && (modes.contains(&Mode::Aot) || modes.contains(&Mode::Ebpf)) {
         remove(&native)?;
@@ -199,7 +208,7 @@ pub fn postflight(
     build: &Path,
     source: &Path,
     modes: &[Mode],
-    tools: &super::Tools,
+    execute: &mcu::Execute,
     inputs_unchanged: bool,
 ) -> Result<()> {
     let name = program_name(source)?;
@@ -216,48 +225,25 @@ pub fn postflight(
     let gate_current = deps
         .is_ok_and(|deps| fresh(&raw, &deps.iter().map(PathBuf::as_path).collect::<Vec<_>>()))
         && matching(&raw, &bpf)
-        && fresh(&bpf, &[&tools.prevail, &tools.object])
+        && execute.output_current(&bpf)
         && matching(source, &program.join(format!("{name}.c")));
     let mut stale = Vec::new();
     if gate_current && inputs_unchanged {
-        let aot_dir = if modes.contains(&Mode::Aot) {
-            program.join("images")
-        } else {
-            private.clone()
-        };
-        let aot_layout = aot_dir.join("llvm-aot.json");
-        let linked = private.join(format!("{name}_rv32.elf"));
         let native = private.join(format!("{name}_rv32.raw.o"));
-        let reference = if modes.contains(&Mode::Aot) {
-            program.join(rv32_path(name))
-        } else {
-            private.join(format!("{name}_rv32.o"))
-        };
         let rv_deps = private.join("rv32.d");
-        let native_current = modes.contains(&Mode::Aot) || modes.contains(&Mode::Ebpf);
-        let canonical_aot = native_current
-            && mcu_deps::dependencies(&rv_deps, root, source, &root.join("include")).is_ok_and(
-                |deps| {
-                    let mut deps = deps.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-                    deps.push(&tools.clang);
-                    fresh(&native, &deps)
-                },
-            )
-            && matching(&native, &reference)
-            && fresh(&reference, &[&native, &rv_deps, &tools.object])
-            && fresh(&linked, &[&reference, &tools.lld, &private.join("zero.ld")])
-            && fresh(&aot_layout, &[&linked, &bpf, &tools.object]);
+        let native_current = mcu_deps::dependencies(&rv_deps, root, source, &root.join("include"))
+            .is_ok_and(|deps| {
+                fresh(
+                    &native,
+                    &deps.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+                )
+            });
         for &mode in modes {
             let (image, layout) = image_paths(mode);
-            let current = [&program.join(image), &program.join(layout)]
-                .into_iter()
-                .all(|path| match mode {
-                    Mode::Aot => {
-                        canonical_aot && fresh(path, &[&linked, &reference, &bpf, &tools.object])
-                    }
-                    Mode::Jit => fresh(path, &[&bpf, &tools.jit]),
-                    Mode::Ebpf => canonical_aot && fresh(path, &[&bpf, &aot_layout, &tools.object]),
-                });
+            let current = [image, layout]
+                .iter()
+                .all(|path| execute.output_current(&program.join(path)))
+                && (mode == Mode::Jit || native_current);
             if !current {
                 stale.push(mode);
             }
@@ -270,10 +256,7 @@ pub fn postflight(
             "wrong built modes"
         );
         index.verify(&program)?;
-        ensure!(
-            program.join("report.md").metadata()?.len() != 0,
-            "missing report"
-        );
+        mcu_report::verify(&program, &index)?;
         Ok(())
     });
     if inputs_unchanged && gate_current && stale.is_empty() && index.is_ok() {

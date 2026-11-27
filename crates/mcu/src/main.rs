@@ -316,7 +316,7 @@ fn main() -> Result<()> {
                         .eq(after.iter().filter(|(path, _)| used(path)))
                 });
                 if let Err(error) =
-                    integrity::postflight(&root, &build, source, &modes, &tools, unchanged)
+                    integrity::postflight(&root, &build, source, &modes, &execute, unchanged)
                 {
                     invalid.push(format!("{}: {error:#}", source.display()));
                 }

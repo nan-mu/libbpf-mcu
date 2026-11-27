@@ -323,10 +323,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "fs2",
  "mcu-deps",
  "mcu-image",
  "mcu-index",
+ "mcu-project",
+ "mcu-report",
  "serde_json",
  "tempfile",
 ]
@@ -355,10 +356,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "mcu",
  "mcu-image",
  "mcu-index",
  "mcu-jit",
+ "mcu-project",
+ "mcu-report",
  "serde",
  "serde_json",
  "tempfile",
@@ -419,6 +421,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "xpost-elf",
+]
+
+[[package]]
+name = "mcu-project"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fs2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

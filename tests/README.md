@@ -12,4 +12,4 @@ Production programs live under `experiments/`. This directory contains explicit 
 
 Use `./mcu test --all` for all layers. Run the [independent JIT Oracle](../jit/oracle/README.md) with `cargo test --locked -p xpost-jit-oracle --test differential`. The Oracle writes per-case results and distinguishes unsupported and inconclusive outcomes from passes.
 
-`jit/scripts/check-xdp.sh` runs the JIT fixture checks with PREVAIL. For optional Sail diagnostics, `linker/sail/build.sh source.c entry_symbol` links a selected C fixture for the simulator. `cargo run --locked -p mcu-dev-tools -- stack-budget --help` documents the stack estimate CLI.
+`sh jit/scripts/check-xdp.sh` runs the JIT fixture checks with PREVAIL. For optional Sail diagnostics, `linker/sail/build.sh source.c entry_symbol` links a selected C fixture for the simulator. `cargo run --locked -p mcu-dev-tools -- stack-budget --help` documents the stack estimate CLI.

@@ -76,6 +76,13 @@ fn level2_incremental_gate_repairs_corruption_and_refuses_old_graph() {
         report.contains("DISASSEMBLE") && report.contains("REPORT") && report.contains("INDEX")
     );
     assert!(!report.contains("BPF COMPILE") && !report.contains("JIT IMAGE"));
+    let report_path = formal.join("report.md");
+    fs::write(&report_path, "forged nonempty report\n").unwrap();
+    let repaired = success(&mut build());
+    assert!(repaired.contains("REPORT") && !repaired.contains("JIT IMAGE"));
+    let report = fs::read_to_string(&report_path).unwrap();
+    assert!(report.contains("## RV32IM\n\n### jit"));
+    assert!(report.contains("## RV32IMC\n\n### llvm-aot"));
     let jit = formal.join("images/jit.bin");
     let original_jit = fs::read(&jit).unwrap();
     fs::write(&jit, b"corrupt").unwrap();
@@ -92,6 +99,11 @@ fn level2_incremental_gate_repairs_corruption_and_refuses_old_graph() {
     fs::remove_file(&raw).unwrap();
     let rebuilt = success(&mut build());
     assert!(rebuilt.contains("BPF COMPILE") && rebuilt.contains("BPF VERIFY"));
+    fs::write(&index, "not a program index").unwrap();
+    fs::write(&jit, "untrusted cached image").unwrap();
+    let repaired = success(&mut build());
+    assert!(repaired.contains("BPF COMPILE") && repaired.contains("BPF VERIFY"));
+    assert_eq!(fs::read(&jit).unwrap(), original_jit);
     let preserved = fs::read(dir.join("build.ninja")).unwrap();
     let source = root.join("experiments/firewall/firewall.c");
     let dup = tmp.path().join("firewall.c");
@@ -262,6 +274,15 @@ fn level4_archives_and_reference_links() {
             .arg("--unpack-dir")
             .arg(&unpacked),
     );
+    let ledger: serde_json::Value =
+        serde_json::from_slice(&fs::read(archives.join("release.json")).unwrap()).unwrap();
+    for name in [
+        "clang", "lld", "objdump", "ninja", "prevail", "object", "jit",
+    ] {
+        let field = &ledger["toolchain"][name];
+        assert_eq!(field["sha256"].as_str().unwrap().len(), 64);
+        assert!(Path::new(field["path"].as_str().unwrap()).is_absolute());
+    }
     let remaining = fs::read_dir(&sys_temp)
         .unwrap()
         .map(|entry| entry.unwrap().path())

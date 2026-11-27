@@ -191,7 +191,12 @@ fn fenced(output: &mut String, text: &str, language: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn generate(program_dir: &Path, linked: &Path, listings: &Path, modes: &[Mode]) -> Result<()> {
+pub fn render(
+    program_dir: &Path,
+    linked: &Path,
+    listings: &Path,
+    modes: &[Mode],
+) -> Result<String> {
     let program = directory_name(program_dir)?;
     let source = fs::read_to_string(program_dir.join(format!("{program}.c")))?;
     let bpf = fs::read(program_dir.join(bpf_path(program)))?;
@@ -249,8 +254,10 @@ pub fn generate(program_dir: &Path, linked: &Path, listings: &Path, modes: &[Mod
             Mode::Jit => "Host JIT produces RV32IM with the ILP32 ABI. Linked at zero.",
             Mode::Ebpf => "Little-endian rBPF bytecode with canonical map indices.",
         };
-        if mode == Mode::Aot || (mode == Mode::Jit && !modes.contains(&Mode::Aot)) {
-            report.push_str("## RV32IMC\n\n");
+        match mode {
+            Mode::Aot => report.push_str("## RV32IMC\n\n"),
+            Mode::Jit => report.push_str("## RV32IM\n\n"),
+            Mode::Ebpf => {}
         }
         writeln!(report, "### {mode}\n\n{description}\n")?;
         let instructions = listing(
@@ -266,5 +273,13 @@ pub fn generate(program_dir: &Path, linked: &Path, listings: &Path, modes: &[Mod
         &fs::read_to_string(listings.join("recipes.txt"))?,
         "sh",
     )?;
+    Ok(report)
+}
+
+pub fn generate(program_dir: &Path, linked: &Path, listings: &Path, modes: &[Mode]) -> Result<()> {
+    let report = render(program_dir, linked, listings, modes)?;
     write_atomic(&program_dir.join("report.md"), report.as_bytes())
 }
+
+mod verify;
+pub use verify::verify;

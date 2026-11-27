@@ -13,7 +13,8 @@ anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 serde.workspace = true
 serde_json.workspace = true
-mcu = { path = "../crates/mcu" }
+mcu-project = { path = "../crates/mcu-project" }
+mcu-report.workspace = true
 mcu-image.workspace = true
 mcu-index.workspace = true
 mcu-jit = { path = "../crates/mcu-jit" }

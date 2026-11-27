@@ -228,7 +228,7 @@ fn check_cmd(args: impl Iterator<Item = String>) -> Result<u8, String> {
 
 fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
     let text: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err("packet hex has an odd length".into());
     }
     (0..text.len())

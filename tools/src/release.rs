@@ -41,7 +41,7 @@ struct Ledger {
 }
 
 fn programs(root: &Path) -> Result<BTreeSet<String>> {
-    let sources = mcu::program_sources(root)?;
+    let sources = mcu_project::program_sources(root)?;
     let names = sources
         .iter()
         .map(|path| Ok(program_name(path)?.to_owned()))
@@ -105,6 +105,7 @@ fn require_program(root: &Path, program: &str) -> Result<Index> {
     index
         .verify(root)
         .with_context(|| format!("verify {program}"))?;
+    mcu_report::verify(root, &index).with_context(|| format!("verify {program} report"))?;
     ensure!(
         index.mode.len() == 3 && index.mode.iter().all(|row| row.role == row.name.role()),
         "{program} must contain all three portable modes"
@@ -359,7 +360,7 @@ fn publish_local(source: &Path, destination: &Path) -> Result<()> {
 
 pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
     let build = build.canonicalize()?;
-    let _lock = mcu::lock_build(&build)?;
+    let _lock = mcu_project::lock_build(&build)?;
     ensure!(
         !destination.exists() && !destination.starts_with(&build),
         "archive directory must be new and outside the build root"
@@ -372,7 +373,7 @@ pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
     for program in &names {
         let path = build.join(program);
         let index = require_program(&path, program)?;
-        let source = mcu::program_sources(root)?
+        let source = mcu_project::program_sources(root)?
             .into_iter()
             .find(|p| program_name(p).ok() == Some(program))
             .context("missing source")?;
@@ -396,13 +397,27 @@ pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
         Some(&build),
         None,
     )?;
-    let graph = fs::read(build.join("build.ninja"))?;
-    let toolchain = BTreeMap::from([
-        ("build_graph_sha256".to_owned(), sha256_hex(&graph).into()),
+    let graph = fs::read_to_string(build.join("build.ninja"))?;
+    let tools = mcu_project::Tools::from_graph(&graph)?;
+    let mut toolchain = BTreeMap::from([
+        (
+            "build_graph_sha256".to_owned(),
+            sha256_hex(graph.as_bytes()).into(),
+        ),
         (
             "rustc".to_owned(),
             stdout(
                 Command::new("rustc")
+                    .env("TMPDIR", temp.path())
+                    .arg("--version"),
+            )?
+            .trim()
+            .into(),
+        ),
+        (
+            "cargo".to_owned(),
+            stdout(
+                Command::new("cargo")
                     .env("TMPDIR", temp.path())
                     .arg("--version"),
             )?
@@ -419,6 +434,12 @@ pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
                 .into(),
         ),
     ]);
+    for (name, path) in tools.inputs() {
+        toolchain.insert(name.to_owned(), serde_json::json!({
+            "path": path,
+            "sha256": sha256_hex(&fs::read(path).with_context(|| format!("hash resolved tool {}", path.display()))?),
+        }));
+    }
     ensure!(
         clean_commit(root, temp.path())? == commit,
         "checkout changed during archive preparation"
@@ -437,7 +458,7 @@ pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
 
 pub fn verify(root: &Path, archives: &Path, unpacked: &Path, build: Option<&Path>) -> Result<()> {
     let build = build.map(Path::canonicalize).transpose()?;
-    let _lock = build.as_deref().map(mcu::lock_build).transpose()?;
+    let _lock = build.as_deref().map(mcu_project::lock_build).transpose()?;
     let archives = archives.canonicalize()?;
     let ledger: Ledger = serde_json::from_slice(&fs::read(contained(&archives, LEDGER)?)?)?;
     ensure!(

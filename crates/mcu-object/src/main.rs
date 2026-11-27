@@ -223,6 +223,13 @@ fn main() -> Result<()> {
         } => Index::generate(&program_dir, &modes(&selected)?)?.write(&program_dir),
         Action::Verify { build_dir } => {
             for index in verify_tree(&build_dir)? {
+                let dir = if build_dir.join("index.toml").is_file() {
+                    build_dir.clone()
+                } else {
+                    build_dir.join(&index.program)
+                };
+                mcu_report::verify(&dir, &index)
+                    .with_context(|| format!("verify {} report", index.program))?;
                 println!(
                     "{}: {} indexed modes verified",
                     index.program,
