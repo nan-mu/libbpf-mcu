@@ -4,6 +4,7 @@ use std::process::Command;
 
 #[test]
 fn a_success_exit_without_a_pass_withdraws_the_previously_published_object() {
+    // PREVAIL's exit code alone cannot authorize the public output.
     let dir = tempfile::tempdir().unwrap();
     let raw = dir.path().join("raw.o");
     let published = dir.path().join("accepted.o");

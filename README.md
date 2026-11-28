@@ -9,13 +9,15 @@ Install Cargo and Rust, Ninja, LLVM with the BPF and RISC-V backends, and LLD. T
 Initialize the pinned PREVAIL submodule and build it using its [build instructions](prevail/README.md#building). The default verifier is `prevail/bin/prevail`. Set `PREVAIL` to use an existing executable. Cargo fetches XPOST dependencies at the revision pinned in `Cargo.lock`.
 
 ```sh
-./mcu doctor
-./mcu build
-./mcu build -c firewall --bpf-only
-./mcu build -c just_tx --modes llvm-aot,jit
+cargo run --locked -p mcu -- doctor
+cargo run --locked -p mcu -- build
+cargo run --locked -p mcu -- build -c firewall --bpf-only
+cargo run --locked -p mcu -- build -c just_tx --modes llvm-aot,jit
 ```
 
-A default build produces the three portable modes for all 12 programs under `experiments/`. Use `-c STEM` for a selected program or `--inputs FILE ...` for explicit C sources. `--force` rebuilds the selected programs. `--build-dir DIR` selects the output root and defaults to `build/` inside the checkout. `./mcu clean --build-dir DIR` removes that output root. The build runs Ninja from the checkout root, including when you invoke the script from another directory.
+A default build produces the three portable modes for all 12 programs under `experiments/`. Use `-c STEM` for a selected program or `--inputs FILE ...` for explicit C sources. `--force` rebuilds the selected programs. `--build-dir DIR` selects the output root and defaults to `build/` inside the checkout. See [output directory ownership](docs/artifacts.md#build-and-clean) before reusing a directory.
+
+From another working directory, pass `--manifest-path /path/to/libbpf-mcu/Cargo.toml` to `cargo run`. Ninja runs from the checkout root. Relative `--build-dir` and `--inputs` paths resolve from the invocation directory.
 
 Inspect the generated graph and the verified program index with these commands.
 
@@ -30,12 +32,10 @@ See the [artifact and release reference](docs/artifacts.md), [architecture map](
 ## Tests
 
 ```sh
-./mcu test
-./mcu test --level 3
-./mcu test --all
+cargo test --locked --workspace --exclude xpost-jit-oracle
 ```
 
-The default runs fast Rust tests. See the [test guide](tests/README.md) for the full matrix, native reference comparisons and Oracle invocation.
+See the [test guide](tests/README.md) for the real toolchain tests, full matrix, native reference comparisons and Oracle.
 
 ## License
 

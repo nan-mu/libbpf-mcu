@@ -404,6 +404,8 @@ dependencies = [
  "clap",
  "mcu-bpf",
  "mcu-image",
+ "mcu-project",
+ "tempfile",
  "xpost-jit",
 ]
 

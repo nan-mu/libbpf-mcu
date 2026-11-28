@@ -3,6 +3,8 @@ use xpost_elf::{ImageMetadataV0, build_container};
 
 #[test]
 fn scan_reports_verified_metadata_and_keeps_silent_default() {
+    // Exercise the public CLI's exit status, silent default and JSON output
+    // using known metadata, then confirm it rejects non-container bytes.
     let metadata = ImageMetadataV0 {
         slot_address: 0x2000,
         helper_address: 0x1000,

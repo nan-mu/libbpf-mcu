@@ -1,6 +1,7 @@
 mod diagnostics;
 mod reference;
 mod release;
+mod sail;
 
 use std::{
     fs,
@@ -44,6 +45,19 @@ enum Action {
         slot_length: Option<u32>,
         #[arg(long, required_unless_present = "firmware", value_parser = number)]
         helper_address: Option<u32>,
+    },
+    /// Link a C program and the HTIF runtime for the Sail RV32 simulator.
+    SailImage {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long, default_value = "xdp_prog1")]
+        entry: String,
+        #[arg(long)]
+        work_dir: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, env = "LIBBPF_MCU_CLANG", default_value = "clang")]
+        clang: PathBuf,
     },
     #[command(flatten)]
     Diagnostic(diagnostics::Action),
@@ -101,6 +115,13 @@ fn main() -> Result<()> {
         .join("..")
         .canonicalize()?;
     match Cli::parse().command {
+        Action::SailImage {
+            source,
+            entry,
+            work_dir,
+            output,
+            clang,
+        } => sail::link(&root, &source, &entry, &work_dir, output.as_deref(), &clang),
         Action::Release { command } => match command {
             ReleaseAction::Prepare {
                 build_dir,

@@ -11,10 +11,10 @@ The oracle uses the rBPF interpreter pinned in the workspace lockfile. Its execu
 ## Run
 
 ```sh
-cargo test --manifest-path jit/oracle/Cargo.toml --release -- --nocapture
+cargo test --locked -p xpost-jit-oracle --test differential -- --nocapture
 ```
 
-`build.rs` compiles the programs listed in `jit/scripts/xdp-sources.txt` with
+`build.rs` compiles the Oracle's fixed C input set into Cargo's output directory with
 clang (`/opt/homebrew/opt/llvm/bin/clang`, override with `CLANG`). The test writes
 `jit/oracle/results.json` and exits non-zero if any case fails.
 
@@ -38,7 +38,8 @@ ALU32 mod/div-by-zero question (see `NOTES.md` F2).
 Read `results.json` for each run's case counts and statuses. The baseline
 includes an open ALU32 mod/div-by-zero disagreement about the destination's
 high 32 bits. The `modzero` example traces it in the seeded cases. See
-`NOTES.md` F2. With overflow checks enabled, rbpf's `NEG64` panics on
+`NOTES.md` F2. The default test profile produced 27 failures and 523 unsupported
+cases at the PR8 review baseline. With overflow checks enabled, rbpf's `NEG64` panics on
 `i64::MIN` and those cases are recorded as unsupported.
 
 ## What is compared

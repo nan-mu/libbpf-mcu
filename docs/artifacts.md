@@ -41,7 +41,7 @@ Each program has one `report.md` with the source once and listings for the built
 
 ## Portable image layout
 
-`./mcu build` produces the release matrix without firmware or a target layout. The programs are `firewall`, `just_drop`, `just_tx`, `noop`, `prime`, `log2`, `copy`, `fletcher32`, `bsort`, `strcmp`, `case_swap` and `case_mark`. XPOST supplies HAL.
+`cargo run --locked -p mcu -- build` produces the release matrix without firmware or a target layout. The programs are `firewall`, `just_drop`, `just_tx`, `noop`, `prime`, `log2`, `copy`, `fletcher32`, `bsort`, `strcmp`, `case_swap` and `case_mark`. XPOST supplies HAL.
 
 Each layout is a UTF-8 JSON object with `schema = "libbpf-mcu.portable-image.v1"` and the `program` and `mode` from the index.
 
@@ -73,6 +73,12 @@ The binder checks the range, alignment, helper disjointness, map addresses and s
 
 Use `cargo run --locked -p mcu-dev-tools -- reference --program-dir "$unpacked" --mode llvm-aot --firmware "$firmware" --work-dir "$build/intermediates/reference" --output "$reference"` to generate an independent direct link. Select `--mode jit` to compile and link the original eBPF with the host JIT.
 
+## Build and clean
+
+Use a new or empty output directory for the first `cargo run --locked -p mcu -- build`. The default is `build/` in the checkout. The build writes a `.mcu-build` marker tied to the checkout and directory, so subsequent builds and retries may reuse it even if the first run stopped before writing `build.ninja`. Choose a fresh directory or move an older unmanaged build aside before rebuilding.
+
+`cargo run --locked -p mcu -- clean --build-dir DIR` removes the whole owned output tree, including private intermediates. Keep personal files and Cargo caches outside that tree. Build and clean reject unrelated nonempty directories, direct symlinks, Git metadata, checkout content and configured Cargo target directories. Clean also refuses a tree containing a nested Git directory or a tagged cache. An absent or empty unowned directory requires no cleanup.
+
 ## Publish program artifacts
 
 An explicit request to publish the current `nan-mu/libbpf-mcu` `main` authorizes the agent to build, tag, upload and publish the GitHub Release. The required release matrix is the 12 programs above with all three modes, for 36 deployment inputs. Keep the v3 program index and the [portable members](#program-layout).
@@ -81,14 +87,14 @@ An explicit request to publish the current `nan-mu/libbpf-mcu` `main` authorizes
 2. **Build, archive and verify the batch locally.** In that worktree run the following with `$archives` set to a new absolute directory outside the checkout. Build the no-argument release matrix first. Release preparation verifies the 12×3 matrix, extracts and validates each archive, and compares the extracted files with the build. Any failed check stops preparation before tagging or uploading.
 
    ```sh
-   ./mcu build
+   cargo run --locked -p mcu -- build
    cargo run --locked -p mcu-object -- verify --build-dir build
    cargo run --locked -p mcu-dev-tools -- release prepare --archive-dir "$archives"
    cargo run --locked -p mcu-dev-tools -- release verify --archive-dir "$archives" --unpack-dir "$unpacked_batch"
    ```
 
-   `$unpacked_batch` must be a new directory. Keep the 12 verified `<program>.7z` files, and `release.json` for retries. The ledger names each asset and records its archive digest, program paths, member digests and lengths, mode records, build commit and toolchain. Use `tools release verify` again before resuming any upload. Add `--build-dir build` to also compare to the build tree. Each asset name equals its archive filename.
-3. **Create or resume a draft.** Hold a lock for this repository on the publishing machine through draft discovery, upload and publication. Recheck the remote `main` SHA, the clean worktree and the ledger's commit. Look up tags and Releases for the commit and reuse the matching draft when unambiguous. Run `tag=$(cargo run --locked -p mcu-dev-tools -- release next-tag --commit "$sha")` to resolve the current `v0.1` series. A new allocation increments the maximum decimal patch in that series, starting at `v0.1.0` when the series is empty. Save the pinned SHA and allocated tag alongside the verified batch. On retry, pass `--allocated "$tag"`. If another commit has claimed that ref, the command refreshes the remote tag list and returns the next numeric patch. Verify the tag's resolved commit before creating a draft.
+   `$unpacked_batch` must be a new directory. Keep the 12 verified `<program>.7z` files and `release.json` for retries. The ledger records each archive's digest, program paths, member digests and lengths, and mode records. Preparation checks that the indexed C sources match the clean checkout. In ledger v2, `archive_preparation` records the checkout commit, current graph digest, paths and digests of tools named by that graph, and preparation host-tool versions. Those values are observed during archive preparation. The ledger makes no attestation about the checkout, SDK headers, graph or tools used to produce historical build outputs. The fresh pinned build in step 1 establishes that procedure for formal publication. `tools release verify` verifies archive contents and accepts v1 and v2 ledgers. Add `--build-dir build` to also compare to the build tree.
+3. **Create or resume a draft.** Hold a lock for this repository on the publishing machine through draft discovery, upload and publication. Recheck the remote `main` SHA, the clean pinned worktree and the checkout commit observed during preparation. Look up tags and Releases for the commit and reuse the matching draft when unambiguous. Run `tag=$(cargo run --locked -p mcu-dev-tools -- release next-tag --commit "$sha")` to resolve the current `v0.1` series. A new allocation increments the maximum decimal patch in that series, starting at `v0.1.0` when the series is empty. Save the pinned SHA and allocated tag alongside the verified batch. On retry, pass `--allocated "$tag"`. If another commit has claimed that ref, the command refreshes the remote tag list and returns the next numeric patch. Verify the tag's resolved commit before creating a draft.
 
    Create the tag ref if it is absent and the draft if it does not already exist.
 

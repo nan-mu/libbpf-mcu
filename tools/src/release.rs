@@ -10,7 +10,8 @@ use mcu_image::{Layout, Mode, program_name, sha256_hex, write_atomic};
 use mcu_index::{Deployment, Index, Member, bpf_path, contained, image_paths, rv32_path};
 use serde::{Deserialize, Serialize};
 
-const SCHEMA: &str = "libbpf-mcu.release.v1";
+const SCHEMA: &str = "libbpf-mcu.release.v2";
+const LEGACY_SCHEMA: &str = "libbpf-mcu.release.v1";
 const LEDGER: &str = "release.json";
 
 #[derive(Deserialize, Eq, PartialEq, Serialize)]
@@ -33,11 +34,32 @@ struct Archive {
 }
 
 #[derive(Deserialize, Serialize)]
-struct Ledger {
+struct Ledger<T> {
     schema: String,
-    commit: String,
-    toolchain: BTreeMap<String, serde_json::Value>,
+    #[serde(flatten)]
+    metadata: T,
     archives: Vec<Archive>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Preparation {
+    checkout_commit: String,
+    graph_sha256: String,
+    graph_tools: BTreeMap<String, ObservedTool>,
+    host_tools: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ObservedTool {
+    path: std::path::PathBuf,
+    sha256: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum LedgerMetadata {
+    Current { archive_preparation: Preparation },
+    Legacy { commit: String },
 }
 
 fn programs(root: &Path) -> Result<BTreeSet<String>> {
@@ -399,11 +421,7 @@ pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
     )?;
     let graph = fs::read_to_string(build.join("build.ninja"))?;
     let tools = mcu_project::Tools::from_graph(&graph)?;
-    let mut toolchain = BTreeMap::from([
-        (
-            "build_graph_sha256".to_owned(),
-            sha256_hex(graph.as_bytes()).into(),
-        ),
+    let host_tools = BTreeMap::from([
         (
             "rustc".to_owned(),
             stdout(
@@ -434,11 +452,17 @@ pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
                 .into(),
         ),
     ]);
+    let mut graph_tools = BTreeMap::new();
     for (name, path) in tools.inputs() {
-        toolchain.insert(name.to_owned(), serde_json::json!({
-            "path": path,
-            "sha256": sha256_hex(&fs::read(path).with_context(|| format!("hash resolved tool {}", path.display()))?),
-        }));
+        let bytes =
+            fs::read(path).with_context(|| format!("hash resolved tool {}", path.display()))?;
+        graph_tools.insert(
+            name.to_owned(),
+            ObservedTool {
+                path: path.to_owned(),
+                sha256: sha256_hex(&bytes),
+            },
+        );
     }
     ensure!(
         clean_commit(root, temp.path())? == commit,
@@ -446,8 +470,14 @@ pub fn prepare(root: &Path, build: &Path, destination: &Path) -> Result<()> {
     );
     let ledger = Ledger {
         schema: SCHEMA.to_owned(),
-        commit,
-        toolchain,
+        metadata: LedgerMetadata::Current {
+            archive_preparation: Preparation {
+                checkout_commit: commit,
+                graph_sha256: sha256_hex(graph.as_bytes()),
+                graph_tools,
+                host_tools,
+            },
+        },
         archives,
     };
     let mut json = serde_json::to_vec_pretty(&ledger)?;
@@ -460,15 +490,24 @@ pub fn verify(root: &Path, archives: &Path, unpacked: &Path, build: Option<&Path
     let build = build.map(Path::canonicalize).transpose()?;
     let _lock = build.as_deref().map(mcu_project::lock_build).transpose()?;
     let archives = archives.canonicalize()?;
-    let ledger: Ledger = serde_json::from_slice(&fs::read(contained(&archives, LEDGER)?)?)?;
+    let ledger: Ledger<LedgerMetadata> =
+        serde_json::from_slice(&fs::read(contained(&archives, LEDGER)?)?)?;
+    let commit = match (&*ledger.schema, &ledger.metadata) {
+        (
+            SCHEMA,
+            LedgerMetadata::Current {
+                archive_preparation,
+            },
+        ) => &archive_preparation.checkout_commit,
+        (LEGACY_SCHEMA, LedgerMetadata::Legacy { commit }) => commit,
+        _ => bail!("invalid release ledger schema or metadata"),
+    };
     ensure!(
-        ledger.schema == SCHEMA
-            && ledger.commit.len() == 40
-            && ledger
-                .commit
+        commit.len() == 40
+            && commit
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
-        "invalid release provenance"
+        "invalid checkout commit in release ledger"
     );
     let names = programs(root)?;
     let entries = ledger

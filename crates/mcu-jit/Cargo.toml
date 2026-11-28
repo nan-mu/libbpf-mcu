@@ -10,3 +10,7 @@ clap.workspace = true
 mcu-bpf.workspace = true
 mcu-image.workspace = true
 xpost-jit.workspace = true
+
+[dev-dependencies]
+mcu-project = { path = "../mcu-project" }
+tempfile = "3"

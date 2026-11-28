@@ -12,8 +12,8 @@ fn root() -> PathBuf {
         .unwrap()
 }
 
-fn build(root: &Path, dir: &Path, extra: &[&str]) -> Command {
-    let mut cmd = Command::new(root.join("mcu"));
+fn build(dir: &Path, extra: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mcu"));
     cmd.current_dir(dir.parent().unwrap())
         .arg("build")
         .args(extra)
@@ -47,6 +47,8 @@ fn mock(dir: &Path, script: &str) -> PathBuf {
 #[test]
 #[ignore = "L2 requires Ninja and Clang"]
 fn level2_incremental_gate_repairs_corruption_and_refuses_old_graph() {
+    // The accepted object is an exact copy of the raw compiler output. Ninja
+    // should repair just a damaged branch and skip execution on invalid input.
     let root = root();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("build with spaces");
@@ -55,7 +57,7 @@ fn level2_incremental_gate_repairs_corruption_and_refuses_old_graph() {
         "#!/bin/sh\nif [ \"$1\" = -l ]; then echo '# section=xdp function=firewall'; else echo 'PASS: xdp/firewall'; fi\n",
     );
     let build = || {
-        let mut cmd = build(&root, &dir, &["-c", "firewall"]);
+        let mut cmd = build(&dir, &["-c", "firewall"]);
         cmd.env("PREVAIL", &checker);
         cmd
     };
@@ -112,7 +114,7 @@ fn level2_incremental_gate_repairs_corruption_and_refuses_old_graph() {
     let ninja = tmp.path().join("fake ninja");
     fs::write(&ninja, "#!/bin/sh\ntouch \"$NINJA_SENTINEL\"\n").unwrap();
     fs::set_permissions(&ninja, fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(root.join("mcu"))
+    let output = Command::new(env!("CARGO_BIN_EXE_mcu"))
         .args(["build", "--inputs"])
         .arg(source)
         .arg(dup)
@@ -146,11 +148,12 @@ fn level2_incremental_gate_repairs_corruption_and_refuses_old_graph() {
 #[test]
 #[ignore = "L3 requires real LLVM, PREVAIL and Ninja"]
 fn level3_real_portable_smoke_and_rejection() {
+    // Real PREVAIL must accept the normal matrix subset and refuse invalid BPF
+    // while withdrawing every deployable output for the rejected program.
     let root = root();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("smoke");
     success(&mut build(
-        &root,
         &dir,
         &["-c", "just_drop", "-c", "firewall", "-c", "copy"],
     ));
@@ -161,13 +164,9 @@ fn level3_real_portable_smoke_and_rejection() {
     }
     for fixture in ["xdp_oob_packet", "xdp_null_map_deref", "xdp_uninit_key"] {
         let source = root.join("tests/unused").join(format!("{fixture}.c"));
-        let output = build(
-            &root,
-            &dir,
-            &["--bpf-only", "--inputs", source.to_str().unwrap()],
-        )
-        .output()
-        .unwrap();
+        let output = build(&dir, &["--bpf-only", "--inputs", source.to_str().unwrap()])
+            .output()
+            .unwrap();
         assert!(!output.status.success(), "{fixture} must fail verification");
         assert!(
             String::from_utf8_lossy(&output.stdout).contains("PREVAIL"),
@@ -190,13 +189,9 @@ fn level3_real_portable_smoke_and_rejection() {
     let c = tmp.path().join("illegal_header.c");
     fs::write(tmp.path().join("private.h"), "#define ACTION XDP_DROP\n").unwrap();
     fs::write(&c, "#include <bpf/bpf_helpers.h>\n#include \"private.h\"\nSEC(\"xdp\") int entry(struct xdp_md *ctx) { (void)ctx; return ACTION; }\nchar LICENSE[] SEC(\"license\") = \"GPL\";\n").unwrap();
-    let output = build(
-        &root,
-        &dir,
-        &["--bpf-only", "--inputs", c.to_str().unwrap()],
-    )
-    .output()
-    .unwrap();
+    let output = build(&dir, &["--bpf-only", "--inputs", c.to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("undeclared dependency"));
     assert!(
@@ -207,7 +202,7 @@ fn level3_real_portable_smoke_and_rejection() {
     // actually lists as two XDP entries.
     let source = tmp.path().join("just_drop.c");
     fs::write(&source, "#include <bpf/bpf_helpers.h>\nSEC(\"xdp\") int one(struct xdp_md *ctx) { (void)ctx; return XDP_DROP; }\nSEC(\"xdp1\") int two(struct xdp_md *ctx) { (void)ctx; return XDP_PASS; }\nchar LICENSE[] SEC(\"license\") = \"GPL\";\n").unwrap();
-    let duplicate = build(&root, &dir, &["--inputs", source.to_str().unwrap()])
+    let duplicate = build(&dir, &["--inputs", source.to_str().unwrap()])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&duplicate.stdout);
@@ -267,7 +262,18 @@ fn level4_archives_and_reference_links() {
     fs::create_dir(&sys_temp).unwrap();
     let archives = base.join("archives");
     let unpacked = base.join("unpacked");
-    success(&mut build(&root, &built, &[]));
+    let ninja = base.join("ninja observed after build");
+    let original_ninja = b"#!/bin/sh\nexec \"$MCU_TEST_REAL_NINJA\" \"$@\"\n";
+    fs::write(&ninja, original_ninja).unwrap();
+    fs::set_permissions(&ninja, fs::Permissions::from_mode(0o755)).unwrap();
+    success(build(&built, &[]).env("LIBBPF_MCU_NINJA", &ninja).env(
+        "MCU_TEST_REAL_NINJA",
+        std::env::var_os("LIBBPF_MCU_NINJA").unwrap_or_else(|| "ninja".into()),
+    ));
+    // The graph still names this Ninja path. Replacing its contents makes the
+    // digest collected by prepare unsuitable as evidence of what built the images.
+    let replacement = b"#!/bin/sh\nexit 97\n";
+    fs::write(&ninja, replacement).unwrap();
     let tools = built_binary(&root, "mcu-dev-tools", "tools");
     let object = built_binary(&root, "mcu-object", "mcu-object");
     let programs = mcu::program_sources(&root).unwrap();
@@ -298,10 +304,26 @@ fn level4_archives_and_reference_links() {
     );
     let ledger: serde_json::Value =
         serde_json::from_slice(&fs::read(archives.join("release.json")).unwrap()).unwrap();
+    assert_eq!(ledger["schema"], "libbpf-mcu.release.v2");
+    assert!(ledger.get("commit").is_none() && ledger.get("toolchain").is_none());
+    let observations = &ledger["archive_preparation"];
+    assert_eq!(
+        observations["graph_sha256"],
+        mcu_image::sha256_hex(&fs::read(built.join("build.ninja")).unwrap())
+    );
+    assert_eq!(observations["checkout_commit"].as_str().unwrap().len(), 40);
+    assert_eq!(
+        observations["graph_tools"]["ninja"]["sha256"],
+        mcu_image::sha256_hex(replacement)
+    );
+    assert_ne!(
+        observations["graph_tools"]["ninja"]["sha256"],
+        mcu_image::sha256_hex(original_ninja)
+    );
     for name in [
         "clang", "lld", "objdump", "ninja", "prevail", "object", "jit",
     ] {
-        let field = &ledger["toolchain"][name];
+        let field = &observations["graph_tools"][name];
         assert_eq!(field["sha256"].as_str().unwrap().len(), 64);
         assert!(Path::new(field["path"].as_str().unwrap()).is_absolute());
     }

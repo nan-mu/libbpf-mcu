@@ -12,4 +12,4 @@ Each XDP entry consumes a fixed 8258-byte mutable EXB2 request, validates the he
 | `bsort` | Bubble sort u32 words in scratch |
 | `strcmp` | Compare two bounded NUL-terminated strings |
 
-Build a selected program with `./mcu build -c copy`. [Buffer layout and known request](../../docs/benchmarks.md#exb2-compute-abi)
+Build a selected program with `cargo run --locked -p mcu -- build -c copy`. [Buffer layout and known request](../../docs/benchmarks.md#exb2-compute-abi)

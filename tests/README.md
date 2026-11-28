@@ -4,12 +4,16 @@ Production programs live under `experiments/`. This directory contains explicit 
 
 | Layer | Entry point | Scope |
 | --- | --- | --- |
-| L0 | `./mcu test --level 0` | Rust unit tests for library and binary logic |
-| L1 | `./mcu test --level 1` | Binary and public library contracts, JIT arithmetic and ABI checks |
-| L2 | `./mcu test --level 2` | Real Ninja incrementality, verifier substitution, interruption and failure cases |
-| L3 | `./mcu test --level 3` | Real LLVM, PREVAIL and Ninja for three programs and rejected inputs |
-| L4 | `./mcu test --level 4` | Clean-checkout release matrix, archive verification, two-layout direct-link comparisons |
+| L0–L1 | `cargo test --locked --workspace --exclude xpost-jit-oracle` | Rust unit tests, binary contracts, JIT arithmetic and ABI checks |
+| L2 | `cargo test --locked -p mcu --test pipeline level2_ -- --ignored --nocapture` | Real Ninja incrementality, verifier substitution and failure cases |
+| L3 | `cargo test --locked -p mcu --test pipeline level3_ -- --ignored --nocapture` | Real LLVM, PREVAIL and Ninja for three programs and rejected inputs |
+| L4 | `cargo test --locked -p mcu --test pipeline level4_ -- --ignored --nocapture` | Clean-checkout release matrix, archive verification, two-layout direct-link comparisons |
 
-Use `./mcu test --all` for all layers. Run the [independent JIT Oracle](../jit/oracle/README.md) with `cargo test --locked -p xpost-jit-oracle --test differential`. The Oracle writes per-case results and distinguishes unsupported and inconclusive outcomes from passes.
+Use `cargo test --locked -p mcu-jit --test xdp -- --ignored --nocapture` to compile fixture C sources with Clang, run PREVAIL, and check JIT results against expected return values, packets and map writes. Run the [independent JIT Oracle](../jit/oracle/README.md) with `cargo test --locked -p xpost-jit-oracle --test differential`. The Oracle writes per-case results and distinguishes unsupported and inconclusive outcomes from passes.
 
-`sh jit/scripts/check-xdp.sh` runs the JIT fixture checks with PREVAIL. For optional Sail diagnostics, `linker/sail/build.sh source.c entry_symbol` links a selected C fixture for the simulator. `cargo run --locked -p mcu-dev-tools -- stack-budget --help` documents the stack estimate CLI.
+For an optional Sail diagnostic, link a C program to the HTIF runtime with the command below. Pass the resulting ELF to your RV32 Sail simulator. The stack estimator is available through `cargo run --locked -p mcu-dev-tools -- stack-budget --help`.
+
+```sh
+cargo run --locked -p mcu-dev-tools -- sail-image \
+  --source experiments/just_tx/just_tx.c --entry just_tx --work-dir /tmp/mcu-sail
+```

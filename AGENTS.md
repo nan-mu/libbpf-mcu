@@ -6,6 +6,6 @@
 - Keep stable Ninja intermediates under the selected build root and one `report.md` per program. Keep private intermediates out of archives. Validate relative paths, lengths, hashes and image contents.
 - Use the [architecture map](docs/architecture.md) for tool ownership.
 
-Run `./mcu test` for implementation changes and the applicable [higher test layers](tests/README.md). Verify generated artifacts with `cargo run --locked -p mcu-object -- verify --build-dir DIR`. Check docs against the actual CLI and formats. Run `git diff --check`. Record compilation, PREVAIL acceptance, byte integrity, independent semantics and device execution separately.
+Run `cargo test --locked --workspace --exclude xpost-jit-oracle` for implementation changes. For changes to the build, release or generated code, run the applicable [real toolchain and Oracle tests](tests/README.md). Verify generated artifacts with `cargo run --locked -p mcu-object -- verify --build-dir DIR`. Check docs against the actual CLI and formats. Run `git diff --check`. Record compilation, PREVAIL acceptance, byte integrity, independent semantics and device execution separately.
 
 An explicit publication request authorizes a GitHub Release from clean `main`. Build the complete matrix in a fresh worktree, then archive and verify it locally. Follow the [publication procedure](docs/artifacts.md#publish-program-artifacts) for tags, upload and retry.

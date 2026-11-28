@@ -34,7 +34,7 @@ const NETWORK: &[(&str, &str, usize)] = &[
     ("just_tx", DEFAULT_PACKET, 74),
 ];
 
-/// Extra inputs that reach paths the check-xdp.sh packets do not: a map hit,
+/// Extra inputs that reach paths the basic fixture packets do not: a map hit,
 /// a zero divisor, and a truncated header.
 const EXTRA: &[(&str, &str, &str)] = &[
     ("div2", "zero-divisor", "0800000000000000"),
@@ -78,6 +78,45 @@ fn exb2_packets(cases: &mut Vec<J>) {
                 }),
             );
         }
+    }
+}
+
+fn exb2_copy_bounds(cases: &mut Vec<J>) {
+    // The protocol caps both copy regions at 4096 bytes. Compare all 8258
+    // bytes to check the input, the scratch write, and the trailing padding.
+    let mut packet = vec![0xcc; 8258];
+    packet[..64].fill(0);
+    packet[..8].copy_from_slice(b"EXB2\x02\x00\x40\x00");
+    for (at, value) in [(8, 3u32), (12, 4096), (16, 1), (28, 4096), (32, 4096), (36, u32::MAX)] {
+        packet[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, byte) in packet[64..4160].iter_mut().enumerate() {
+        *byte = index as u8;
+    }
+    let mut expected = packet.clone();
+    expected[4160..8256].copy_from_slice(&packet[64..4160]);
+    for (at, value) in [(36, 0u32), (40, 1), (44, 4096), (52, 0xc1cb_2269)] {
+        expected[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    run_program(cases, "copy", "max-length", &packet, Some(ExpectedPacket {
+        r0: 2, bytes: &expected, array: None
+    }));
+    for (label, at, invalid, status) in [
+        ("bad-header", 4, 2u32, 2u32),
+        ("n-too-large", 12, 4097, 4),
+        ("zero-rounds", 16, 0, 4),
+        ("too-many-rounds", 16, 65537, 4),
+        ("bad-variant", 20, 1, 6),
+        ("bad-input-length", 28, 4095, 5),
+        ("bad-scratch-length", 32, 4097, 5),
+    ] {
+        let mut rejected = packet.clone();
+        rejected[at..at + 4].copy_from_slice(&invalid.to_le_bytes());
+        let mut expected = rejected.clone();
+        expected[36..40].copy_from_slice(&status.to_le_bytes());
+        run_program(cases, "copy", label, &rejected, Some(ExpectedPacket {
+            r0: 0, bytes: &expected, array: None
+        }));
     }
 }
 
@@ -164,6 +203,7 @@ fn program_suite(cases: &mut Vec<J>) {
         run_program(cases, name, label, &unhex(packet_hex), None);
     }
     exb2_packets(cases);
+    exb2_copy_bounds(cases);
     exb2_kernel_answers(cases);
     network_packets(cases);
 }
@@ -175,7 +215,7 @@ fn run_program(
     packet: &[u8],
     expected: Option<ExpectedPacket<'_>>,
 ) {
-    let obj = root().join("build").join(format!("{name}.bpf.o"));
+    let obj = PathBuf::from(env!("OUT_DIR")).join(format!("{name}.bpf.o"));
     let name = format!("{name}/{label}");
     let packet_hex = hex(packet);
     let src = match xpost_jit::load_bpf(&obj, None) {
