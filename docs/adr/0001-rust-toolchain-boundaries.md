@@ -1,0 +1,28 @@
+# ADR 0001: One Rust workspace, distinct compiler and development tools
+
+Status: accepted; PR8 review revision
+Date: 2026-11-28
+
+## Context
+
+libbpf-mcu combines Python build steps, existing Rust ELF helpers and a separate JIT project. The user wants a directly auditable Ninja graph, individually testable transformations, and an end-to-end build entry without manual installation. Moving the scripts verbatim to Rust would preserve the old boundaries and hidden command chains.
+
+## Decision
+
+Use one Cargo workspace and lockfile, with four executable targets (working names): the specialized build system `mcu`, compiler `mcu-jit`, object processor `mcu-object`, and developer tool `tools` with a `release` subcommand. The build system exposes `build`, `clean`, and `doctor`; no `test`, configure, public bootstrap or tool-dispatch subcommand. Invoke the Rust binary directly through Cargo (for example, `cargo run --locked -p mcu -- build`); no repository launcher script or manual installation of project tools. Use Cargo's native test harness: unit tests belong beside their implementation in `src`, real executable/toolchain integration tests in the appropriate crate's `tests` directory. Do not introduce a separate test dispatcher. Internally, build has two distinct, separately testable stages: generate/update the Ninja graph from resolved inputs, then execute that exact graph with Ninja. Generation failure must not execute a previous graph. The single public build command runs both stages automatically; there is no public configure command. Cargo and Ninja manage incremental work.
+
+Ninja directly invokes LLVM and the internal compilation executables. BPF compilation and PREVAIL verification are separate nodes; an explicit, narrowly scoped Rust verifier adapter may invoke PREVAIL to handle dynamic entry selection, timeout and verdict parsing. Domain parsing belongs in Rust, never in shell sed/awk logic. Cross-node artifacts remain declared Ninja inputs and outputs; see [Build file lifetime](#build-file-lifetime). No adapter may hide a second build pipeline. JIT remains independent. Object processing groups ELF, BPF/BTF, image/container, disassembly preparation and report generation. Report aggregates actual outputs and the concrete build recipes used for them; disassembly is its interface and llvm-objdump is explicitly invoked by Ninja rules. The report is not an execution-history ledger. A rule may group a cohesive operation when its actual file inputs and outputs are explicit. Generated graphs are human-readable and commented. The work directory is the libbpf-mcu checkout root, not the build directory. External tool paths are resolved absolute paths; internal executables are referenced directly at their actual Cargo output paths. Do not create .work, copy/link tools into build/, maintain a duplicate staging tree, or add a parallel command/verification/state ledger. Keep only genuine compiler dependencies, native Ninja state and existing artifact contracts. Object provides domain transformations; mcu prepares and invokes Ninja, with only necessary input checks and failure cleanup. Ordinary program indexes and integrity checks are not Release-only functionality. The developer executable orchestrates release preparation, verification and version management outside the normal build graph.
+
+Executable boundaries are not library boundaries. Extract genuinely shared semantics and data contracts into independent Rust library crates with a single authoritative implementation. Consumers may depend on those libraries; no dependency on executable entry points or cycle, no generic dumping ground for unrelated helpers. Independently test feature contracts and algorithms, real Ninja scheduling, real-toolchain smoke builds and full release matrices.
+
+## Build file lifetime
+
+Ordinary builds, verification, binding/reference work and report generation do not use system temporary directories, per-invocation scratch directories, or an intermediate tree cleaned after each build. File-backed intermediate products have stable paths under the selected build directory (e.g. `build/intermediates/<program>/`) and remain available across builds until replaced or explicitly cleaned. Report disassembly inputs and outputs follow the same rule; declare actual cross-node dependencies to Ninja. In-memory processing is allowed and no needless files need be introduced. Ordinary program output directories retain the established archive contract; intermediate files are outside those directories.
+
+Only the release archive preparation/extraction/verification work may use an owned system temporary directory; transfer validated archives and required release metadata to the requested destination, then clean up that temporary directory, including on failure where possible. Do not duplicate the program output tree persistently. This supersedes the previous ephemeral report-scratch proposal.
+
+## Consequences
+
+More explicit file contracts and graph edges are needed; algorithms can be exercised without the whole build. Existing program archive, portable-image and Compact ELF wire contracts stay in force. Binding remains a separate reusable operation on published bytes, and independent direct linking remains a test reference, not a second production compiler. Normal builds never depend on the developer executable. Names and exact crate boundaries are not frozen.
+
+Source: libbpf-mcu OpenSpec design conversation, 2026-11-25 through 2026-11-28: user approved the four-program architecture, direct Ninja invocation, removal of configure and the source snapshot generator; final confirmation requires independent shared Rust libraries.
