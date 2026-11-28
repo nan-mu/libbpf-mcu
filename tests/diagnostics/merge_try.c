@@ -1,7 +1,8 @@
 /* merge_try — ethertype diamond with shared bounds-check suffix.
  *
  * Build:
- *   ./mcu build --modes llvm-aot --inputs tests/diagnostics/merge_try.c
+ *   cargo run --locked -p mcu -- build --modes llvm-aot \
+ *     --inputs tests/diagnostics/merge_try.c
  */
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
