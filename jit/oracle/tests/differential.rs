@@ -34,7 +34,7 @@ const NETWORK: &[(&str, &str, usize)] = &[
     ("just_tx", DEFAULT_PACKET, 74),
 ];
 
-/// Extra inputs that reach paths the check-xdp.sh packets do not: a map hit,
+/// Extra inputs that reach paths the basic fixture packets do not: a map hit,
 /// a zero divisor, and a truncated header.
 const EXTRA: &[(&str, &str, &str)] = &[
     ("div2", "zero-divisor", "0800000000000000"),
@@ -81,6 +81,93 @@ fn exb2_packets(cases: &mut Vec<J>) {
     }
 }
 
+fn exb2_copy_bounds(cases: &mut Vec<J>) {
+    // The protocol caps both copy regions at 4096 bytes. Compare all 8258
+    // bytes to check the input, the scratch write, and the trailing padding.
+    let mut packet = vec![0xcc; 8258];
+    packet[..64].fill(0);
+    packet[..8].copy_from_slice(b"EXB2\x02\x00\x40\x00");
+    for (at, value) in [(8, 3u32), (12, 4096), (16, 1), (28, 4096), (32, 4096), (36, u32::MAX)] {
+        packet[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, byte) in packet[64..4160].iter_mut().enumerate() {
+        *byte = index as u8;
+    }
+    let mut expected = packet.clone();
+    expected[4160..8256].copy_from_slice(&packet[64..4160]);
+    for (at, value) in [(36, 0u32), (40, 1), (44, 4096), (52, 0xc1cb_2269)] {
+        expected[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    run_program(cases, "copy", "max-length", &packet, Some(ExpectedPacket {
+        r0: 2, bytes: &expected, array: None
+    }));
+    for (label, at, invalid, status) in [
+        ("bad-header", 4, 2u32, 2u32),
+        ("n-too-large", 12, 4097, 4),
+        ("zero-rounds", 16, 0, 4),
+        ("too-many-rounds", 16, 65537, 4),
+        ("bad-variant", 20, 1, 6),
+        ("bad-input-length", 28, 4095, 5),
+        ("bad-scratch-length", 32, 4097, 5),
+    ] {
+        let mut rejected = packet.clone();
+        rejected[at..at + 4].copy_from_slice(&invalid.to_le_bytes());
+        let mut expected = rejected.clone();
+        expected[36..40].copy_from_slice(&status.to_le_bytes());
+        run_program(cases, "copy", label, &rejected, Some(ExpectedPacket {
+            r0: 0, bytes: &expected, array: None
+        }));
+    }
+}
+
+fn exb2_kernel_answers(cases: &mut Vec<J>) {
+    // Known one-round answers from the protocol and small inputs. The two
+    // executors must both match the full expected packet, including digest.
+    let caseset: &[(&str, u32, u32, &[u8], u32, u32)] = &[
+        ("prime", 1, 10, &[], 4, 7),
+        ("log2", 2, 3, &[1, 0, 0, 0, 8, 0, 0, 0, 64, 0, 0, 0], 9, 136),
+        ("fletcher32", 4, 3, &[1, 0, 2], 0x0004_0003, 0),
+        ("strcmp", 6, 2, b"ab\0ac\0", u32::MAX, 2),
+    ];
+    fn field(packet: &mut [u8], at: usize, value: u32) {
+        packet[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for &(name, task, n, input, lo, hi) in caseset {
+        let mut packet = vec![0u8; 8258];
+        packet[0..8].copy_from_slice(b"EXB2\x02\x00\x40\x00");
+        field(&mut packet, 8, task);
+        field(&mut packet, 12, n);
+        field(&mut packet, 16, 1);
+        field(&mut packet, 28, input.len() as u32);
+        field(&mut packet, 36, u32::MAX);
+        packet[64..64 + input.len()].copy_from_slice(input);
+        let mut expected = packet.clone();
+        for (at, value) in [
+            (36, 0),
+            (40, 1),
+            (44, lo),
+            (48, hi),
+            (
+                52,
+                (0x811c_9dc5u32.rotate_left(5) ^ lo).wrapping_add(hi ^ 0x9e37_79b9),
+            ),
+        ] {
+            field(&mut expected, at, value);
+        }
+        run_program(
+            cases,
+            name,
+            "known-answer",
+            &packet,
+            Some(ExpectedPacket {
+                r0: 2,
+                bytes: &expected,
+                array: None,
+            }),
+        );
+    }
+}
+
 fn network_packets(cases: &mut Vec<J>) {
     let fixtures = root().join("../../tests/fixtures/network");
     for &(name, short, len) in NETWORK {
@@ -116,6 +203,8 @@ fn program_suite(cases: &mut Vec<J>) {
         run_program(cases, name, label, &unhex(packet_hex), None);
     }
     exb2_packets(cases);
+    exb2_copy_bounds(cases);
+    exb2_kernel_answers(cases);
     network_packets(cases);
 }
 
@@ -126,7 +215,7 @@ fn run_program(
     packet: &[u8],
     expected: Option<ExpectedPacket<'_>>,
 ) {
-    let obj = root().join("build").join(format!("{name}.bpf.o"));
+    let obj = PathBuf::from(env!("OUT_DIR")).join(format!("{name}.bpf.o"));
     let name = format!("{name}/{label}");
     let packet_hex = hex(packet);
     let src = match xpost_jit::load_bpf(&obj, None) {

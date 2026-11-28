@@ -1,0 +1,21 @@
+[package]
+name = "mcu-object"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+mcu-bpf.workspace = true
+mcu-image.workspace = true
+mcu-index.workspace = true
+mcu-report.workspace = true
+mcu-deps = { path = "../mcu-deps" }
+
+
+serde_json.workspace = true
+xpost-elf.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

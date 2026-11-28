@@ -5,9 +5,5 @@ edition = "2021"
 publish = false
 description = "Userspace eBPF to RV32IM JIT (unlinked)"
 
-[[bin]]
-name = "xpost-jit"
-path = "src/main.rs"
-
 [lib]
 path = "src/lib.rs"

@@ -1,7 +1,8 @@
 /* merge_try — ethertype diamond with shared bounds-check suffix.
  *
  * Build:
- *   pixi run build rv32imc --firmware <firmware.elf> -c merge_try
+ *   cargo run --locked -p mcu -- build --modes llvm-aot \
+ *     --inputs tests/diagnostics/merge_try.c
  */
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>

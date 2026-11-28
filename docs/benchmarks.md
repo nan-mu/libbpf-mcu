@@ -1,6 +1,6 @@
 # Benchmark programs
 
-The default build publishes raw BPF for these twelve programs. Each firmware deployment is built separately for its target slot.
+The default build produces raw BPF and portable images for these twelve programs. XPOST binds deployment images to the firmware slot.
 
 | Programs | Behavior and source |
 | --- | --- |
@@ -16,7 +16,7 @@ The November 12 networking samples used XBT1 and a different measurement setup. 
 
 ## EXB2 compute ABI
 
-Allocate one mutable 8258-byte buffer with a 64-byte little-endian header. Initialize the input after the header, followed by writable scratch for `copy` or `bsort`, then pad to capacity. Hold the request stable for a single call. The XDP entry receives an `xdp_md` whose `data` and `data_end` delimit exactly that buffer. The standalone host entry, compiled with `-DEB_HOST_ENTRY`, receives the same raw buffer and byte length. Both run all `rounds` inside the call. The XDP entry returns `XDP_PASS` on success and `XDP_ABORTED` on error. Read the result in place after return. No map is involved.
+Allocate one mutable 8258-byte buffer with a 64-byte little-endian header. Initialize the input after the header, followed by writable scratch for `copy` or `bsort`, then pad to capacity. Hold the request stable for a single call. The XDP entry receives an `xdp_md` whose `data` and `data_end` delimit exactly that buffer. The independent XPOST HAL reference accepts the same raw buffer and byte length. Each program runs all `rounds` inside the call. The XDP entry returns `XDP_PASS` on success and `XDP_ABORTED` on error. Read the result in place after return. No map is involved.
 
 | Offsets | Fields |
 | --- | --- |
@@ -39,3 +39,5 @@ Allocate one mutable 8258-byte buffer with a 64-byte little-endian header. Initi
 All other variants are zero. A known request is `copy`, `n=4`, `rounds=3`, `variant=0`, `seed=1`, input and scratch lengths of 4, input `44 20 82 3c`, scratch initially `a5 a5 a5 a5`, and remaining padding set to `cc`. After `XDP_PASS`, offsets 36–55 contain `status=0`, `completed=3`, `result_lo=4`, `result_hi=0`, `digest=0x91efe859`. Scratch at offsets 68–71 contains `44 20 82 3c`. The input and padding stay unchanged.
 
 XPOST’s previous runner exchanges 32-byte values at `workload[0]` and `workload[1]`. A separate design uses 88-byte `workload_v2` values. Both need a new caller for this ABI. At cold start, build or select a container for each engine from the pinned producer artifacts and matching linked firmware, install that image in its assigned slot, and verify the known request before recording measurements. The default 7z archives supply the original eBPF objects. Device installation, runtime checks and measurement remain with XPOST. [XPOST integration PR](https://github.com/nan-mu/xpost/pull/23)
+
+The seven EXB2 RV32IMC AOT programs now include the same packet-bound checks and offset mask used in the shared C source for BPF. They change the native instruction stream and code size relative to the earlier AOT artifacts. Existing device timings apply to the artifacts that were measured. XPOST can establish the new AOT performance baseline in a later device run.

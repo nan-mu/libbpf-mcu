@@ -6,34 +6,29 @@ evidence of `jit/tests/diff.rs`, which compares the JIT against
 `jit/src/bpf_vm.rs` — a reference written in the same change, from the same
 reading of the spec.
 
-The oracle is a local fork of qmonnet/rbpf v0.4.1 at
-`/Volumes/SSD/bs/xpost/rbpf`, reached from this manifest as
-`../../../xpost/rbpf`. It is a **fork**, not upstream: it carries an MCU ABI and
-a tightened memory-window check. Its interpreter's arithmetic and jump paths
-are upstream's.
+The oracle uses the rBPF interpreter pinned in the workspace lockfile. Its executor and the JIT use separate instruction implementations.
 
 ## Run
 
 ```sh
-cargo test --manifest-path jit/oracle/Cargo.toml --release -- --nocapture
+cargo test --locked -p xpost-jit-oracle --test differential -- --nocapture
 ```
 
-`build.rs` compiles the programs listed in `jit/scripts/xdp-sources.txt` with
+`build.rs` compiles the Oracle's fixed C input set into Cargo's output directory with
 clang (`/opt/homebrew/opt/llvm/bin/clang`, override with `CLANG`). The test writes
 `jit/oracle/results.json` and exits non-zero if any case fails.
 
 Rerunnable levers:
 
 ```sh
-python3 -I jit/oracle/summarize.py jit/oracle/results.json
-python3 -I jit/oracle/query.py jit/oracle/results.json just_drop 3 pass
+cargo run -p mcu-dev-tools -- oracle-summary jit/oracle/results.json
+cargo run -p mcu-dev-tools -- oracle-query jit/oracle/results.json just_drop --status pass
 cargo run --manifest-path jit/oracle/Cargo.toml --release --example dump -- firewall
 cargo run --manifest-path jit/oracle/Cargo.toml --release --example fuzzcase -- 428
 cargo run --manifest-path jit/oracle/Cargo.toml --release --example modzero
 ```
 
-`summarize.py` groups every case by status and blame. `query.py` prints one
-case's traces, ctx patches and stack patches. `dump` prints the linked RV32
+`oracle-summary` groups cases by suite and status. `oracle-query` prints matching case records. `dump` prints the linked RV32
 image and both helper traces. `fuzzcase` reproduces one random seed and shows
 which scratch words differ. `modzero` attributes random failures to the open
 ALU32 mod/div-by-zero question (see `NOTES.md` F2).
@@ -43,7 +38,8 @@ ALU32 mod/div-by-zero question (see `NOTES.md` F2).
 Read `results.json` for each run's case counts and statuses. The baseline
 includes an open ALU32 mod/div-by-zero disagreement about the destination's
 high 32 bits. The `modzero` example traces it in the seeded cases. See
-`NOTES.md` F2. With overflow checks enabled, rbpf's `NEG64` panics on
+`NOTES.md` F2. The default test profile produced 27 failures and 523 unsupported
+cases at the PR8 review baseline. With overflow checks enabled, rbpf's `NEG64` panics on
 `i64::MIN` and those cases are recorded as unsupported.
 
 ## What is compared
@@ -133,7 +129,7 @@ bridge still reads stack keys and compares normalized helper arguments and map
 effects. `results.json` includes full and short cases for `bsort`, `noop`, and
 `copy`, with each engine checked against a known response. The `case_mark` and
 `just_tx` fixtures check complete response bytes, and `just_tx` checks
-`rxcnt[17]` separately on each engine. Use `python3 jit/oracle/query.py
+`rxcnt[17]` separately on each engine. Use `cargo run -p mcu-dev-tools -- oracle-query
 jit/oracle/results.json bsort 10 pass` to see both sort cases.
 
 Under `mcu`, `register_allowed_memory` and `register_helper` are inert;

@@ -1,0 +1,31 @@
+# Toolchain architecture
+
+The tool boundaries follow [ADR 0001](https://gitea.nas.nan-mu.cc/mcp/libbpf-mcu/src/commit/71ec39c0e96063e70301f5fe5d4f41b667019abe/docs/adr/0001-rust-toolchain-boundaries.md).
+
+```text
+cargo run --locked -p mcu -- build
+  Cargo reports executable locations
+  mcu checks and claims the output directory
+  mcu Generate writes the graph and zero-address linker scripts
+  mcu Execute launches Ninja from the checkout root
+    Clang -> original BPF ELF -> mcu-object PREVAIL gate
+                                     |
+                          accepted BPF object and source
+                            /         |               \
+   Clang RV32IMC -> LLD -> AOT       mcu-jit           rBPF
+                           |         |                 ^
+                           +---------|-----------------+
+                           canonical AOT map layout
+                           \         |                /
+                             llvm-objdump and report
+                                       |
+                                   v3 index
+
+tools release -> finished program directories -> verified 7z archives
+mcu-object bind -> selected indexed image pair + target layout -> Compact ELF V0
+tools reference -> archived objects + target layout -> independent direct link
+```
+
+`mcu-bpf` parses original eBPF and BTF, invokes PREVAIL and rewrites rBPF map references. `mcu-image` owns portable layouts, ELF extraction, fixups and address binding. `mcu-index` validates indexed artifact paths and contents. `mcu-report` verifies the disassembly bytes against ELF sections and renders Markdown. `mcu-project` shares program discovery, build locking and resolved tool paths. `mcu-deps` restricts Clang depfiles to source and target SDK paths. The host JIT compiler remains a library in `jit/`.
+
+Inspect `build/build.ninja` for the actual inputs and outputs. Ninja owns scheduling and incremental execution. Raw objects, depfiles, linked ELFs, report inputs and linker scripts persist under `build/intermediates/`. See [build and clean](artifacts.md#build-and-clean) for the output directory lifecycle. The binder validates the indexed image pair and modifies the archived native bytes for the requested layout. The independent reference asks LLD or the JIT link API to link the original objects at those addresses.

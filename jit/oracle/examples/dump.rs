@@ -9,8 +9,7 @@ use xpost_jit_oracle::run;
 
 fn main() {
     let name = std::env::args().nth(1).unwrap_or_else(|| "xdp_drop".into());
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let obj = root.join("build").join(format!("{name}.bpf.o"));
+    let obj = PathBuf::from(env!("OUT_DIR")).join(format!("{name}.bpf.o"));
     let src = xpost_jit::load_bpf(&obj, None).unwrap();
     println!("section {} insns {}", src.section, src.insns.len());
     let mut syms: Vec<_> = src.symbols.iter().collect();
