@@ -1,4 +1,9 @@
-use std::{env, fs, path::Path, process::Command};
+use std::{
+    env, fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const PACKET: &str = "00000000000000000000000008004500002c00000000401100007f0000017f000001";
 
@@ -19,6 +24,37 @@ fn check(command: &mut Command, required: bool) {
     );
 }
 
+fn test_verifier(root: &Path) -> PathBuf {
+    if let Some(path) = env::var_os("PREVAIL").filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    let relative = Path::new("prevail/bin/prevail");
+    let executable = |path: &Path| {
+        path.metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    };
+    let local = root.join(relative);
+    if executable(&local) {
+        return local;
+    }
+    // A linked worktree can have an empty submodule while the main checkout
+    // has the verifier already built.
+    if let Ok(output) = Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        && output.status.success()
+        && let Ok(common_dir) = std::str::from_utf8(&output.stdout)
+        && let Some(main) = Path::new(common_dir.trim_end_matches('\n')).parent()
+    {
+        let fallback = main.join(relative);
+        if executable(&fallback) {
+            return fallback;
+        }
+    }
+    panic!("cannot find PREVAIL; set PREVAIL to a built verifier executable");
+}
+
 #[test]
 #[ignore = "requires Clang with BPF support and real PREVAIL"]
 fn verified_c_programs_match_xdp_packet_expectations() {
@@ -29,17 +65,14 @@ fn verified_c_programs_match_xdp_packet_expectations() {
     let scratch = tempfile::tempdir().unwrap();
     let clang = env::var_os("LIBBPF_MCU_CLANG")
         .or_else(|| env::var_os("CLANG"))
-        .unwrap_or_else(|| {
-            let brew = Path::new("/opt/homebrew/opt/llvm/bin/clang");
-            if brew.is_file() {
-                brew.as_os_str().into()
-            } else {
-                "clang".into()
-            }
-        });
-    let verifier = env::var_os("PREVAIL")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| root.join("prevail/bin/prevail"));
+        .map(PathBuf::from)
+        .unwrap_or_else(mcu_project::preferred_clang);
+    let verifier = test_verifier(&root);
+    println!(
+        "Clang: {}\nPREVAIL: {}",
+        clang.display(),
+        verifier.display()
+    );
     let mut sources = mcu_project::program_sources(&root).unwrap();
     sources.extend(
         [

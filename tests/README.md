@@ -11,9 +11,11 @@ Production programs live under `experiments/`. This directory contains explicit 
 
 Use `cargo test --locked -p mcu-jit --test xdp -- --ignored --nocapture` to compile fixture C sources with Clang, run PREVAIL, and check JIT results against expected return values, packets and map writes. Run the [independent JIT Oracle](../jit/oracle/README.md) with `cargo test --locked -p xpost-jit-oracle --test differential`. The Oracle writes per-case results and distinguishes unsupported and inconclusive outcomes from passes.
 
-For an optional Sail diagnostic, link a C program to the HTIF runtime with the command below. Pass the resulting ELF to your RV32 Sail simulator. The stack estimator is available through `cargo run --locked -p mcu-dev-tools -- stack-budget --help`.
+Set `PREVAIL` to an executable if it is outside the checkout or the main checkout associated with a linked worktree. Set `LIBBPF_MCU_CLANG` to select an LLVM Clang with the BPF and RISC-V backends. The tools prefer Homebrew LLVM on macOS.
+
+For an optional Sail diagnostic, use an existing build root and link a C program to the HTIF runtime with the command below. Pass the resulting ELF to your RV32 Sail simulator. The stack estimator is available through `cargo run --locked -p mcu-dev-tools -- stack-budget --help`.
 
 ```sh
 cargo run --locked -p mcu-dev-tools -- sail-image \
-  --source experiments/just_tx/just_tx.c --entry just_tx --work-dir /tmp/mcu-sail
+  --source experiments/just_tx/just_tx.c --entry just_tx --work-dir build/intermediates/sail
 ```

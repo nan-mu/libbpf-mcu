@@ -83,8 +83,6 @@ fn executable(name: &str, key: &str, preferred: &[&Path]) -> Result<PathBuf> {
         .with_context(|| format!("cannot find {name}; set {key}"))
 }
 
-const LLVM: &[&str] = &["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"];
-
 fn cargo(root: &Path) -> Command {
     let mut cmd = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cmd.current_dir(root);
@@ -124,7 +122,10 @@ fn built_tools(root: &Path) -> Result<BTreeMap<String, PathBuf>> {
 }
 
 fn tools(root: &Path) -> Result<Tools> {
-    let llvm = LLVM.iter().map(Path::new).collect::<Vec<_>>();
+    let llvm = mcu_project::LLVM_BIN_DIRS
+        .iter()
+        .map(Path::new)
+        .collect::<Vec<_>>();
     let mut built = built_tools(root)?;
     Ok(Tools {
         clang: executable("clang", "LIBBPF_MCU_CLANG", &llvm)?,

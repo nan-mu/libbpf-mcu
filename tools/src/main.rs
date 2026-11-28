@@ -56,8 +56,8 @@ enum Action {
         work_dir: PathBuf,
         #[arg(long)]
         output: Option<PathBuf>,
-        #[arg(long, env = "LIBBPF_MCU_CLANG", default_value = "clang")]
-        clang: PathBuf,
+        #[arg(long, env = "LIBBPF_MCU_CLANG")]
+        clang: Option<PathBuf>,
     },
     #[command(flatten)]
     Diagnostic(diagnostics::Action),
@@ -121,7 +121,14 @@ fn main() -> Result<()> {
             work_dir,
             output,
             clang,
-        } => sail::link(&root, &source, &entry, &work_dir, output.as_deref(), &clang),
+        } => sail::link(
+            &root,
+            &source,
+            &entry,
+            &work_dir,
+            output.as_deref(),
+            &clang.unwrap_or_else(mcu_project::preferred_clang),
+        ),
         Action::Release { command } => match command {
             ReleaseAction::Prepare {
                 build_dir,

@@ -1,7 +1,24 @@
-use std::path::{Path, PathBuf};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+pub const LLVM_BIN_DIRS: &[&str] = &["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"];
+
+pub fn preferred_clang() -> PathBuf {
+    LLVM_BIN_DIRS
+        .iter()
+        .map(|dir| Path::new(dir).join("clang"))
+        .find(|path| {
+            path.metadata().is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+        .unwrap_or_else(|| PathBuf::from("clang"))
+}
 
 #[derive(Deserialize, Serialize)]
 pub struct Tools {
